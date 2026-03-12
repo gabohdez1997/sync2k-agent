@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 
 // Importar módulo de base de datos
-const { closePool } = require('./db');
+const { getServers, closeAllPools } = require('./db');
 
 // Las rutas se cargarán bajo demanda (lazy loading) en el bloque de endpoints
 
@@ -56,8 +56,8 @@ app.use((req, res) => {
 // ==========================================
 function gracefulShutdown() {
     console.log('\nRecibida señal de apagado (SIGINT/SIGTERM). Cerrando servicios...');
-    closePool().then(() => {
-        console.log('✅ Conexión a SQL Server cerrada correctamente.');
+    closeAllPools().then(() => {
+        console.log('✅ Conexiones a SQL Server cerradas correctamente.');
         process.exit(0);
     }).catch(err => {
         console.error('❌ Error al cerrar la conexión:', err);
@@ -71,5 +71,16 @@ process.on('SIGTERM', gracefulShutdown);
 // Iniciar express
 app.listen(PORT, () => {
     console.log(`\n🚀 Agente "Sync2k" ejecutándose en el puerto ${PORT}`);
-    console.log(`🔑 Para consultar, usar header "x-api-key: ${API_KEY}"\n`);
+    
+    const configuredServers = getServers();
+    if (configuredServers.length > 0) {
+        console.log(`📡 Sedes configuradas (${configuredServers.length}):`);
+        configuredServers.forEach(s => {
+            console.log(`   - [${s.id}] ${s.name} (${s.server})`);
+        });
+    } else {
+        console.log(`⚠️ No hay sedes configuradas en config/servers.json`);
+    }
+
+    console.log(`\n🔑 Para consultar, usar header "x-api-key: ${API_KEY}"\n`);
 });

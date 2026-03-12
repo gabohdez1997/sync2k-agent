@@ -6,3 +6,4 @@ tmp/
 .idea/
 dist/
 build/
+config/servers.json

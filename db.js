@@ -70,11 +70,13 @@ async function closeAllPools() {
     }
 }
 
-// Inicializar el pool principal al arrancar
+// Inicializar pools de todos los servidores al arrancar
 if (servers.length > 0) {
-    getPool(servers[0].id).catch(err => {
-        console.warn(`⚠️ Error al conectar al servidor principal (${servers[0].id}):`, err.message);
-    });
+    Promise.all(servers.map(s => 
+        getPool(s.id).catch(err => {
+            console.warn(`⚠️ Error al conectar al servidor "${s.name}" (${s.id}):`, err.message);
+        })
+    ));
 }
 
 module.exports = {

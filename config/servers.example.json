@@ -1,0 +1,26 @@
+[
+  {
+    "id": "G1",
+    "name": "Sede Principal",
+    "server": "IP_O_HOSTNAME_DEL_SERVIDOR",
+    "database": "NOMBRE_DE_LA_BASE_DE_DATOS",
+    "user": "USUARIO_SQL",
+    "password": "CONTRASEÑA_SQL",
+    "options": {
+      "encrypt": false,
+      "trustServerCertificate": true
+    }
+  },
+  {
+    "id": "G2",
+    "name": "Sucursal Ejemplo",
+    "server": "IP_O_HOSTNAME_SUCURSAL",
+    "database": "NOMBRE_DE_LA_BASE_DE_DATOS",
+    "user": "USUARIO_SQL",
+    "password": "CONTRASEÑA_SQL",
+    "options": {
+      "encrypt": false,
+      "trustServerCertificate": true
+    }
+  }
+]
