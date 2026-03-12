@@ -1,56 +1,85 @@
 const sql = require('mssql');
+const fs = require('fs');
+const path = require('path');
 
-const dbConfig = {
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    server: process.env.DB_SERVER,
-    database: process.env.DB_NAME,
-    options: {
-        encrypt: process.env.DB_ENCRYPT === 'true',
-        trustServerCertificate: true,
-        enableArithAbort: true
-    },
-    pool: {
-        max: 10,
-        min: 0,
-        idleTimeoutMillis: 30000
-    }
-};
-
-let poolPromise;
-
-function getPool() {
-    if (!poolPromise) {
-        console.log('Conectando a SQL Server...');
-        poolPromise = new sql.ConnectionPool(dbConfig)
-            .connect()
-            .then(pool => {
-                console.log('✅ Conexión a SQL Server establecida exitosamente.');
-                return pool;
-            })
-            .catch(err => {
-                console.error('❌ Error crítico al intentar conectar con SQL Server:', err);
-                poolPromise = null;
-                throw err;
-            });
-    }
-    return poolPromise;
+// Cargar configuración de servidores
+const serversPath = path.join(__dirname, 'config', 'servers.json');
+let servers = [];
+try {
+    servers = JSON.parse(fs.readFileSync(serversPath, 'utf8'));
+} catch (err) {
+    console.error('❌ Error cargando config/servers.json:', err);
 }
 
-function closePool() {
-    if (poolPromise) {
-        return poolPromise.then(pool => pool.close());
+const pools = new Map();
+
+/**
+ * Obtiene o crea un pool de conexiones para un servidor específico
+ */
+async function getPool(serverId) {
+    const config = serverId ? servers.find(s => s.id === serverId) : servers[0];
+    
+    if (!config) {
+        throw new Error(`Servidor con ID "${serverId}" no configurado.`);
     }
-    return Promise.resolve();
+
+    const id = config.id;
+
+    if (!pools.has(id)) {
+        const dbConfig = {
+            user: config.user,
+            password: config.password,
+            server: config.server,
+            database: config.database,
+            options: {
+                encrypt: config.options ? config.options.encrypt : false,
+                trustServerCertificate: true,
+                enableArithAbort: true
+            },
+            pool: {
+                max: 10,
+                min: 0,
+                idleTimeoutMillis: 30000
+            }
+        };
+
+        console.log(`Conectando a SQL Server: ${config.name} (${id})...`);
+        const pool = new sql.ConnectionPool(dbConfig);
+        const connectedPool = await pool.connect();
+        console.log(`✅ Conexión establecida: ${config.name}`);
+        pools.set(id, connectedPool);
+    }
+
+    return pools.get(id);
 }
 
-// Inicializamos la conexión al levantar el server
-getPool().catch(() => {
-    console.warn('⚠️  El servidor inició, pero la base de datos no está disponible aún.');
-});
+/**
+ * Retorna todos los servidores configurados
+ */
+function getServers() {
+    return servers;
+}
+
+/**
+ * Cierra todos los pools activos
+ */
+async function closeAllPools() {
+    for (const [id, pool] of pools.entries()) {
+        await pool.close();
+        pools.delete(id);
+    }
+}
+
+// Inicializar el pool principal al arrancar
+if (servers.length > 0) {
+    getPool(servers[0].id).catch(err => {
+        console.warn(`⚠️ Error al conectar al servidor principal (${servers[0].id}):`, err.message);
+    });
+}
 
 module.exports = {
     sql,
     getPool,
-    closePool
+    getServers,
+    closeAllPools
 };

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool } = require('../db');
+const { sql, getPool, getServers } = require('../db');
 
 /**
  * 1. Endpoint: Consultar lista de artículos
@@ -302,11 +302,15 @@ router.get('/search', async (req, res) => {
 router.get('/:articulo', async (req, res) => {
   try {
     const { articulo } = req.params;
+    const servers = getServers();
 
-    const pool = await getPool();
+    // Consultamos todos los servidores configurados en paralelo
+    const results = await Promise.all(servers.map(async (srv) => {
+      try {
+        const pool = await getPool(srv.id);
+        const request = pool.request().input('co_art', sql.VarChar, articulo);
 
-    // 1. Consulta Principal: Datos básicos del artículo (Siempre los trae, haya stock o no)
-    const queryArticulo = `
+        const queryArticulo = `
           SELECT 
             RTRIM(co_art) AS co_art, 
             RTRIM(art_des) AS descripcion,
@@ -316,8 +320,7 @@ router.get('/:articulo', async (req, res) => {
           WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
         `;
 
-    // 2. Consulta de Stock: Stock Disponible Real por almacén
-    const queryStock = `
+        const queryStock = `
           SELECT 
             RTRIM(co_alma) AS co_alma, 
             SUM(CASE WHEN RTRIM(tipo) = 'ACT' THEN stock ELSE 0 END) -
@@ -333,8 +336,7 @@ router.get('/:articulo', async (req, res) => {
           ) > 0
         `;
 
-    // 3. Consulta de Precios: Todos los precios activos (ÚLTIMO ACTIVO POR CADA TIPO)
-    const queryPrecios = `
+        const queryPrecios = `
           WITH UltimosPrecios AS (
             SELECT 
               RTRIM(co_precio) AS id_precio,
@@ -353,69 +355,93 @@ router.get('/:articulo', async (req, res) => {
           ORDER BY id_precio
         `;
 
-    // 4. Consulta de Tasa: Obtener la tasa de venta actual para USD
-    const queryTasa = `
+        const queryTasa = `
           SELECT TOP 1 tasa_v AS tasa_cambio
           FROM saTasa
           WHERE LTRIM(RTRIM(co_mone)) IN ('US$', 'USD')
           ORDER BY fecha DESC
         `;
 
-    const request = pool.request().input('co_art', sql.VarChar, articulo);
+        const [resArt, resStock, resPre, resTasa] = await Promise.all([
+          request.query(queryArticulo),
+          request.query(queryStock),
+          request.query(queryPrecios),
+          pool.request().query(queryTasa)
+        ]);
 
-    // Ejecutamos las 4 consultas en paralelo
-    const [resultArticulo, resultStock, resultPrecios, resultTasa] = await Promise.all([
-      request.query(queryArticulo),
-      request.query(queryStock),
-      request.query(queryPrecios),
-      request.query(queryTasa)
-    ]);
+        if (resArt.recordset.length === 0) return null;
 
-    // Si el artículo no existe en la base de datos de Profit, informamos error 404
-    if (resultArticulo.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Artículo no encontrado en la base de datos.' });
+        const tasaActual = resTasa.recordset.length > 0 ? resTasa.recordset[0].tasa_cambio : 1;
+
+        return {
+          source_id: srv.id,
+          source_name: srv.name,
+          existencias: resStock.recordset,
+          precios: resPre.recordset.map(p => {
+            const monedaFija = p.moneda || '';
+            const esDolar = monedaFija.includes('US');
+            const esBolivar = monedaFija.includes('BS') || monedaFija.includes('VES');
+            return {
+              id_precio: p.id_precio,
+              precio: p.precio,
+              moneda: p.moneda,
+              precio_ves: esDolar ? Number((p.precio * tasaActual).toFixed(2)) : (esBolivar ? p.precio : null)
+            };
+          }),
+          tasa_cambio: tasaActual,
+          articulo_metadata: resArt.recordset[0]
+        };
+      } catch (err) {
+        console.error(`Error consultando servidor ${srv.id}:`, err.message);
+        return { source_id: srv.id, source_name: srv.name, error: err.message };
+      }
+    }));
+
+    // Consolidar resultados
+    const validResults = results.filter(r => r && !r.error);
+    
+    if (validResults.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Artículo no encontrado en ninguna de las fuentes de datos configuradas.',
+        details: results.filter(r => r && r.error)
+      });
     }
 
-    const articuloBasico = resultArticulo.recordset[0];
-    const tasaActual = resultTasa.recordset.length > 0 ? resultTasa.recordset[0].tasa_cambio : 1;
-    const totalStockFisico = resultStock.recordset.reduce((acc, curr) => acc + curr.stock, 0);
-
-    // Armamos el JSON Global
-    const responseData = {
-      co_art: articuloBasico.co_art,
-      descripcion: articuloBasico.descripcion,
-      anulado: articuloBasico.anulado,
-      tipo_articulo: articuloBasico.tipo_articulo,
-      total_stock: totalStockFisico,
-      tasa_oficial_bcv: tasaActual,
-      precios: resultPrecios.recordset.map(p => {
-        const monedaFija = p.moneda || '';
-        const esDolar = monedaFija.includes('US');
-        const esBolivar = monedaFija.includes('BS') || monedaFija.includes('VES');
-        return {
-          id_precio: p.id_precio,
-          precio: p.precio,
-          moneda: p.moneda,
-          precio_ves: esDolar ? Number((p.precio * tasaActual).toFixed(2)) : (esBolivar ? p.precio : null)
-        };
-      }),
-      disponibilidad_por_almacen: resultStock.recordset
+    // Usamos el primer resultado válido para la metadata básica
+    const baseInfo = validResults[0].articulo_metadata;
+    
+    const consolidatedResponse = {
+      co_art: baseInfo.co_art,
+      descripcion: baseInfo.descripcion,
+      tipo_articulo: baseInfo.tipo_articulo,
+      fuentes_de_datos: results.filter(r => r !== null).map(r => ({
+        id: r.source_id,
+        nombre: r.source_name,
+        error: r.error || null,
+        total_stock: r.error ? 0 : r.existencias.reduce((acc, curr) => acc + curr.stock, 0),
+        disponibilidad: r.error ? [] : r.existencias,
+        precios: r.error ? [] : r.precios,
+        tasa_cambio: r.error ? null : r.tasa_cambio
+      })),
+      total_stock_global: validResults.reduce((acc, r) => acc + r.existencias.reduce((a, c) => a + c.stock, 0), 0)
     };
 
     res.status(200).json({
       success: true,
-      data: responseData
+      data: consolidatedResponse
     });
 
   } catch (error) {
-    console.error('Error al consultar stock:', error);
+    console.error('Error al consultar stock consolidado:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al consultar el stock en la base de datos.',
+      message: 'Error al consultar el stock en las bases de datos.',
       error: error.message
     });
   }
 });
+
 /**
  * 4. Endpoint: Crear un nuevo artículo
  * POST /api/v1/articulos
