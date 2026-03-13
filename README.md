@@ -36,18 +36,26 @@
    ```bash
    cp .env.example .env
    ```
-   Abre `.env` en tu editor preferido y ajusta el puerto, tu API_KEY personalizada y las credenciales de tu base de datos SQL Server:
+   Abre `.env` en tu editor y ajusta el puerto y tu clave de API:
    ```env
-   # Configuración del Servidor
    PORT=3000
-   API_KEY=tu_clave_secreta_super_segura_aqui
+   API_KEY=tu_clave_secreta_aqui
+   ```
 
-   # Configuración de la Base de Datos
-   DB_SERVER=localhost
-   DB_USER=sa
-   DB_PASSWORD=tu_password_de_sql
-   DB_NAME=NOMBRE_DE_TU_BASE_DE_DATOS_AQUI
-   DB_ENCRYPT=false
+4. **Configura las sedes (Bases de Datos)**:
+   A diferencia de versiones anteriores, las conexiones se gestionan en `config/servers.json`. Este archivo permite configurar múltiples instancias de SQL Server:
+   ```json
+   [
+     {
+       "id": "SEDE1",
+       "name": "Nombre de la Sede",
+       "server": "192.168.1.10",
+       "database": "DB_PROFIT",
+       "user": "sa",
+       "password": "password",
+       "options": { "encrypt": false, "trustServerCertificate": true }
+     }
+   ]
    ```
 
 ## Ejecución
@@ -79,12 +87,15 @@ curl -X GET http://localhost:3000/api/v1/articulos \
 ```text
 sync2k-agent/
 │
-├── .env                  # (No incluido en git) Configuración local y credenciales.
+├── .env                  # (No incluido en git) Configuración local (Puerto y API Key).
 ├── .env.example          # Plantilla para variables de entorno.
-├── db.js                 # Exporta conexión a SQL Server.
+├── db.js                 # Gestión de pools de conexión multi-sede.
 ├── package.json          # Información general del proyecto y sus dependencias.
-├── server.js             # Punto de entrada principal y configuración nativa de Express.
-└── routes/               # Archivos individuales por módulo
+├── server.js             # Punto de entrada principal.
+├── helpers/              # Utilidades para operaciones multi-sede.
+├── config/               # Carpeta de configuraciones.
+│   └── servers.json      # Configuración detallada de cada sede/instancia SQL.
+└── routes/               # Endpoints por módulo
     ├── articulos.js
     ├── catalogos.js
     ├── clientes.js

@@ -64,27 +64,62 @@ router.get('/', async (req, res) => {
         const limit = parseInt(req.query.limit) || 10;
         const servers = getServers();
 
+        // 1. Obtener listado básico de todas las sedes (sin enriquecer)
         const allData = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id);
-                const [resData, resTasa] = await Promise.all([
-                    pool.request().query(
-                        `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
-                                RTRIM(tipo) AS tipo, RTRIM(modelo) AS modelo, RTRIM(ref) AS referencia
-                         FROM saArticulo WHERE anulado = 0 ORDER BY art_des`
-                    ),
-                    pool.request().query(QUERY_TASA)
-                ]);
-                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
-                let articulos = resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
-                articulos = await enrichArticulos(pool, articulos, tasa);
-                return articulos;
-            } catch (e) { return []; }
+                const resData = await pool.request().query(
+                    `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
+                            RTRIM(tipo) AS tipo, RTRIM(modelo) AS modelo, RTRIM(ref) AS referencia
+                     FROM saArticulo WHERE anulado = 0 ORDER BY art_des`
+                );
+                return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
+            } catch (e) { 
+                console.error(`[GET /] Error en sede ${srv.id}:`, e.message);
+                return []; 
+            }
         }));
 
         const combined = [].concat(...allData);
         combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
-        return paginatedResponse(res, combined, page, limit);
+
+        // 2. Paginar antes de enriquecer
+        const total = combined.length;
+        const paginated = combined.slice((page - 1) * limit, page * limit);
+
+        // 3. Enriquecer solo los artículos de la página actual, agrupados por sede
+        const enrichedItems = [];
+        const itemsBySede = paginated.reduce((acc, item) => {
+            acc[item.sede_id] = acc[item.sede_id] || [];
+            acc[item.sede_id].push(item);
+            return acc;
+        }, {});
+
+        await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
+            try {
+                const pool = await getPool(sedeId);
+                const resTasa = await pool.request().query(QUERY_TASA);
+                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
+                const enriched = await enrichArticulos(pool, items, tasa);
+                enrichedItems.push(...enriched);
+            } catch (e) {
+                console.error(`[GET /] Error enriqueciendo sede ${sedeId}:`, e.message);
+                enrichedItems.push(...items.map(i => ({ ...i, error_enriquecimiento: e.message })));
+            }
+        }));
+
+        // Volver a ordenar por descripción después del enriquecimiento paralelo
+        enrichedItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
+
+        return res.status(200).json({
+            success: true,
+            page,
+            limit,
+            total_items: total,
+            total_pages: Math.ceil(total / limit),
+            count: enrichedItems.length,
+            data: enrichedItems
+        });
 
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al consultar artículos.', error: error.message });
@@ -116,36 +151,64 @@ router.get('/search', async (req, res) => {
         const whereClause = 'WHERE anulado = 0 ' + filters.map(f => `AND ${f.column} LIKE '%' + @${f.param} + '%'`).join(' ');
         const servers = getServers();
 
+        // 1. Obtener listado básico filtrado
         const allData = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id);
+                const r = pool.request();
+                filters.forEach(f => r.input(f.param, sql.VarChar, f.value));
 
-                // Función factoría de request con filtros inyectados
-                const buildReq = () => {
-                    const r = pool.request();
-                    filters.forEach(f => r.input(f.param, sql.VarChar, f.value));
-                    return r;
-                };
-
-                const [resData, resTasa] = await Promise.all([
-                    buildReq().query(
-                        `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
-                                RTRIM(tipo) AS tipo, RTRIM(modelo) AS modelo, RTRIM(ref) AS referencia
-                         FROM saArticulo ${whereClause} ORDER BY art_des`
-                    ),
-                    pool.request().query(QUERY_TASA)
-                ]);
-
-                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
-                let articulos = resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
-                articulos = await enrichArticulos(pool, articulos, tasa);
-                return articulos;
-            } catch (e) { return []; }
+                const resData = await r.query(
+                    `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
+                            RTRIM(tipo) AS tipo, RTRIM(modelo) AS modelo, RTRIM(ref) AS referencia
+                     FROM saArticulo ${whereClause} ORDER BY art_des`
+                );
+                return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
+            } catch (e) { 
+                console.error(`[GET /search] Error en sede ${srv.id}:`, e.message);
+                return []; 
+            }
         }));
 
         const combined = [].concat(...allData);
         combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
-        return paginatedResponse(res, combined, page, limit);
+
+        // 2. Paginar antes de enriquecer
+        const total = combined.length;
+        const paginated = combined.slice((page - 1) * limit, page * limit);
+
+        // 3. Enriquecer solo los artículos de la página actual
+        const enrichedItems = [];
+        const itemsBySede = paginated.reduce((acc, item) => {
+            acc[item.sede_id] = acc[item.sede_id] || [];
+            acc[item.sede_id].push(item);
+            return acc;
+        }, {});
+
+        await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
+            try {
+                const pool = await getPool(sedeId);
+                const resTasa = await pool.request().query(QUERY_TASA);
+                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
+                const enriched = await enrichArticulos(pool, items, tasa);
+                enrichedItems.push(...enriched);
+            } catch (e) {
+                console.error(`[GET /search] Error enriqueciendo sede ${sedeId}:`, e.message);
+                enrichedItems.push(...items.map(i => ({ ...i, error_enriquecimiento: e.message })));
+            }
+        }));
+
+        enrichedItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
+
+        return res.status(200).json({
+            success: true,
+            page,
+            limit,
+            total_items: total,
+            total_pages: Math.ceil(total / limit),
+            count: enrichedItems.length,
+            data: enrichedItems
+        });
 
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error en búsqueda de artículos.', error: error.message });
