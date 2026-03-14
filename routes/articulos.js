@@ -55,9 +55,41 @@ async function enrichArticulos(pool, articulos, tasa) {
     }));
 }
 
+/**
+ * @swagger
+ * tags:
+ *   name: Articulos
+ *   description: Gestión de artículos y productos
+ */
+
 // ────────────────────────────────────────────────────────────────────────────
 // 1. GET /api/v1/articulos — Listado paginado de todas las sedes
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos:
+ *   get:
+ *     summary: Obtener listado paginado de artículos de todas las sedes
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Número de página
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *         description: Cantidad de items por página
+ *     responses:
+ *       200:
+ *         description: Listado de artículos obtenido exitosamente
+ *       500:
+ *         description: Error del servidor
+ */
 router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
@@ -129,6 +161,39 @@ router.get('/', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 2. GET /api/v1/articulos/search — Búsqueda con filtros
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/search:
+ *   get:
+ *     summary: Búsqueda de artículos con filtros (co_art, descripcion, modelo, etc.)
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: query
+ *         name: co_art
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: descripcion
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 30
+ *     responses:
+ *       200:
+ *         description: Resultados de la búsqueda
+ *       400:
+ *         description: Falta parámetro de búsqueda
+ *       500:
+ *         description: Error del servidor
+ */
 router.get('/search', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
@@ -218,6 +283,27 @@ router.get('/search', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 3. GET /api/v1/articulos/:co_art — Detalle completo por sede
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/{co_art}:
+ *   get:
+ *     summary: Detalle completo de un artículo por su código (en todas las sedes)
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: path
+ *         name: co_art
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Código del artículo
+ *     responses:
+ *       200:
+ *         description: Detalle del artículo
+ *       404:
+ *         description: Artículo no encontrado
+ *       500:
+ *         description: Error del servidor
+ */
 router.get('/:co_art', async (req, res) => {
     try {
         const { co_art } = req.params;
@@ -302,6 +388,39 @@ router.get('/:co_art', async (req, res) => {
 // Query param: ?sede=ID  → solo esa sede
 // Sin param             → todas las sedes (broadcast)
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos:
+ *   post:
+ *     summary: Crear un nuevo artículo
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: query
+ *         name: sede
+ *         schema:
+ *           type: string
+ *         description: ID de la sede (opcional para broadcast)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [co_art, art_des]
+ *             properties:
+ *               co_art: { type: string }
+ *               art_des: { type: string }
+ *               tipo: { type: string, default: 'V' }
+ *               modelo: { type: string }
+ *               ref: { type: string }
+ *     responses:
+ *       200:
+ *         description: Artículo creado exitosamente
+ *       400:
+ *         description: Datos inválidos
+ *       500:
+ *         description: Error del servidor
+ */
 router.post('/', async (req, res) => {
     try {
         const data = req.body;
@@ -392,6 +511,37 @@ router.post('/', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 5. PUT /api/v1/articulos/:co_art — Editar artículo (targeted o broadcast)
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/{co_art}:
+ *   put:
+ *     summary: Actualizar un artículo existente
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: path
+ *         name: co_art
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: sede
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               art_des: { type: string }
+ *               tipo: { type: string }
+ *               modelo: { type: string }
+ *     responses:
+ *       200:
+ *         description: Artículo actualizado
+ *       404:
+ *         description: Artículo no encontrado
+ */
 router.put('/:co_art', async (req, res) => {
     try {
         const coArtOri = req.params.co_art;
@@ -485,6 +635,28 @@ router.put('/:co_art', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 6. DELETE /api/v1/articulos/:co_art — Eliminar artículo (targeted o broadcast)
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/{co_art}:
+ *   delete:
+ *     summary: Eliminar un artículo
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: path
+ *         name: co_art
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: sede
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Artículo eliminado
+ *       404:
+ *         description: Artículo no encontrado
+ */
 router.delete('/:co_art', async (req, res) => {
     try {
         const { co_art } = req.params;

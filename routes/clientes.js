@@ -106,9 +106,33 @@ async function loadDefaults(pool) {
     };
 }
 
+/**
+ * @swagger
+ * tags:
+ *   name: Clientes
+ *   description: Gestión de clientes (Rif, Direcciones, etc.)
+ */
+
 // ────────────────────────────────────────────────────────────────────────────
 // 1. GET /api/v1/clientes — Listado paginado desde todas las sedes
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/clientes:
+ *   get:
+ *     summary: Obtener listado paginado de clientes de todas las sedes
+ *     tags: [Clientes]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *     responses:
+ *       200:
+ *         description: Listado de clientes
+ */
 router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
@@ -183,6 +207,23 @@ router.get('/search', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 3. GET /api/v1/clientes/:co_cli — Detalle del cliente desde todas las sedes
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/clientes/{co_cli}:
+ *   get:
+ *     summary: Obtener detalle de un cliente específico por su código
+ *     tags: [Clientes]
+ *     parameters:
+ *       - in: path
+ *         name: co_cli
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Detalle del cliente
+ *       404:
+ *         description: Cliente no encontrado
+ */
 router.get('/:co_cli', async (req, res) => {
     try {
         const { co_cli } = req.params;
@@ -348,6 +389,24 @@ router.put('/:co_cli', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 6. DELETE /api/v1/clientes/:co_cli — Eliminar cliente (targeted o broadcast)
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/clientes/{co_cli}:
+ *   delete:
+ *     summary: Eliminar (anular) un cliente
+ *     tags: [Clientes]
+ *     parameters:
+ *       - in: path
+ *         name: co_cli
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sede
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Cliente eliminado
+ */
 router.delete('/:co_cli', async (req, res) => {
     try {
         const { co_cli } = req.params;

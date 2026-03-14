@@ -4,6 +4,13 @@ const { sql, getPool } = require('../db');
 const { aggregateRead, aggregateUnique, paginatedResponse } = require('../helpers/multiSede');
 
 /**
+ * @swagger
+ * tags:
+ *   name: Catalogos
+ *   description: Consultas de tablas maestras y catálogos (Líneas, Almacenes, etc.)
+ */
+
+/**
  * Helper genérico para catálogos simples: agrega, deduplica y ordena.
  */
 async function catalogEndpoint(res, query, uniqueKey, sortKey, extraInputs = null) {
@@ -21,6 +28,16 @@ async function catalogEndpoint(res, query, uniqueKey, sortKey, extraInputs = nul
 }
 
 // ── Líneas ─────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/catalogos/lineas:
+ *   get:
+ *     summary: Obtener lista de líneas de artículos
+ *     tags: [Catalogos]
+ *     responses:
+ *       200:
+ *         description: Lista de líneas
+ */
 router.get('/lineas', (req, res) =>
     catalogEndpoint(res,
         `SELECT RTRIM(co_lin) AS co_lin, RTRIM(lin_des) AS lin_des FROM saLineaArticulo ORDER BY lin_des`,
@@ -113,6 +130,16 @@ router.get('/condiciones_pago', (req, res) =>
 
 // ── Almacenes ───────────────────────────────────────────────────────────────
 // Almacenes se exponen CON sede_id porque pueden diferir entre sedes
+/**
+ * @swagger
+ * /api/v1/catalogos/almacenes:
+ *   get:
+ *     summary: Obtener lista de almacenes (discriminado por sede)
+ *     tags: [Catalogos]
+ *     responses:
+ *       200:
+ *         description: Lista de almacenes
+ */
 router.get('/almacenes', async (req, res) => {
     try {
         const data = await aggregateRead(async (pool, srv) => {
@@ -145,6 +172,16 @@ router.get('/tipos_cliente', (req, res) =>
 );
 
 // ── Tasa de cambio ──────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/catalogos/tasa:
+ *   get:
+ *     summary: Obtener tasa de cambio (BCV) actual por sede
+ *     tags: [Catalogos]
+ *     responses:
+ *       200:
+ *         description: Tasa de cambio por sede
+ */
 router.get('/tasa', async (req, res) => {
     try {
         const data = await aggregateRead(async (pool, srv) => {

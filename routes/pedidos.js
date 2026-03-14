@@ -3,9 +3,37 @@ const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
 
+/**
+ * @swagger
+ * tags:
+ *   name: Pedidos
+ *   description: Gestión de pedidos de venta (Encabezados y Renglones)
+ */
+
 // ────────────────────────────────────────────────────────────────────────────
 // 1. GET /api/v1/pedidos — Listado paginado desde todas las sedes
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/pedidos:
+ *   get:
+ *     summary: Obtener listado paginado de pedidos de venta
+ *     tags: [Pedidos]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *       - in: query
+ *         name: sede
+ *         schema: { type: string }
+ *         description: ID de la sede para filtrar
+ *     responses:
+ *       200:
+ *         description: Listado de pedidos
+ */
 router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
@@ -51,6 +79,26 @@ router.get('/', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 // 2. GET /api/v1/pedidos/:doc_num — Detalle del pedido desde todas las sedes
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/pedidos/{doc_num}:
+ *   get:
+ *     summary: Obtener detalle completo de un pedido (incluye renglones)
+ *     tags: [Pedidos]
+ *     parameters:
+ *       - in: path
+ *         name: doc_num
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sede
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Detalle del pedido
+ *       404:
+ *         description: Pedido no encontrado
+ */
 router.get('/:doc_num', async (req, res) => {
     try {
         const { doc_num } = req.params;
@@ -116,20 +164,42 @@ router.get('/:doc_num', async (req, res) => {
 
 // ────────────────────────────────────────────────────────────────────────────
 // 3. POST /api/v1/pedidos — Crear pedido (targeted o broadcast)
-//
-// Body esperado:
-// {
-//   "co_cli": "0001",                  // Requerido
-//   "descrip": "Pedido de prueba",     // Opcional
-//   "co_ven": "01",                    // Opcional (default primer vendedor)
-//   "co_cond": "01",                   // Opcional
-//   "co_mone": "USD",                  // Opcional (default moneda principal)
-//   "comentario": "Nota del pedido",   // Opcional
-//   "renglones": [
-//     { "co_art": "ART-001", "cantidad": 2, "precio": 100, "co_alma": "01" }
-//   ]
-// }
 // ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/pedidos:
+ *   post:
+ *     summary: Crear un nuevo pedido de venta
+ *     tags: [Pedidos]
+ *     parameters:
+ *       - in: query
+ *         name: sede
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [co_cli, renglones]
+ *             properties:
+ *               co_cli: { type: string }
+ *               descrip: { type: string }
+ *               comentario: { type: string }
+ *               renglones:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [co_art, cantidad, precio]
+ *                   properties:
+ *                     co_art: { type: string }
+ *                     cantidad: { type: number }
+ *                     precio: { type: number }
+ *                     co_alma: { type: string }
+ *     responses:
+ *       201:
+ *         description: Pedido creado
+ */
 router.post('/', async (req, res) => {
     const data = req.body;
     if (!data.co_cli)

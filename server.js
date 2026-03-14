@@ -4,6 +4,8 @@ const cors = require('cors');
 
 // Importar módulo de base de datos
 const { getServers, closeAllPools } = require('./db');
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpecs = require('./swaggerOptions');
 
 // Las rutas se cargarán bajo demanda (lazy loading) en el bloque de endpoints
 
@@ -36,6 +38,15 @@ function authenticateAPIKey(req, res, next) {
 
 // Aplicar middleware de seguridad a todas las rutas bajo /api
 app.use('/api', authenticateAPIKey);
+
+// ==========================================
+// DOCUMENTACIÓN DE LA API (SWAGGER)
+// ==========================================
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpecs));
+app.get('/swagger.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(swaggerSpecs);
+});
 
 // ==========================================
 // RUTAS DE LA API (Lazy Loading)
