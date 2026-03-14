@@ -101,9 +101,15 @@ router.get('/', async (req, res) => {
             try {
                 const pool = await getPool(srv.id);
                 const resData = await pool.request().query(
-                    `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
-                            RTRIM(tipo) AS tipo, RTRIM(modelo) AS modelo, RTRIM(ref) AS referencia
-                     FROM saArticulo WHERE anulado = 0 ORDER BY art_des`
+                    `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+                            RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
+                            RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
+                            CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
+                     FROM saArticulo a
+                     LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+                     LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl
+                     LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+                     WHERE a.anulado = 0 ORDER BY a.art_des`
                 );
                 return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) { 
@@ -200,20 +206,50 @@ router.get('/search', async (req, res) => {
         const limit = parseInt(req.query.limit) || 30;
 
         const FIELD_MAP = {
-            co_art: 'co_art', descripcion: 'art_des', modelo: 'modelo',
-            referencia: 'ref',  tipo: 'tipo', linea: 'co_lin',
-            sublinea: 'co_subl', categoria: 'co_cat', proveedor: 'co_prov'
+            co_art: 'a.co_art', descripcion: 'a.art_des', modelo: 'a.modelo',
+            referencia: 'a.ref',  tipo: 'a.tipo', linea: 'a.co_lin',
+            sublinea: 'a.co_subl', categoria: 'a.co_cat', proveedor: 'a.co_prov',
+            linea_nombre: 'l.lin_des', sublinea_nombre: 'sl.subl_des', categoria_nombre: 'c.cat_des'
         };
 
         const filters = Object.entries(req.query)
-            .filter(([k, v]) => FIELD_MAP[k] && v)
-            .map(([k, v]) => ({ param: k, column: FIELD_MAP[k], value: v }));
+            .map(([k, v]) => {
+                const isNegative = k.endsWith('!');
+                const baseKey = isNegative ? k.slice(0, -1) : k;
+                return { originalKey: k, baseKey, value: v, isNegative };
+            })
+            .filter(({ baseKey, value }) => (FIELD_MAP[baseKey] && value) || (baseKey === 'oferta' && value))
+            .map(({ originalKey, baseKey, value, isNegative }) => {
+                if (baseKey === 'oferta') {
+                    // Si se envía 'true' o '1', filtramos por la condición de oferta (invertida si el operador es negativo)
+                    let isOferta = value === 'true' || value === '1';
+                    if (isNegative) isOferta = !isOferta;
+                    return { param: baseKey, isOferta };
+                }
+                return { param: isNegative ? `${baseKey}_neg` : baseKey, column: FIELD_MAP[baseKey], value, isNegative };
+            });
 
         if (!filters.length) {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
         }
 
-        const whereClause = 'WHERE anulado = 0 ' + filters.map(f => `AND ${f.column} LIKE '%' + @${f.param} + '%'`).join(' ');
+        const ofertaCondition = `(a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%')`;
+
+        const normalFilters = filters.filter(f => !f.hasOwnProperty('isOferta'));
+        const ofertaFilter = filters.find(f => f.hasOwnProperty('isOferta'));
+
+        let whereClause = 'WHERE a.anulado = 0 ';
+        if (normalFilters.length > 0) {
+            whereClause += normalFilters.map(f => {
+                if (f.isNegative) {
+                    return `AND ISNULL(${f.column}, '') NOT LIKE '%' + @${f.param} + '%'`;
+                }
+                return `AND ${f.column} LIKE '%' + @${f.param} + '%'`;
+            }).join(' ');
+        }
+        if (ofertaFilter) {
+            whereClause += ofertaFilter.isOferta ? ` AND ${ofertaCondition}` : ` AND NOT ${ofertaCondition}`;
+        }
         const servers = getServers();
 
         // 1. Obtener listado básico filtrado
@@ -221,12 +257,18 @@ router.get('/search', async (req, res) => {
             try {
                 const pool = await getPool(srv.id);
                 const r = pool.request();
-                filters.forEach(f => r.input(f.param, sql.VarChar, f.value));
+                normalFilters.forEach(f => r.input(f.param, sql.VarChar, f.value));
 
                 const resData = await r.query(
-                    `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
-                            RTRIM(tipo) AS tipo, RTRIM(modelo) AS modelo, RTRIM(ref) AS referencia
-                     FROM saArticulo ${whereClause} ORDER BY art_des`
+                    `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+                            RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
+                            RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
+                            CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
+                     FROM saArticulo a
+                     LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+                     LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl
+                     LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+                     ${whereClause} ORDER BY a.art_des`
                 );
                 return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) { 
@@ -315,9 +357,15 @@ router.get('/:co_art', async (req, res) => {
 
                 const [resArt, resStock, resPre, resTasa] = await Promise.all([
                     pool.request().input('co_art', sql.VarChar, co_art).query(
-                        `SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS descripcion,
-                                anulado, RTRIM(tipo) AS tipo_articulo
-                         FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))`
+                        `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+                                a.anulado, RTRIM(a.tipo) AS tipo_articulo,
+                                RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
+                                CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
+                         FROM saArticulo a
+                         LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+                         LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl
+                         LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+                         WHERE LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(@co_art))`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `SELECT RTRIM(co_alma) AS co_alma,

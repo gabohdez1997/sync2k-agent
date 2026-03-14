@@ -36,7 +36,10 @@ function authenticateAPIKey(req, res, next) {
     next();
 }
 
-// Aplicar middleware de seguridad a todas las rutas bajo /api
+// El endpoint de login NO requiere API Key (es público para obtener el JWT)
+app.use('/api/v1/auth', (req, res, next) => require('./routes/auth')(req, res, next));
+
+// Aplicar middleware de seguridad a todas las demás rutas bajo /api
 app.use('/api', authenticateAPIKey);
 
 // ==========================================
@@ -54,8 +57,9 @@ app.get('/swagger.json', (req, res) => {
 // Solo se hará el 'require' y se cargará en memoria la primera vez que se consulte el endpoint
 app.use('/api/v1/articulos', (req, res, next) => require('./routes/articulos')(req, res, next));
 app.use('/api/v1/catalogos', (req, res, next) => require('./routes/catalogos')(req, res, next));
-app.use('/api/v1/clientes', (req, res, next) => require('./routes/clientes')(req, res, next));
-app.use('/api/v1/pedidos', (req, res, next) => require('./routes/pedidos')(req, res, next));
+app.use('/api/v1/clientes',  (req, res, next) => require('./routes/clientes') (req, res, next));
+app.use('/api/v1/pedidos',   (req, res, next) => require('./routes/pedidos')  (req, res, next));
+app.use('/api/v1/usuarios',  (req, res, next) => require('./routes/usuarios') (req, res, next));
 
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
