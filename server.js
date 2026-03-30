@@ -60,7 +60,8 @@ app.use('/api/v1/catalogos', (req, res, next) => require('./routes/catalogos')(r
 app.use('/api/v1/clientes',  (req, res, next) => require('./routes/clientes') (req, res, next));
 app.use('/api/v1/pedidos',   (req, res, next) => require('./routes/pedidos')  (req, res, next));
 app.use('/api/v1/usuarios',  (req, res, next) => require('./routes/usuarios') (req, res, next));
-
+app.use('/api/v1/config',   (req, res, next) => require('./routes/config')   (req, res, next));
+app.use('/api/v1/ubicaciones', (req, res, next) => require('./routes/ubicaciones')(req, res, next));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

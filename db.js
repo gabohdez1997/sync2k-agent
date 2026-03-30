@@ -4,14 +4,20 @@ const path = require('path');
 
 require('dotenv').config();
 
-// Cargar configuración de servidores
-const serversPath = path.join(__dirname, 'config', 'servers.json');
+// Configuration will be received via API and kept in memory
 let servers = [];
-try {
-    servers = JSON.parse(fs.readFileSync(serversPath, 'utf8'));
-} catch (err) {
-    console.error('❌ Error cargando config/servers.json:', err);
-}
+let masterConfig = {
+    user:     process.env.MASTER_USER     || 'profit',
+    password: process.env.MASTER_PASSWORD || 'profit',
+    server:   process.env.MASTER_SERVER   || '127.0.0.1',
+    database: process.env.MASTER_DATABASE || 'MasterProfitPro',
+    options: {
+        encrypt: false,
+        trustServerCertificate: true,
+        enableArithAbort: true
+    },
+    pool: { max: 5, min: 0, idleTimeoutMillis: 30000 }
+};
 
 const pools = new Map();
 
@@ -52,24 +58,40 @@ let masterPool = null;
 async function getMasterPool() {
     if (masterPool) return masterPool;
 
-    const dbConfig = {
-        user:     process.env.MASTER_USER     || 'profit',
-        password: process.env.MASTER_PASSWORD || 'profit',
-        server:   process.env.MASTER_SERVER   || '127.0.0.1',
-        database: process.env.MASTER_DATABASE || 'MasterProfitPro',
-        options: {
-            encrypt: false,
-            trustServerCertificate: true,
-            enableArithAbort: true
-        },
-        pool: { max: 5, min: 0, idleTimeoutMillis: 30000 }
-    };
-
-    console.log(`Conectando a MasterProfitPro (${dbConfig.server})...`);
-    const pool = new sql.ConnectionPool(dbConfig);
+    console.log(`Conectando a MasterProfitPro (${masterConfig.server})...`);
+    const pool = new sql.ConnectionPool(masterConfig);
     masterPool = await pool.connect();
     console.log(`✅ Conexión MasterProfitPro establecida.`);
     return masterPool;
+}
+
+/**
+ * Establece la configuración de los servidores dinámicamente (Agrega o Actualiza)
+ */
+async function setServers(newServers) {
+    console.log(`🔄 Procesando ${newServers.length} sedes entrantes...`);
+    for (const srv of newServers) {
+        await addOrUpdateServer(srv);
+    }
+    console.log(`✅ Ahora hay ${servers.length} sedes configuradas en total.`);
+}
+
+/**
+ * Establece la configuración del MasterProfitPro dinámicamente
+ */
+async function setMasterConfig(config) {
+    console.log('🔄 Actualizando configuración MasterProfitPro...');
+    if (masterPool) {
+        await masterPool.close();
+        masterPool = null;
+    }
+    masterConfig = {
+        ...masterConfig,
+        ...config,
+        options: { ...masterConfig.options, ...(config.options || {}) },
+        pool: { ...masterConfig.pool, ...(config.pool || {}) }
+    };
+    console.log(`✅ Configuración MasterProfitPro actualizada.`);
 }
 
 /**
@@ -90,13 +112,50 @@ async function closeAllPools() {
     if (masterPool) { await masterPool.close(); masterPool = null; }
 }
 
-// Inicializar pools de todos los servidores al arrancar
-if (servers.length > 0) {
-    Promise.all(servers.map(s =>
-        getPool(s.id).catch(err => {
-            console.warn(`⚠️ Error al conectar al servidor "${s.name}" (${s.id}):`, err.message);
-        })
-    ));
+/**
+ * Agrega o actualiza una sede específica dinámicamente
+ */
+async function addOrUpdateServer(server) {
+    const sName = server.name || 'Sede';
+    console.log(`🔄 Actualizando sede: ${sName} (${server.id})...`);
+    
+    // Si ya existe el pool, cerrarlo
+    if (pools.has(server.id)) {
+        const pool = pools.get(server.id);
+        await pool.close();
+        pools.delete(server.id);
+    }
+
+    // Actualizar o añadir al array de servers
+    const index = servers.findIndex(s => s.id === server.id);
+    if (index !== -1) {
+        // Realizar MERGE para no perder campos existentes si se envía un PATCH parcial
+        servers[index] = { ...servers[index], ...server };
+    } else {
+        servers.push(server);
+    }
+    console.log(`✅ Sede ${server.id} actualizada/añadida.`);
 }
 
-module.exports = { sql, getPool, getMasterPool, getServers, closeAllPools };
+/**
+ * Elimina una sede específica dinámicamente
+ */
+async function removeServer(serverId) {
+    console.log(`🔄 Eliminando sede: ${serverId}...`);
+    
+    // Cerrar pool si existe
+    if (pools.has(serverId)) {
+        const pool = pools.get(serverId);
+        await pool.close();
+        pools.delete(serverId);
+    }
+
+    // Eliminar del array
+    servers = servers.filter(s => s.id !== serverId);
+    console.log(`✅ Sede ${serverId} eliminada.`);
+}
+
+// Al arrancar no iniciamos nada automáticamente si no hay config
+// (servers se inicializará por API)
+
+module.exports = { sql, getPool, getMasterPool, getServers, setServers, setMasterConfig, addOrUpdateServer, removeServer, closeAllPools };
