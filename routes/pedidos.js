@@ -47,7 +47,7 @@ router.get('/', async (req, res) => {
 
         const allData = await Promise.all(targets.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, req.sqlAuth);
                 const [result, resTasa] = await Promise.all([
                     pool.request().query(`
                         SELECT RTRIM(p.doc_num) AS doc_num, RTRIM(p.descrip) AS descrip,
@@ -111,7 +111,7 @@ router.get('/:doc_num', async (req, res) => {
 
         const results = await Promise.all(targets.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, req.sqlAuth);
 
                 const [resEnc, resReng, resTasa] = await Promise.all([
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`
@@ -205,7 +205,7 @@ router.post('/', async (req, res) => {
     if (!data.co_cli)
         return res.status(400).json({ success: false, message: 'Campo obligatorio: co_cli' });
 
-    const outcome = await executeWrite(req.query.sede || null, async (pool) => {
+    const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
         const [resTasa, resMoneda, resAlma, resVen, resCond] = await Promise.all([
             pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD') ORDER BY fecha DESC`),
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
@@ -318,7 +318,7 @@ router.delete('/:doc_num', async (req, res) => {
     try {
         const { doc_num } = req.params;
 
-        const outcome = await executeWrite(req.query.sede || null, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const resH = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
                 `SELECT validador, rowguid FROM saPedidoVenta WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
             );

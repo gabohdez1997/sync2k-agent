@@ -114,41 +114,120 @@ router.get('/:id', requireAuth, async (req, res) => {
         const { id } = req.params;
         const producto = req.query.producto || 'ADMI';
 
-        const [userRes, accesosRes] = await Promise.all([
-            pool.request().input('sCod', sql.Char(6), id).query(`
-                SELECT RTRIM(u.Cod_Usuario)  AS cod_usuario,
-                       RTRIM(u.Desc_Usuario) AS nombre,
-                       u.Estado,
-                       u.Prioridad,
-                       RTRIM(u.co_mapa)      AS co_mapa_cont,
-                       RTRIM(u.co_mapa_nomi) AS co_mapa_nomi,
-                       RTRIM(u.co_mapa_admi) AS co_mapa_admi,
-                       u.Acceso_Todas_Empresa,
-                       u.Acceso_Todas_Empresa_Nomi,
-                       u.Acceso_Todas_Empresa_Admi,
-                       u.Fec_Ult             AS ultimo_ingreso,
-                       u.fe_us_in           AS fecha_creacion
-                FROM MpUsuario u
-                WHERE u.Cod_Usuario = RTRIM(@sCod)
-            `),
-            pool.request()
-                .input('sCod_Usuario', sql.Char(6), id)
-                .input('sProducto', sql.Char(6), producto)
-                .execute('pConsultarUsuarioAccesos')
-        ]);
+        // 1. Datos básicos del usuario
+        const userRes = await pool.request().input('sCod', sql.Char(6), id).query(`
+            SELECT RTRIM(u.Cod_Usuario)  AS cod_usuario,
+                   RTRIM(u.Desc_Usuario) AS nombre,
+                   u.Estado,
+                   u.Prioridad,
+                   RTRIM(u.co_mapa)      AS co_mapa_cont,
+                   RTRIM(u.co_mapa_nomi) AS co_mapa_nomi,
+                   RTRIM(u.co_mapa_admi) AS co_mapa_admi,
+                   u.Acceso_Todas_Empresa,
+                   u.Acceso_Todas_Empresa_Nomi,
+                   u.Acceso_Todas_Empresa_Admi,
+                   u.Fec_Ult             AS ultimo_ingreso,
+                   u.fe_us_in           AS fecha_creacion
+            FROM MpUsuario u
+            WHERE u.Cod_Usuario = RTRIM(@sCod)
+        `);
 
         if (!userRes.recordset.length) {
             return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
         }
 
         const user = userRes.recordset[0];
+
+        // Determinar co_mapa según el producto solicitado
+        const coMapaActivo =
+            producto === 'NOMI' ? user.co_mapa_nomi :
+            producto === 'CONT' ? user.co_mapa_cont :
+            user.co_mapa_admi;
+
+        // 2. Accesos por empresa + detalle del mapa de cada acceso (en paralelo)
+        const [accesosRes, mapaRes, modulosRes] = await Promise.all([
+            // empresas/mapas asignados al usuario para este producto
+            pool.request()
+                .input('sCod_Usuario', sql.Char(6), id)
+                .input('sProducto', sql.Char(6), producto)
+                .execute('pConsultarUsuarioAccesos'),
+
+            // descripción e info del mapa principal del usuario
+            coMapaActivo
+                ? pool.request()
+                    .input('sCoMapa',    sql.Char(6), coMapaActivo)
+                    .input('sProducto',  sql.Char(6), producto)
+                    .query(`
+                        SELECT RTRIM(co_mapa)  AS co_mapa,
+                               RTRIM(des_mapa) AS des_mapa,
+                               producto
+                        FROM MpMapa
+                        WHERE co_mapa = @sCoMapa AND producto = @sProducto
+                    `)
+                : Promise.resolve({ recordset: [] }),
+
+            // reportes asignados al mapa (vía MpReporteSegMapa + MpReporte)
+            coMapaActivo
+                ? pool.request()
+                    .input('sCoMapa',   sql.Char(6), coMapaActivo)
+                    .input('sProducto', sql.Char(6), producto)
+                    .query(`
+                        SELECT DISTINCT
+                               RTRIM(r.co_reporte)      AS co_reporte,
+                               RTRIM(r.des_reporte)     AS des_reporte,
+                               RTRIM(r.co_tiporeporte)  AS tipo,
+                               r.favorito
+                        FROM MpReporteSegMapa rsm
+                        INNER JOIN MpReporte r ON r.co_reporte = rsm.co_reporte
+                                              AND r.producto   = rsm.producto
+                        WHERE rsm.co_mapa   = @sCoMapa
+                          AND rsm.producto  = @sProducto
+                        ORDER BY r.des_reporte
+                    `)
+                : Promise.resolve({ recordset: [] })
+        ]);
+
+        // Módulos disponibles para este producto (catálogo completo — el mapa aplica bitmask internamente)
+        const modulosCatRes = await pool.request()
+            .input('sProducto', sql.Char(6), producto)
+            .query(`
+                SELECT RTRIM(co_modulo) AS co_modulo,
+                       RTRIM(des_modulo) AS des_modulo,
+                       orden
+                FROM MpModulo
+                WHERE producto = @sProducto
+                ORDER BY orden
+            `);
+
         const accesos = accesosRes.recordset.map(r => ({
             cod_empresa:  r.cod_empresa?.trim(),
             desc_empresa: r.desc_empresa?.trim(),
             co_mapa:      r.co_mapa?.trim()
         }));
 
-        res.status(200).json({ success: true, data: { ...user, producto, accesos } });
+        const mapaInfo = mapaRes.recordset[0] || null;
+        const reportes = modulosRes.recordset;
+        const modulos  = modulosCatRes.recordset;
+
+        res.status(200).json({
+            success: true,
+            data: {
+                ...user,
+                producto,
+                mapa: mapaInfo
+                    ? {
+                        co_mapa:  mapaInfo.co_mapa,
+                        des_mapa: mapaInfo.des_mapa,
+                        // Nota: los permisos internos de pantallas/acciones se almacenan
+                        // como bitmask varbinary en MpMapa y no son decodificables desde SQL.
+                        // Los módulos y reportes corresponden a lo asignado a este mapa.
+                        modulos_disponibles: modulos,
+                        reportes_asignados:  reportes
+                      }
+                    : null,
+                accesos
+            }
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al consultar usuario.', error: error.message });
     }
