@@ -9,12 +9,12 @@ const { getPool, getServers } = require('../db');
  * @param {Function} fn - async (pool, srv) => array de registros
  * @returns {Array} Array plano de todos los resultados combinados
  */
-async function aggregateRead(fn) {
+async function aggregateRead(sqlAuth, fn) {
     const servers = getServers();
     const results = await Promise.all(
         servers.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, sqlAuth);
                 const rows = await fn(pool, srv);
                 return Array.isArray(rows) ? rows : [];
             } catch (e) {
@@ -33,8 +33,8 @@ async function aggregateRead(fn) {
  * @param {string} [sortKey] - campo para ordenar alfabéticamente
  * @returns {Array} Array único y ordenado
  */
-async function aggregateUnique(fn, uniqueKey, sortKey = null) {
-    const combined = await aggregateRead(fn);
+async function aggregateUnique(sqlAuth, fn, uniqueKey, sortKey = null) {
+    const combined = await aggregateRead(sqlAuth, fn);
     const unique = Array.from(new Map(combined.map(item => [item[uniqueKey], item])).values());
     if (sortKey) unique.sort((a, b) => String(a[sortKey]).localeCompare(String(b[sortKey])));
     return unique;
@@ -46,9 +46,26 @@ async function aggregateUnique(fn, uniqueKey, sortKey = null) {
  * @param {Function} fn - async (pool, srv) => objeto de resultado
  * @returns {{ targets: Array, results: Array }}
  */
-async function executeWrite(sedeId, fn) {
+async function executeWrite(sedeId, sqlAuth, fn) {
     const servers = getServers();
-    const targets = sedeId ? servers.filter(s => s.id === sedeId) : servers;
+    let targets = sedeId ? servers.filter(s => s.id === sedeId) : servers;
+
+    // Fallback: si el ID exacto no coincide (p.ej. UUID de Firestore vs ID local),
+    // intentar coincidencia por nombre (case-insensitive) o usar todos si solo hay uno.
+    if (sedeId && targets.length === 0) {
+        const byName = servers.filter(s =>
+            (s.name || s.nombre || '').trim().toLowerCase() === sedeId.trim().toLowerCase()
+        );
+        if (byName.length > 0) {
+            console.warn(`[multiSede] ID "${sedeId}" no coincide — usando coincidencia por nombre.`);
+            targets = byName;
+        } else if (servers.length === 1) {
+            console.warn(`[multiSede] ID "${sedeId}" no coincide y solo hay 1 servidor — usando broadcast.`);
+            targets = servers;
+        } else {
+            return { targets: [], results: [], notFound: true };
+        }
+    }
 
     if (targets.length === 0) {
         return { targets: [], results: [], notFound: true };
@@ -57,7 +74,7 @@ async function executeWrite(sedeId, fn) {
     const results = await Promise.all(
         targets.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, sqlAuth);
                 const result = await fn(pool, srv);
                 return { sede_id: srv.id, sede_nombre: srv.name, success: true, ...result };
             } catch (err) {
@@ -77,9 +94,21 @@ async function executeWrite(sedeId, fn) {
  */
 function writeResponse(res, { results, notFound }, notFoundMsg = 'Sede no encontrada.') {
     if (notFound) return res.status(404).json({ success: false, message: notFoundMsg });
+    
     const allOk = results.every(r => r.success);
     const anyOk = results.some(r => r.success);
-    return res.status(allOk ? 200 : anyOk ? 207 : 500).json({ success: anyOk, results });
+    const status = allOk ? 200 : anyOk ? 207 : 500;
+    
+    let message = allOk ? 'Operación completada con éxito.' : 
+                  anyOk ? 'Operación completada con fallas en algunas sedes.' :
+                  'La operación falló en todas las sedes configuradas.';
+
+    // Si falló todo, intentamos extraer el primer error para dar contexto
+    if (!anyOk && results.length > 0) {
+        message = `Error: ${results[0].error || 'Falla desconocida en el agente.'}`;
+    }
+
+    return res.status(status).json({ success: anyOk, message, results });
 }
 
 /**

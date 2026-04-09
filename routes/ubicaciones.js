@@ -10,7 +10,24 @@ const { executeWrite, writeResponse } = require('../helpers/multiSede');
  *   description: Gestión de ubicaciones y artículos por ubicación
  */
 
-// 1. GET /api/v1/ubicaciones — Listado de ubicaciones
+/**
+ * @swagger
+ * /api/v1/ubicaciones:
+ *   get:
+ *     summary: Obtener listado de ubicaciones de todas las sedes
+ *     tags: [Ubicaciones]
+ *     parameters:
+ *       - in: query
+ *         name: sede
+ *         schema:
+ *           type: string
+ *         description: ID o nombre de la sede para filtrar
+ *     responses:
+ *       200:
+ *         description: Listado de ubicaciones obtenido exitosamente
+ *       500:
+ *         description: Error del servidor
+ */
 router.get('/', async (req, res) => {
     try {
         const requestedSede = req.query.sede || req.query.sede_id;
@@ -23,7 +40,7 @@ router.get('/', async (req, res) => {
 
         const results = await Promise.all(servers.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, req.sqlAuth);
                 const query = `
                     SELECT RTRIM(co_ubicacion) AS id, RTRIM(des_ubicacion) AS descripcion
                     FROM saUbicacion
@@ -44,7 +61,30 @@ router.get('/', async (req, res) => {
     }
 });
 
-// 2. GET /api/v1/ubicaciones/:id/articulos — Artículos en una ubicación
+/**
+ * @swagger
+ * /api/v1/ubicaciones/{id}/articulos:
+ *   get:
+ *     summary: Obtener artículos asociados a una ubicación específica
+ *     tags: [Ubicaciones]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la ubicación
+ *       - in: query
+ *         name: sede
+ *         schema:
+ *           type: string
+ *         description: ID o nombre de la sede para filtrar
+ *     responses:
+ *       200:
+ *         description: Listado de artículos en la ubicación
+ *       500:
+ *         description: Error del servidor
+ */
 router.get('/:id/articulos', async (req, res) => {
     try {
         const { id } = req.params;
@@ -59,7 +99,7 @@ router.get('/:id/articulos', async (req, res) => {
 
         const results = await Promise.all(servers.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, req.sqlAuth);
                 const query = `
                     SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                            RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
@@ -88,7 +128,37 @@ router.get('/:id/articulos', async (req, res) => {
     }
 });
 
-// 3. POST /api/v1/ubicaciones — Crear ubicación
+/**
+ * @swagger
+ * /api/v1/ubicaciones:
+ *   post:
+ *     summary: Crear una nueva ubicación
+ *     tags: [Ubicaciones]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [id, descripcion]
+ *             properties:
+ *               id:
+ *                 type: string
+ *                 description: Código de la ubicación (máx 6 chars)
+ *               descripcion:
+ *                 type: string
+ *                 description: Nombre descriptivo
+ *               sede:
+ *                 type: string
+ *                 description: ID de la sede donde crearla
+ *     responses:
+ *       200:
+ *         description: Ubicación creada exitosamente
+ *       400:
+ *         description: Datos faltantes o inválidos
+ *       500:
+ *         description: Error del servidor
+ */
 router.post('/', async (req, res) => {
     try {
         const data = req.body;
@@ -97,7 +167,7 @@ router.post('/', async (req, res) => {
         }
 
         const requestedSede = data.sede || data.sede_id || req.query.sede || req.query.sede_id || null;
-        const outcome = await executeWrite(requestedSede, async (pool) => {
+        const outcome = await executeWrite(requestedSede, req.sqlAuth, async (pool) => {
             const check = await pool.request().input('id', sql.VarChar, data.id).query('SELECT 1 FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@id))');
             if (check.recordset.length > 0) throw new Error('La ubicación ya existe.');
 
@@ -129,14 +199,46 @@ router.post('/', async (req, res) => {
     }
 });
 
-// 4. PUT /api/v1/ubicaciones/:id — Actualizar ubicación
+/**
+ * @swagger
+ * /api/v1/ubicaciones/{id}:
+ *   put:
+ *     summary: Actualizar una ubicación existente
+ *     tags: [Ubicaciones]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la ubicación a modificar
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [descripcion]
+ *             properties:
+ *               descripcion:
+ *                 type: string
+ *               sede:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Ubicación actualizada
+ *       404:
+ *         description: Ubicación no encontrada
+ *       500:
+ *         description: Error del servidor
+ */
 router.put('/:id', async (req, res) => {
     try {
         const id = req.params.id;
         const data = req.body;
 
         const requestedSede = data.sede || data.sede_id || req.query.sede || req.query.sede_id || null;
-        const outcome = await executeWrite(requestedSede, async (pool) => {
+        const outcome = await executeWrite(requestedSede, req.sqlAuth, async (pool) => {
             const r = new sql.Request(pool);
             r.input('id', sql.VarChar, id);
             r.input('des', sql.VarChar(60), data.descripcion);

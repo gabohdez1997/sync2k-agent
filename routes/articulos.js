@@ -122,10 +122,12 @@ router.get('/', async (req, res) => {
 
         const co_alma = req.query.co_alma;
 
+        const in_stock_all = req.query.in_stock === 'all';
+
         // 1. Obtener listado básico filtrando nativamente por stock 
         const allData = await Promise.all(servers.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, req.sqlAuth);
                 const r = pool.request();
                 if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
 
@@ -148,11 +150,11 @@ router.get('/', async (req, res) => {
                       LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
                       ${joinPrecioClause}
                       WHERE a.anulado = 0 
-                      AND EXISTS (
+                      ${in_stock_all ? '' : `AND EXISTS (
                           SELECT 1 FROM saStockAlmacen st 
                           WHERE st.co_art = a.co_art AND st.stock > 0
                           ${co_alma ? ' AND st.co_alma = @co_alma' : ''}
-                      )
+                      )`}
                       ${orderByClause}`
                 );
                 return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
@@ -187,7 +189,7 @@ router.get('/', async (req, res) => {
 
         await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
             try {
-                const pool = await getPool(sedeId);
+                const pool = await getPool(sedeId, req.sqlAuth);
                 const resTasa = await pool.request().query(QUERY_TASA);
                 const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
                 const enriched = await enrichArticulos(pool, items, tasa);
@@ -306,15 +308,18 @@ router.get('/search', async (req, res) => {
         }
 
         const co_alma = req.query.co_alma;
+        const in_stock_all = req.query.in_stock === 'all';
 
         const ofertaCondition = `(a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%')`;
         const normalFilters = filters.filter(f => !f.hasOwnProperty('isOferta'));
         const ofertaFilter = filters.find(f => f.hasOwnProperty('isOferta'));
 
         let whereClause = 'WHERE a.anulado = 0 ';
-        whereClause += ' AND EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ';
-        if (co_alma) whereClause += ' AND st.co_alma = @co_alma ';
-        whereClause += ') ';
+        if (!in_stock_all) {
+            whereClause += ' AND EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ';
+            if (co_alma) whereClause += ' AND st.co_alma = @co_alma ';
+            whereClause += ') ';
+        }
 
         if (normalFilters.length > 0) {
             whereClause += normalFilters.map(f => {
@@ -343,7 +348,7 @@ if (servers.length === 0) {
 // (Sin el Join de Precios aquí, porque usaremos la función final enriquecida)
 const allData = await Promise.all(servers.map(async (srv) => {
     try {
-        const pool = await getPool(srv.id);
+        const pool = await getPool(srv.id, req.sqlAuth);
         const r = pool.request();
         normalFilters.forEach(f => r.input(f.param, sql.VarChar, f.value));
         if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
@@ -391,7 +396,7 @@ if (reqSort === 'price_asc' || reqSort === 'price_desc') {
     let allEnriched = [];
     await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
         try {
-            const pool = await getPool(sedeId);
+            const pool = await getPool(sedeId, req.sqlAuth);
             const resTasa = await pool.request().query(QUERY_TASA);
             const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
             const enriched = await enrichArticulos(pool, items, tasa);
@@ -433,7 +438,7 @@ if (reqSort === 'price_asc' || reqSort === 'price_desc') {
 
     await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
         try {
-            const pool = await getPool(sedeId);
+            const pool = await getPool(sedeId, req.sqlAuth);
             const resTasa = await pool.request().query(QUERY_TASA);
             const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
             const enriched = await enrichArticulos(pool, items, tasa);
@@ -495,7 +500,7 @@ router.get('/:co_art', async (req, res) => {
 
         const results = await Promise.all(servers.map(async (srv) => {
             try {
-                const pool = await getPool(srv.id);
+                const pool = await getPool(srv.id, req.sqlAuth);
 
                 const [resArt, resStock, resPre, resTasa] = await Promise.all([
                     pool.request().input('co_art', sql.VarChar, co_art).query(
@@ -624,7 +629,7 @@ router.post('/', async (req, res) => {
         if (!data.co_art || !data.art_des)
             return res.status(400).json({ success: false, message: 'Campos obligatorios: co_art, art_des' });
 
-        const outcome = await executeWrite(req.query.sede || null, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const f = new Date();
             const [resLin, resSubl, resCat, resCol, resUbic] = await Promise.all([
                 pool.request().query('SELECT TOP 1 RTRIM(co_lin) AS id FROM saLineaArticulo'),
@@ -744,7 +749,7 @@ router.put('/:co_art', async (req, res) => {
         const coArtOri = req.params.co_art;
         const data = req.body;
 
-        const outcome = await executeWrite(req.query.sede || null, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const check = await pool.request().input('co_art', sql.VarChar, coArtOri).query(
                 `SELECT validador, RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl,
                         RTRIM(co_cat) AS co_cat, RTRIM(co_color) AS co_color,
@@ -858,7 +863,7 @@ router.delete('/:co_art', async (req, res) => {
     try {
         const { co_art } = req.params;
 
-        const outcome = await executeWrite(req.query.sede || null, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const check = await pool.request().input('co_art', sql.VarChar, co_art).query(
                 `SELECT validador FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))`
             );
@@ -887,7 +892,8 @@ router.delete('/:co_art', async (req, res) => {
  * @swagger
  * /api/v1/articulos/{co_art}/ubicaciones:
  *   put:
- *     summary: Actualiza los códigos de ubicación de un artículo (en saArtUbicacion)
+ *     summary: Asociar múltiples ubicaciones a un artículo (saArtUbicacion)
+ *     description: Actualiza los campos co_ubicacion, co_ubicacion2 y co_ubicacion3 para un artículo en un almacén específico de una sede determinada.
  *     tags: [Articulos]
  *     parameters:
  *       - in: path
@@ -895,58 +901,140 @@ router.delete('/:co_art', async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
+ *         description: Código del artículo
  *     requestBody:
+ *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [sede]
  *             properties:
- *               co_ubicacion: { type: string }
- *               co_ubicacion2: { type: string }
- *               co_ubicacion3: { type: string }
+ *               sede:
+ *                 type: string
+ *                 description: ID o Nombre de la sede (base de datos)
+ *               co_alma:
+ *                 type: string
+ *                 default: "01"
+ *                 description: Código del almacén/depósito
+ *               co_ubicacion:
+ *                 type: string
+ *                 description: Ubicación principal (ej. Estante A-1)
+ *               co_ubicacion2:
+ *                 type: string
+ *                 description: Segunda ubicación
+ *               co_ubicacion3:
+ *                 type: string
+ *                 description: Tercera ubicación
  *     responses:
  *       200:
- *         description: Ubicaciones actualizadas
+ *         description: Ubicaciones actualizadas exitosamente
+ *       400:
+ *         description: El parámetro "sede" es obligatorio o los datos son inválidos
+ *       404:
+ *         description: Artículo o almacén no encontrado en la sede especificada
+ *       500:
+ *         description: Error interno del servidor
  */
 router.put('/:co_art/ubicaciones', async (req, res) => {
     try {
         const { co_art } = req.params;
-        const data = req.body;
+        const { 
+            sede, 
+            co_alma = '01'
+        } = req.body;
         
-        const requestedSede = data.sede || data.sede_id || req.query.sede || req.query.sede_id || null;
-        const outcome = await executeWrite(requestedSede, async (pool) => {
+        // Capturar valores permitiendo null/vacío, pero sabiendo si fueron provistos
+        const hasU1 = req.body.hasOwnProperty('co_ubicacion');
+        const hasU2 = req.body.hasOwnProperty('co_ubicacion2');
+        const hasU3 = req.body.hasOwnProperty('co_ubicacion3');
+        
+        const u1 = hasU1 ? req.body.co_ubicacion : null;
+        const u2 = hasU2 ? req.body.co_ubicacion2 : null;
+        const u3 = hasU3 ? req.body.co_ubicacion3 : null;
+
+        if (!sede) {
+            return res.status(400).json({ success: false, message: 'El parámetro "sede" es obligatorio en el cuerpo de la petición (body).' });
+        }
+
+        const outcome = await executeWrite(sede, req.sqlAuth, async (pool) => {
             const r = new sql.Request(pool);
-            r.input('co_art', sql.VarChar, co_art);
-            r.input('co_ubicacion', sql.VarChar, data.co_ubicacion || '');
-            r.input('co_ubicacion2', sql.VarChar, data.co_ubicacion2 || '');
-            r.input('co_ubicacion3', sql.VarChar, data.co_ubicacion3 || '');
-            const co_alma_val = data.co_alma || data.co_sucu || data.sucursal || req.query.co_alma || req.query.co_sucu || '01';
-            r.input('co_alma', sql.Char(6), co_alma_val);
+            const cleanCoArt = co_art.trim();
+            const cleanCoAlma = co_alma.trim();
+            
+            const finalU1 = (typeof u1 === 'string' && u1.trim() !== '') ? u1.trim() : null;
+            const finalU2 = (typeof u2 === 'string' && u2.trim() !== '') ? u2.trim() : null;
+            const finalU3 = (typeof u3 === 'string' && u3.trim() !== '') ? u3.trim() : null;
 
-            // Verificar si existe el artículo
-            const checkArt = await r.query('SELECT 1 FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))');
-            if (checkArt.recordset.length === 0) throw new Error('Artículo no encontrado.');
+            r.input('co_art', sql.Char(30), cleanCoArt);
+            r.input('co_alma', sql.Char(6), cleanCoAlma);
+            r.input('u1', sql.VarChar(20), finalU1);
+            r.input('u2', sql.VarChar(20), finalU2);
+            r.input('u3', sql.VarChar(20), finalU3);
+            r.input('hasU1', sql.Bit, hasU1 ? 1 : 0);
+            r.input('hasU2', sql.Bit, hasU2 ? 1 : 0);
+            r.input('hasU3', sql.Bit, hasU3 ? 1 : 0);
+            
+            const auditUser = (req.sqlAuth && req.sqlAuth.user) ? req.sqlAuth.user : (req.body.usuario_id || '999');
+            r.input('user', sql.VarChar(10), auditUser);
 
-            // Upsert en saArtUbicacion (por artículo y almacén/sucursal)
-            const checkAu = await r.query('SELECT 1 FROM saArtUbicacion WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_alma)) = LTRIM(RTRIM(@co_alma))');
-            if (checkAu.recordset.length > 0) {
-                await r.query(`
-                    UPDATE saArtUbicacion 
-                    SET co_ubicacion = @co_ubicacion, co_ubicacion2 = @co_ubicacion2, co_ubicacion3 = @co_ubicacion3
-                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_alma)) = LTRIM(RTRIM(@co_alma))
-                `);
+            const artCheck = await r.query('SELECT 1 FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))');
+            if (artCheck.recordset.length === 0) throw new Error(`El artículo "${cleanCoArt}" no existe en esta sede.`);
+
+            const almaCheck = await r.query('SELECT 1 FROM saAlmacen WHERE LTRIM(RTRIM(co_alma)) = LTRIM(RTRIM(@co_alma))');
+            if (almaCheck.recordset.length === 0) throw new Error(`El almacén "${cleanCoAlma}" no existe en esta sede.`);
+
+            const auCheck = await r.query('SELECT 1 FROM saArtUbicacion WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_alma)) = LTRIM(RTRIM(@co_alma))');
+            
+            if (auCheck.recordset.length > 0) {
+                const isAllEmpty = finalU1 === null && finalU2 === null && finalU3 === null;
+                
+                if (isAllEmpty) {
+                    await r.query(`DELETE FROM saArtUbicacion WHERE LTRIM(RTRIM(co_art)) = @co_art AND LTRIM(RTRIM(co_alma)) = @co_alma`);
+                } else {
+                    if (finalU1 === null) {
+                        throw new Error('La ubicación principal es obligatoria en Profit Plus. Para eliminarla, cambie todas a "Ninguna".');
+                    }
+                    // UPDATE: Solo actualizamos si se proporcionan valores (incluso si son nulos vía Ninguna)
+                    await r.query(`
+                        UPDATE saArtUbicacion 
+                        SET co_ubicacion = CASE WHEN @hasU1 = 1 THEN @u1 ELSE co_ubicacion END, 
+                            co_ubicacion2 = CASE WHEN @hasU2 = 1 THEN @u2 ELSE co_ubicacion2 END, 
+                            co_ubicacion3 = CASE WHEN @hasU3 = 1 THEN @u3 ELSE co_ubicacion3 END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @user
+                        WHERE LTRIM(RTRIM(co_art)) = @co_art AND LTRIM(RTRIM(co_alma)) = @co_alma
+                    `);
+                }
             } else {
+                if (finalU1 === null && finalU2 === null && finalU3 === null) {
+                    // Nada que hacer, no existía y se manda a borrar
+                    return;
+                }
+                if (finalU1 === null) {
+                    throw new Error('La ubicación principal es obligatoria en Profit Plus al crear una asociación nueva.');
+                }
+                // INSERT
                 await r.query(`
-                    INSERT INTO saArtUbicacion (co_art, co_alma, co_ubicacion, co_ubicacion2, co_ubicacion3)
-                    VALUES (@co_art, @co_alma, @co_ubicacion, @co_ubicacion2, @co_ubicacion3)
+                    INSERT INTO saArtUbicacion (
+                        co_art, co_alma, co_ubicacion, co_ubicacion2, co_ubicacion3, 
+                        orden, co_us_in, fe_us_in, co_us_mo, fe_us_mo
+                    )
+                    VALUES (
+                        @co_art, @co_alma, @u1, @u2, @u3, 
+                        100, @user, GETDATE(), @user, GETDATE()
+                    )
                 `);
             }
+            return { co_art: cleanCoArt, co_alma: cleanCoAlma, success: true };
         });
 
-        return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
+        return writeResponse(res, outcome, `Sede "${sede}" no encontrada o error en la operación.`);
     } catch (e) {
+        console.error(`[PUT /:co_art/ubicaciones] Error:`, e.message);
         res.status(500).json({ success: false, error: e.message });
     }
 });
+
 
 module.exports = router;
