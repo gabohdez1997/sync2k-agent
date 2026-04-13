@@ -138,6 +138,7 @@ router.get('/', async (req, res) => {
                              RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
                              RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
                              RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
+                             RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
                              CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                              ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}
                       FROM saArticulo a
@@ -148,13 +149,19 @@ router.get('/', async (req, res) => {
                       LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
                       LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
                       LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
+                      LEFT JOIN (
+                          SELECT co_art, co_uni, 
+                                 ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
+                          FROM saArtUnidad
+                      ) aun ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(aun.co_art)) AND aun.rn = 1
+                      LEFT JOIN saUnidad un ON LTRIM(RTRIM(aun.co_uni)) = LTRIM(RTRIM(un.co_uni))
                       ${joinPrecioClause}
                       WHERE a.anulado = 0 
-                      ${in_stock_all ? '' : `AND EXISTS (
+                      AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S', '2') OR ${in_stock_all ? '1=1' : `EXISTS (
                           SELECT 1 FROM saStockAlmacen st 
                           WHERE st.co_art = a.co_art AND st.stock > 0
                           ${co_alma ? ' AND st.co_alma = @co_alma' : ''}
-                      )`}
+                      )`})
                       ${orderByClause}`
                 );
                 return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
@@ -316,9 +323,9 @@ router.get('/search', async (req, res) => {
 
         let whereClause = 'WHERE a.anulado = 0 ';
         if (!in_stock_all) {
-            whereClause += ' AND EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ';
+            whereClause += " AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ";
             if (co_alma) whereClause += ' AND st.co_alma = @co_alma ';
-            whereClause += ') ';
+            whereClause += ')) ';
         }
 
         if (normalFilters.length > 0) {
@@ -360,6 +367,7 @@ const allData = await Promise.all(servers.map(async (srv) => {
                             RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
                             RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
                             RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
+                            RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
                             CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                      FROM saArticulo a
                      LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
@@ -369,6 +377,12 @@ const allData = await Promise.all(servers.map(async (srv) => {
                      LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
                      LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
                      LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
+                     LEFT JOIN (
+                          SELECT co_art, co_uni, 
+                                 ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
+                          FROM saArtUnidad
+                     ) aun ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(aun.co_art)) AND aun.rn = 1
+                     LEFT JOIN saUnidad un ON LTRIM(RTRIM(aun.co_uni)) = LTRIM(RTRIM(un.co_uni))
                      ${whereClause} ORDER BY a.art_des`
         );
         return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
@@ -409,9 +423,12 @@ if (reqSort === 'price_asc' || reqSort === 'price_desc') {
     // Ahora que TODOS tienen su precio real y exacto en ".precios", aplicamos el Sorting Global Infalible:
     allEnriched.sort((a, b) => {
         const getCalculatedPrice = (item) => {
+            const isService = (item.linea || item.co_lin || '').trim() === '09' || (item.tipo || '').trim() === 'S' || (item.tipo || '').trim() === '2';
             const stock = item.disponibilidad?.[0]?.stock || 0;
-            if (stock <= 0) return 99999999; // Mandamos artículos sin stock al final invisible
-            return (item.precios && item.precios.length > 0) ? item.precios[0].precio : 99999999; // Sin precio oficial = al fondo
+            
+            // Si es servicio, NO mandamos al final aunque el stock sea 0
+            if (!isService && stock <= 0) return 99999999; 
+            return (item.precios && item.precios.length > 0) ? item.precios[0].precio : 99999999;
         };
 
         const pA = getCalculatedPrice(a);
@@ -510,6 +527,7 @@ router.get('/:co_art', async (req, res) => {
                                 RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
                                 RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
                                 RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
+                                RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
                                 CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                          FROM saArticulo a
                          LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
@@ -519,6 +537,12 @@ router.get('/:co_art', async (req, res) => {
                          LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
                          LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
                          LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
+                         LEFT JOIN (
+                             SELECT co_art, co_uni, 
+                                    ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
+                             FROM saArtUnidad
+                         ) aun ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(aun.co_art)) AND aun.rn = 1
+                         LEFT JOIN saUnidad un ON LTRIM(RTRIM(aun.co_uni)) = LTRIM(RTRIM(un.co_uni))
                          WHERE LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(@co_art))`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
