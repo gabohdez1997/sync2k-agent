@@ -131,8 +131,9 @@ router.get('/', async (req, res) => {
                 const r = pool.request();
                 if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
 
+                const topCount = page * limit;
                 const resData = await r.query(
-                    `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+                    `SELECT TOP (${topCount}) RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                              RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                              RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
                              RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
@@ -341,27 +342,37 @@ router.get('/search', async (req, res) => {
             whereClause += ofertaFilter.isOferta ? ` AND ${ofertaCondition}` : ` AND NOT ${ofertaCondition}`;
         }
 
-// Filtro de Sedes Locales
-let servers = getServers();
-if (requestedSede && requestedSede !== "Todas") {
-    servers = servers.filter(srv => srv.id === requestedSede || srv.name === requestedSede);
-}
+        // --- LÓGICA DE ORDENAMIENTO ---
+        let orderByClause = 'ORDER BY a.art_des ASC';
+        let joinPrecioClause = '';
+        if (reqSort === 'price_asc') {
+            joinPrecioClause = "LEFT JOIN saArtPrecio pr ON a.co_art = pr.co_art AND pr.co_precio = '01'";
+            orderByClause = 'ORDER BY pr.monto ASC, a.art_des ASC';
+        } else if (reqSort === 'price_desc') {
+            joinPrecioClause = "LEFT JOIN saArtPrecio pr ON a.co_art = pr.co_art AND pr.co_precio = '01'";
+            orderByClause = 'ORDER BY pr.monto DESC, a.art_des ASC';
+        }
 
-if (servers.length === 0) {
-    return res.status(200).json({ success: true, page, limit, total_items: 0, total_pages: 0, count: 0, data: [] });
-}
+        // --- SEDES ---
+        let servers = getServers();
+        if (requestedSede && requestedSede !== "Todas") {
+            servers = servers.filter(srv => srv.id === requestedSede || srv.name === requestedSede);
+        }
 
-// 1. Obtener listado básico filtrado en SQL 
-// (Sin el Join de Precios aquí, porque usaremos la función final enriquecida)
-const allData = await Promise.all(servers.map(async (srv) => {
-    try {
-        const pool = await getPool(srv.id, req.sqlAuth);
-        const r = pool.request();
-        normalFilters.forEach(f => r.input(f.param, sql.VarChar, f.value));
-        if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
+        if (servers.length === 0) {
+            return res.status(200).json({ success: true, page, limit, total_items: 0, total_pages: 0, count: 0, data: [] });
+        }
 
-        const resData = await r.query(
-            `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+        // 1. Obtener listado básico filtrado en SQL
+        const allData = await Promise.all(servers.map(async (srv) => {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const r = pool.request();
+                normalFilters.forEach(f => r.input(f.param, sql.VarChar, f.value));
+                if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
+
+                const resData = await r.query(
+                    `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                             RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                             RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
                             RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
@@ -369,6 +380,7 @@ const allData = await Promise.all(servers.map(async (srv) => {
                             RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
                             RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
                             CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
+                            ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}
                      FROM saArticulo a
                      LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
                      LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl
@@ -383,104 +395,81 @@ const allData = await Promise.all(servers.map(async (srv) => {
                           FROM saArtUnidad
                      ) aun ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(aun.co_art)) AND aun.rn = 1
                      LEFT JOIN saUnidad un ON LTRIM(RTRIM(aun.co_uni)) = LTRIM(RTRIM(un.co_uni))
-                     ${whereClause} ORDER BY a.art_des`
-        );
-        return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
-    } catch (e) {
-        console.error(`[GET /search] Error en sede ${srv.id}:`, e.message);
-        return [];
-    }
-}));
+                     ${joinPrecioClause}
+                     ${whereClause} 
+                     ${orderByClause}`
+                );
+                return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
+            } catch (e) {
+                console.error(`[GET /search] Error en sede ${srv.id}:`, e.message);
+                return [];
+            }
+        }));
 
-let combined = [].concat(...allData);
-let total = combined.length;
-let finalItems = [];
+        let combined = [].concat(...allData);
+        let total = combined.length;
 
-// 2. Lógica Dinámica Inteligente basada en la existencia del Filtro de Orden
-if (reqSort === 'price_asc' || reqSort === 'price_desc') {
-    // ESTRATEGIA A: (Orden Global por Precio) 
-    // Como es una búsqueda con número reducido de artículos, los enriquecemos TODOS primero.
-
-    const itemsBySede = combined.reduce((acc, item) => {
-        acc[item.sede_id] = acc[item.sede_id] || [];
-        acc[item.sede_id].push(item);
-        return acc;
-    }, {});
-
-    let allEnriched = [];
-    await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
-        try {
-            const pool = await getPool(sedeId, req.sqlAuth);
-            const resTasa = await pool.request().query(QUERY_TASA);
-            const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
-            const enriched = await enrichArticulos(pool, items, tasa);
-            allEnriched.push(...enriched);
-        } catch (e) {
-            allEnriched.push(...items.map(i => ({ ...i, error_enriquecimiento: e.message })));
+        // 2. Orden Global (Cross-Server)
+        if (reqSort === 'price_asc') {
+            combined.sort((a, b) => (a.precio_base || 0) - (b.precio_base || 0));
+        } else if (reqSort === 'price_desc') {
+            combined.sort((a, b) => (b.precio_base || 0) - (a.precio_base || 0));
+        } else {
+            combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
         }
-    }));
 
-    // Ahora que TODOS tienen su precio real y exacto en ".precios", aplicamos el Sorting Global Infalible:
-    allEnriched.sort((a, b) => {
-        const getCalculatedPrice = (item) => {
-            const isService = (item.linea || item.co_lin || '').trim() === '09' || (item.tipo || '').trim() === 'S' || (item.tipo || '').trim() === '2';
-            const stock = item.disponibilidad?.[0]?.stock || 0;
-            
-            // Si es servicio, NO mandamos al final aunque el stock sea 0
-            if (!isService && stock <= 0) return 99999999; 
-            return (item.precios && item.precios.length > 0) ? item.precios[0].precio : 99999999;
-        };
+        // 3. Paginación
+        const paginated = combined.slice((page - 1) * limit, page * limit);
 
-        const pA = getCalculatedPrice(a);
-        const pB = getCalculatedPrice(b);
+        // 4. Enriquecimiento paralelo solo de la página actual
+        const finalItems = [];
+        const itemsBySede = paginated.reduce((acc, item) => {
+            acc[item.sede_id] = acc[item.sede_id] || [];
+            acc[item.sede_id].push(item);
+            return acc;
+        }, {});
 
-        if (reqSort === 'price_asc') return pA - pB;
-        return pB - pA;
-    });
+        await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
+            try {
+                const pool = await getPool(sedeId, req.sqlAuth);
+                const resTasa = await pool.request().query(QUERY_TASA);
+                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
+                const enriched = await enrichArticulos(pool, items, tasa);
+                finalItems.push(...enriched);
+            } catch (e) {
+                finalItems.push(...items.map(i => ({ ...i, error_enriquecimiento: e.message })));
+            }
+        }));
 
-    // Finalmente: PAGINAMOS LA LISTA ENTERA YA ENRIQUECIDA Y ORDENADA
-    finalItems = allEnriched.slice((page - 1) * limit, page * limit);
-
-} else {
-    // ESTRATEGIA B: (Orden Normal Alfabético)
-    // Optimizamos el rendimiento cortando antes de consultar los precios.
-    combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
-    const paginated = combined.slice((page - 1) * limit, page * limit);
-
-    const itemsBySede = paginated.reduce((acc, item) => {
-        acc[item.sede_id] = acc[item.sede_id] || [];
-        acc[item.sede_id].push(item);
-        return acc;
-    }, {});
-
-    await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
-        try {
-            const pool = await getPool(sedeId, req.sqlAuth);
-            const resTasa = await pool.request().query(QUERY_TASA);
-            const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
-            const enriched = await enrichArticulos(pool, items, tasa);
-            finalItems.push(...enriched);
-        } catch (e) {
-            finalItems.push(...items.map(i => ({ ...i, error_enriquecimiento: e.message })));
+        // Mantener orden final exacto según precios enriquecidos
+        if (reqSort === 'price_asc') {
+            finalItems.sort((a, b) => {
+                const pA = (a.precios && a.precios.length > 0) ? a.precios[0].precio : 0;
+                const pB = (b.precios && b.precios.length > 0) ? b.precios[0].precio : 0;
+                return pA - pB;
+            });
+        } else if (reqSort === 'price_desc') {
+            finalItems.sort((a, b) => {
+                const pA = (a.precios && a.precios.length > 0) ? a.precios[0].precio : 0;
+                const pB = (b.precios && b.precios.length > 0) ? b.precios[0].precio : 0;
+                return pB - pA;
+            });
+        } else {
+            finalItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
         }
-    }));
 
-    finalItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
-}
-
-return res.status(200).json({
-    success: true,
-    page,
-    limit,
-    total_items: total,
-    total_pages: Math.ceil(total / limit),
-    count: finalItems.length,
-    data: finalItems
-});
-
+        return res.status(200).json({
+            success: true,
+            page,
+            limit,
+            total_items: total,
+            total_pages: Math.ceil(total / limit),
+            count: finalItems.length,
+            data: finalItems
+        });
     } catch (error) {
-    res.status(500).json({ success: false, message: 'Error en búsqueda de artículos.', error: error.message });
-}
+        res.status(500).json({ success: false, message: 'Error en búsqueda de artículos.', error: error.message });
+    }
 });
 
 
