@@ -1,11 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers } = require('../db');
+const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
-
-// ── Query reutilizable de tasa de cambio ────────────────────────────────────
-const QUERY_TASA = `SELECT TOP 1 tasa_v AS tasa_cambio FROM saTasa
-                    WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD') ORDER BY fecha DESC`;
 
 // ── Helper: enriquece artículos con precios y stock ─────────────────────────
 async function enrichArticulos(pool, articulos, tasa) {
@@ -198,8 +194,7 @@ router.get('/', async (req, res) => {
         await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
             try {
                 const pool = await getPool(sedeId, req.sqlAuth);
-                const resTasa = await pool.request().query(QUERY_TASA);
-                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
+                const tasa = await getExchangeRate(pool);
                 const enriched = await enrichArticulos(pool, items, tasa);
                 enrichedItems.push(...enriched);
             } catch (e) {
@@ -432,8 +427,7 @@ router.get('/search', async (req, res) => {
         await Promise.all(Object.entries(itemsBySede).map(async ([sedeId, items]) => {
             try {
                 const pool = await getPool(sedeId, req.sqlAuth);
-                const resTasa = await pool.request().query(QUERY_TASA);
-                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
+                const tasa = await getExchangeRate(pool);
                 const enriched = await enrichArticulos(pool, items, tasa);
                 finalItems.push(...enriched);
             } catch (e) {

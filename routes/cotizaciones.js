@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers } = require('../db');
+const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
+
+console.log("🛠️ [AGENT] Iniciando Módulo de Cotizaciones (Versión Robusta v2)");
 
 /**
  * @swagger
@@ -73,14 +75,15 @@ router.get('/', async (req, res) => {
 // 2. POST /api/v1/cotizaciones - Crear
 router.post('/', async (req, res) => {
     const data = req.body;
+    console.log("📥 [AGENT] Recibiendo Cotización:", JSON.stringify({ ...data, renglones: data.renglones?.length }, null, 2));
+
     if (!data.co_cli || !data.renglones) {
         return res.status(400).json({ success: false, message: 'Campos obligatorios: co_cli, renglones' });
     }
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
         // 1. Cargar Catálogos y Parámetros Globales (Fallbacks)
-        const [resTasa, resMoneda, resAlma, resVen, resCond, resTran, resSucu, resCli] = await Promise.all([
-            pool.request().query(`SELECT TOP 1 RTRIM(co_mone) as co_mone, tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','VEB','VES') ORDER BY fecha DESC`),
+        const [resMoneda, resAlma, resVen, resCond, resTran, resSucu, resCli] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_alma) AS co_alma FROM saAlmacen`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_ven)  AS co_ven  FROM saVendedor`),
@@ -91,9 +94,11 @@ router.post('/', async (req, res) => {
         ]);
 
         const cli = resCli.recordset[0] || {};
-        const usdCode = resTasa.recordset[0]?.co_mone || 'USD';
-        const tasaBCV  = resTasa.recordset[0]?.tasa_v || 1;
         
+        // Determinar TasaBCV de forma Robusta
+        const tasaBCV = await getExchangeRate(pool);
+        console.log(`💱 [AGENT] Tasa BCV detectada para esta transacción: ${tasaBCV}`);
+
         // Jerarquía de Defaults: Web > Cliente > Empresa > Catálogo
         const defMone  = cli.co_mone  || resMoneda.recordset[0]?.g_moneda || 'BS';
         const defVen   = cli.co_ven   || resVen.recordset[0]?.co_ven     || '01';
@@ -109,9 +114,11 @@ router.post('/', async (req, res) => {
         fVenc.setDate(tsDate.getDate() + 7); 
 
         // exchange rate for conversion if needed
-        const tasaDoc = Number(resTasa.recordset[0]?.tasa_v || 1);
+        const tasaDoc = tasaBCV;
         const isUSD = data.showUSD === true;
         const renglones = data.renglones;
+
+        console.log(`🏦 [AGENT] Documento en USD: ${isUSD} | Tasa Doc: ${tasaDoc}`);
 
         let totalBruto = 0;
         let totalImp = 0;
@@ -133,6 +140,7 @@ router.post('/', async (req, res) => {
         });
 
         const totalNeto = totalBruto + totalImp;
+        console.log(`💰 [AGENT] Totales: Bruto=${totalBruto.toFixed(2)} | Neto=${totalNeto.toFixed(2)}`);
 
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
@@ -219,9 +227,24 @@ router.post('/', async (req, res) => {
                 const item = renglones[i];
                 const qty = Number(item.cantidad || 0);
                 const prcBase = Number(item.precio || 0);
-                const prcBs = isUSD ? (prcBase * tasaDoc) : prcBase;
-                const pImp = Number(item.porc_imp || 0);
                 
+                // Calculate prices in both currencies
+                let prcBs = isUSD ? (prcBase * tasaDoc) : prcBase;
+                let prcUSD = isUSD ? prcBase : (prcBase / tasaDoc);
+
+                // --- SEGURIDAD: Detección de enriquecimiento fallido ---
+                // Si el documento es en BS, pero el precio recibido es sospechosamente bajo 
+                // (ej. 12.01) y la tasa es alta (ej. 477), es probable que la web 
+                // haya enviado el precio USD por error.
+                if (!isUSD && prcBase > 0 && prcBase < (tasaDoc / 2) && prcBase < 100) {
+                    console.log(`⚠️ [AGENT] Alerta: Precio BS sospechosamente bajo (${prcBase}). Posible desajuste USD/BS. Corrigiendo...`);
+                    prcBs = prcBase * tasaDoc;
+                    prcUSD = prcBase;
+                }
+
+                console.log(`📝 [AGENT] Renglon ${i+1}: Art=${item.co_art} | Qty=${qty} | PrcIn=${prcBase} | PrcBS=${prcBs.toFixed(2)} | PrcUSD=${prcUSD.toFixed(4)}`);
+                
+                const pImp = Number(item.porc_imp || 0);
                 const lineSubtotal = qty * prcBs;
                 const lineImp = (lineSubtotal * pImp) / 100;
 
@@ -243,6 +266,7 @@ router.post('/', async (req, res) => {
                 rL.input('sDes_Art',     sql.VarChar(120),      (item.art_des || '').substring(0, 120));
                 rL.input('sCo_Uni',      sql.Char(6),          lineUni);
                 rL.input('sCo_Alma',     sql.Char(6),          item.co_alma || defAlma);
+                rL.input('sCo_Precio',   sql.Char(6),          item.co_precio || '01');
                 rL.input('sTipo_Imp',    sql.Char(1),          item.tipo_imp || '1');
                 rL.input('deTotal_Art',  sql.Decimal(18, 5),    qty);
                 rL.input('deSTotal_Art', sql.Decimal(18, 5),    qty); 
@@ -280,6 +304,13 @@ router.post('/', async (req, res) => {
                 rL.input('sMaquina',            sql.VarChar(60),      'SYNC2K');
                 
                 await rL.execute('pInsertarRenglonesCotizacionCliente');
+
+                // Asegurar precio OM (en dólares) directamente en la tabla
+                await transaction.request()
+                    .input('om', sql.Decimal(18, 5), prcUSD)
+                    .input('doc', sql.Char(20), docNum)
+                    .input('reng', sql.Int, i + 1)
+                    .query(`UPDATE saCotizacionClienteReng SET prec_vta_om = @om WHERE doc_num = @doc AND reng_num = @reng`);
             }
 
             await transaction.commit();

@@ -144,6 +144,35 @@ async function removeServer(serverId) { console.warn('⚠️ removeServer() desh
 async function setMasterConfig(config) { console.warn('⚠️ setMasterConfig() deshabilitado.'); }
 
 
+/**
+ * Busca de forma inteligente la tasa de cambio más apropiada en Profit
+ */
+async function getExchangeRate(pool) {
+  try {
+    const res = await pool.request().query(`
+      SELECT TOP 1 tasa_v AS tasa 
+      FROM saTasa 
+      WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US')
+      ORDER BY fecha DESC
+    `);
+    
+    if (res.recordset.length > 0) return Number(res.recordset[0].tasa);
+
+    // Fallback: buscar la tasa más reciente que NO sea la moneda base bolivares
+    const fallback = await pool.request().query(`
+      SELECT TOP 1 tasa_v AS tasa 
+      FROM saTasa 
+      WHERE LTRIM(RTRIM(co_mone)) NOT IN ('BS','VES','VEB','VEF')
+      ORDER BY fecha DESC
+    `);
+    
+    return Number(fallback.recordset[0]?.tasa || 1);
+  } catch (err) {
+    console.error('❌ [Agente DB] Error obteniendo tasa:', err.message);
+    return 1;
+  }
+}
+
 module.exports = { 
   sql, 
   getPool, 
@@ -153,6 +182,7 @@ module.exports = {
   setServers, 
   setMasterConfig, 
   addOrUpdateServer, 
+  getExchangeRate,
   removeServer, 
   closeAllPools 
 };
