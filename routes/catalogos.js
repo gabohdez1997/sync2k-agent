@@ -95,12 +95,20 @@ router.get('/vendedores', (req, res) =>
 );
 
 // ── Zonas ───────────────────────────────────────────────────────────────────
-router.get('/zonas', (req, res) =>
-    catalogEndpoint(req, res,
-        `SELECT RTRIM(co_zon) AS co_zon, RTRIM(zon_des) AS zon_des FROM saZona`,
-        'co_zon', 'zon_des'
-    )
-);
+router.get('/zonas', async (req, res) => {
+    console.log('[CATALOGOS] Consultando zonas...');
+    try {
+        const data = await aggregateUnique(req.sqlAuth, async (pool) => {
+            const r = await pool.request().query(`SELECT RTRIM(co_zon) AS co_zon, RTRIM(zon_des) AS zon_des FROM saZona`);
+            return r.recordset;
+        }, 'co_zon', 'zon_des');
+        console.log(`[CATALOGOS] Zonas encontradas: ${data.length}`);
+        res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        console.error('[CATALOGOS] Error en zonas:', error.message);
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
 
 // ── Segmentos ───────────────────────────────────────────────────────────────
 router.get('/segmentos', (req, res) =>

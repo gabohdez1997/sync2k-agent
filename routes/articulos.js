@@ -4,9 +4,16 @@ const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
 
 // ── Helper: enriquece artículos con precios y stock ─────────────────────────
-async function enrichArticulos(pool, articulos, tasa) {
+async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null) {
     if (!articulos.length) return articulos;
     const ids = articulos.map(a => `'${a.co_art.replace(/'/g, "''")}'`).join(',');
+
+    let authCondition = "";
+    if (authorizedAlmacenes) {
+        const almas = Array.isArray(authorizedAlmacenes) ? authorizedAlmacenes : authorizedAlmacenes.split(',');
+        const list = almas.map(a => `'${a.trim().replace(/'/g, "''")}'`).filter(a => a !== "''").join(',');
+        if (list) authCondition = ` AND s.co_alma IN (${list})`;
+    }
 
     const [resStock, resPrecios] = await Promise.all([
         pool.request().query(`
@@ -16,7 +23,7 @@ async function enrichArticulos(pool, articulos, tasa) {
                    - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
                    - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END) AS stock
             FROM saStockAlmacen s LEFT JOIN saAlmacen a ON s.co_alma = a.co_alma
-            WHERE LTRIM(RTRIM(s.co_art)) IN (${ids})
+            WHERE LTRIM(RTRIM(s.co_art)) IN (${ids}) ${authCondition}
             GROUP BY s.co_art, s.co_alma, a.des_alma
             HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
                    - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
@@ -91,11 +98,10 @@ async function enrichArticulos(pool, articulos, tasa) {
 router.get('/', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
+        const limit = parseInt(req.query.limit) || 12;
         const requestedSede = req.query.sede || req.query.sede_id;
-        const reqSort = req.query.sort; // Capturar el parámetro de ordenamiento
+        const reqSort = req.query.sort;
 
-        // Filtramos servidores
         let servers = getServers();
         if (requestedSede && requestedSede !== "Todas") {
             servers = servers.filter(srv => srv.id === requestedSede || srv.name === requestedSede);
@@ -105,7 +111,6 @@ router.get('/', async (req, res) => {
             return res.status(200).json({ success: true, page, limit, total_items: 0, total_pages: 0, count: 0, data: [] });
         }
 
-        // Configuración de Ordenamiento (Sort por Precio)
         let orderByClause = 'ORDER BY a.art_des ASC';
         let joinPrecioClause = '';
         if (reqSort === 'price_asc') {
@@ -117,73 +122,123 @@ router.get('/', async (req, res) => {
         }
 
         const co_alma = req.query.co_alma;
-
         const in_stock_all = req.query.in_stock === 'all';
+        const search = req.query.search || req.query.q;
+        const linea = req.query.linea;
+        const categoria = req.query.categoria;
+        const ubicacion = req.query.co_ubicacion;
 
-        // 1. Obtener listado básico filtrando nativamente por stock 
-        const allData = await Promise.all(servers.map(async (srv) => {
+        // Decidir si hacemos búsqueda global o paginación perezosa por rendimiento.
+        const isGlobalNeeded = !!(search || linea || categoria || ubicacion || (reqSort && reqSort.startsWith('price')) || in_stock_all);
+
+        // 1. Obtener listado simultáneamente de todos los servidores (aunque sea uno solo ahora)
+        let globalTotal = 0;
+        const allResults = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const r = pool.request();
-                if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
 
-                const topCount = page * limit;
-                const resData = await r.query(
-                    `SELECT TOP (${topCount}) RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+                let whereClauses = ["a.anulado = 0"];
+                const co_alma = req.query.co_alma;
+                const authAlmacenes = req.query.authorized_almacenes;
+
+                if (search) {
+                    r.input('search', sql.VarChar, `%${search}%`);
+                    whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR a.modelo LIKE @search OR a.ref LIKE @search)");
+                }
+                if (linea) {
+                    r.input('linea', sql.VarChar, linea);
+                    whereClauses.push("a.co_lin = @linea");
+                }
+                if (categoria) {
+                    r.input('categoria', sql.VarChar, categoria);
+                    whereClauses.push("a.co_cat = @categoria");
+                }
+                if (ubicacion) {
+                    r.input('ubic', sql.VarChar, ubicacion);
+                    whereClauses.push("(au.co_ubicacion = @ubic OR au.co_ubicacion2 = @ubic OR au.co_ubicacion3 = @ubic)");
+                }
+                const whereSQL = whereClauses.join(" AND ");
+
+                let authStockFilter = "";
+                if (co_alma) {
+                    r.input('co_alma', sql.VarChar, co_alma);
+                    authStockFilter = " AND st.co_alma = @co_alma ";
+                } else if (authAlmacenes) {
+                    const almas = authAlmacenes.split(',').map(a => `'${a.trim().replace(/'/g, "''")}'`).join(',');
+                    if (almas) authStockFilter = ` AND st.co_alma IN (${almas}) `;
+                }
+
+                // LÓGICA DE STOCK ROBUSTA: Usar ISNULL para evitar que valores nulos oculten artículos
+                const stockCondition = in_stock_all ? "" : ` AND (
+                    LTRIM(RTRIM(a.co_lin)) = '09' OR 
+                    RTRIM(a.tipo) IN ('S', '2') OR 
+                    EXISTS (
+                        SELECT 1 FROM saStockAlmacen st 
+                        WHERE st.co_art = a.co_art 
+                        ${authStockFilter}
+                        GROUP BY st.co_art
+                        HAVING (SUM(ISNULL(CASE WHEN RTRIM(tipo)='ACT' THEN stock ELSE 0 END, 0)) - 
+                                SUM(ISNULL(CASE WHEN RTRIM(tipo) IN ('COM','DES') THEN stock ELSE 0 END, 0))) > 0
+                    )
+                )`;
+
+                // Conteo real espejado con la data
+                const fromClause = `FROM saArticulo a 
+                                   ${whereSQL.includes('au.') ? 'LEFT JOIN saArtUbicacion au ON a.co_art = au.co_art' : ''}`;
+
+                const resCount = await r.query(`SELECT COUNT(DISTINCT a.co_art) as total ${fromClause} WHERE ${whereSQL} ${stockCondition}`);
+                globalTotal += resCount.recordset[0]?.total || 0;
+
+                const topClause = isGlobalNeeded ? "" : `TOP (${page * limit})`;
+
+                const querySQL = `SELECT ${topClause} RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                              RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
-                             RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
-                             RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
-                             RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
-                             RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
+                             RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
+                             RTRIM(au.co_ubicacion) AS co_ubicacion,
                              RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
-                             CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
+                             RTRIM(a.tipo_imp) AS tipo_imp,
+                             CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                              ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}
-                      FROM saArticulo a
+                      ${fromClause}
                       LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
-                      LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl
                       LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
-                      LEFT JOIN saArtUbicacion au ON a.co_art = au.co_art ${co_alma ? "AND au.co_alma = @co_alma" : ""}
-                      LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
-                      LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
-                      LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
                       LEFT JOIN (
                           SELECT co_art, co_uni, 
                                  ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
                           FROM saArtUnidad
-                      ) aun ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(aun.co_art)) AND aun.rn = 1
-                      LEFT JOIN saUnidad un ON LTRIM(RTRIM(aun.co_uni)) = LTRIM(RTRIM(un.co_uni))
+                      ) aun ON a.co_art = aun.co_art AND aun.rn = 1
+                      LEFT JOIN saUnidad un ON aun.co_uni = un.co_uni
                       ${joinPrecioClause}
-                      WHERE a.anulado = 0 
-                      AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S', '2') OR ${in_stock_all ? '1=1' : `EXISTS (
-                          SELECT 1 FROM saStockAlmacen st 
-                          WHERE st.co_art = a.co_art AND st.stock > 0
-                          ${co_alma ? ' AND st.co_alma = @co_alma' : ''}
-                      )`})
-                      ${orderByClause}`
-                );
-                return resData.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
+                      WHERE ${whereSQL} ${stockCondition}
+                      ${orderByClause}`;
+
+                const resData = await r.query(querySQL);
+                return (resData.recordset || []).map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) {
                 console.error(`[GET /] Error en sede ${srv.id}:`, e.message);
                 return [];
             }
         }));
 
-        const combined = [].concat(...allData);
+        // 2. Combinar resultados (Si solo hay uno, es directo)
+        const combined = [].concat(...allResults);
 
-        // Re-ordenar combinaciones inter-servidor según precios directos
+        // 3. Ordenar ORDEN GLOBAL basado en precios si se requiere
         if (reqSort === 'price_asc') {
-            combined.sort((a, b) => (a.precio_base || 0) - (b.precio_base || 0));
+            combined.sort((a, b) => (Number(a.precio_base) || 0) - (Number(b.precio_base) || 0));
         } else if (reqSort === 'price_desc') {
-            combined.sort((a, b) => (b.precio_base || 0) - (a.precio_base || 0));
-        } else {
-            combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
+            combined.sort((a, b) => (Number(b.precio_base) || 0) - (Number(a.precio_base) || 0));
+        } else if (isGlobalNeeded) {
+            combined.sort((a, b) => (a.descripcion || "").localeCompare(b.descripcion || ""));
         }
 
-        // 2. Paginar los resultados YA filtrados y ordenados
-        const total = combined.length;
+        // 4. Paginar
+        // Usar globalTotal para que el conteo sea siempre el real de la DB (7,188)
+        const total = isGlobalNeeded ? Math.max(combined.length, globalTotal) : globalTotal;
         const paginated = combined.slice((page - 1) * limit, page * limit);
 
-        // 3. Enriquecer solo los artículos de la página actual
+        // 5. Enriquecer solo los artículos de la página actual
         const enrichedItems = [];
         const itemsBySede = paginated.reduce((acc, item) => {
             acc[item.sede_id] = acc[item.sede_id] || [];
@@ -203,21 +258,13 @@ router.get('/', async (req, res) => {
             }
         }));
 
-        // Mantener orden luego del enriquecimiento paralelo asíncrono, usando el arreglo `.precios` oficial devuelto.
+        // Mantener orden
         if (reqSort === 'price_asc') {
-            enrichedItems.sort((a, b) => {
-                const pA = (a.precios && a.precios.length > 0) ? a.precios[0].precio : 0;
-                const pB = (b.precios && b.precios.length > 0) ? b.precios[0].precio : 0;
-                return pA - pB;
-            });
+            enrichedItems.sort((a, b) => (Number(a.precio_base) || 0) - (Number(b.precio_base) || 0));
         } else if (reqSort === 'price_desc') {
-            enrichedItems.sort((a, b) => {
-                const pA = (a.precios && a.precios.length > 0) ? a.precios[0].precio : 0;
-                const pB = (b.precios && b.precios.length > 0) ? b.precios[0].precio : 0;
-                return pB - pA;
-            });
-        } else {
-            enrichedItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
+            enrichedItems.sort((a, b) => (Number(b.precio_base) || 0) - (Number(a.precio_base) || 0));
+        } else if (isGlobalNeeded) {
+            enrichedItems.sort((a, b) => (a.descripcion || "").localeCompare(b.descripcion || ""));
         }
 
         return res.status(200).json({
@@ -311,7 +358,16 @@ router.get('/search', async (req, res) => {
         }
 
         const co_alma = req.query.co_alma;
+        const authAlmacenes = req.query.authorized_almacenes;
         const in_stock_all = req.query.in_stock === 'all';
+
+        let authStockFilter = "";
+        if (co_alma) {
+            authStockFilter = " AND st.co_alma = @co_alma ";
+        } else if (authAlmacenes) {
+            const almas = authAlmacenes.split(',').map(a => `'${a.trim().replace(/'/g, "''")}'`).join(',');
+            if (almas) authStockFilter = ` AND st.co_alma IN (${almas}) `;
+        }
 
         const ofertaCondition = `(a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%')`;
         const normalFilters = filters.filter(f => !f.hasOwnProperty('isOferta'));
@@ -319,9 +375,7 @@ router.get('/search', async (req, res) => {
 
         let whereClause = 'WHERE a.anulado = 0 ';
         if (!in_stock_all) {
-            whereClause += " AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ";
-            if (co_alma) whereClause += ' AND st.co_alma = @co_alma ';
-            whereClause += ')) ';
+            whereClause += ` AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ${authStockFilter})) `;
         }
 
         if (normalFilters.length > 0) {
@@ -341,10 +395,10 @@ router.get('/search', async (req, res) => {
         let orderByClause = 'ORDER BY a.art_des ASC';
         let joinPrecioClause = '';
         if (reqSort === 'price_asc') {
-            joinPrecioClause = "LEFT JOIN saArtPrecio pr ON a.co_art = pr.co_art AND pr.co_precio = '01'";
+            joinPrecioClause = "LEFT JOIN saArtPrecio pr ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(pr.co_art)) AND LTRIM(RTRIM(pr.co_precio)) = '01'";
             orderByClause = 'ORDER BY pr.monto ASC, a.art_des ASC';
         } else if (reqSort === 'price_desc') {
-            joinPrecioClause = "LEFT JOIN saArtPrecio pr ON a.co_art = pr.co_art AND pr.co_precio = '01'";
+            joinPrecioClause = "LEFT JOIN saArtPrecio pr ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(pr.co_art)) AND LTRIM(RTRIM(pr.co_precio)) = '01'";
             orderByClause = 'ORDER BY pr.monto DESC, a.art_des ASC';
         }
 
@@ -401,19 +455,27 @@ router.get('/search', async (req, res) => {
             }
         }));
 
-        let combined = [].concat(...allData);
-        let total = combined.length;
+        // 2. DEDUPLICAR Cruces inter-servidor
+        const combinedRaw = [].concat(...allData);
+        const uniqueMap = new Map();
+        combinedRaw.forEach(item => {
+            const co = (item.co_art || "").trim();
+            if (!uniqueMap.has(co)) uniqueMap.set(co, item);
+        });
+        const combined = Array.from(uniqueMap.values());
 
-        // 2. Orden Global (Cross-Server)
+        // 3. Orden Global (Cross-Server)
         if (reqSort === 'price_asc') {
-            combined.sort((a, b) => (a.precio_base || 0) - (b.precio_base || 0));
+            combined.sort((a, b) => (Number(a.precio_base) || 0) - (Number(b.precio_base) || 0));
         } else if (reqSort === 'price_desc') {
-            combined.sort((a, b) => (b.precio_base || 0) - (a.precio_base || 0));
+            combined.sort((a, b) => (Number(b.precio_base) || 0) - (Number(a.precio_base) || 0));
         } else {
             combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
         }
 
-        // 3. Paginación
+        let total = combined.length;
+
+        // 4. Paginación
         const paginated = combined.slice((page - 1) * limit, page * limit);
 
         // 4. Enriquecimiento paralelo solo de la página actual
@@ -428,26 +490,18 @@ router.get('/search', async (req, res) => {
             try {
                 const pool = await getPool(sedeId, req.sqlAuth);
                 const tasa = await getExchangeRate(pool);
-                const enriched = await enrichArticulos(pool, items, tasa);
+                const enriched = await enrichArticulos(pool, items, tasa, authAlmacenes);
                 finalItems.push(...enriched);
             } catch (e) {
                 finalItems.push(...items.map(i => ({ ...i, error_enriquecimiento: e.message })));
             }
         }));
 
-        // Mantener orden final exacto según precios enriquecidos
+        // Mantener el orden que ya definimos arriba (muy importante)
         if (reqSort === 'price_asc') {
-            finalItems.sort((a, b) => {
-                const pA = (a.precios && a.precios.length > 0) ? a.precios[0].precio : 0;
-                const pB = (b.precios && b.precios.length > 0) ? b.precios[0].precio : 0;
-                return pA - pB;
-            });
+            finalItems.sort((a, b) => (a.precio_base || 0) - (b.precio_base || 0));
         } else if (reqSort === 'price_desc') {
-            finalItems.sort((a, b) => {
-                const pA = (a.precios && a.precios.length > 0) ? a.precios[0].precio : 0;
-                const pB = (b.precios && b.precios.length > 0) ? b.precios[0].precio : 0;
-                return pB - pA;
-            });
+            finalItems.sort((a, b) => (b.precio_base || 0) - (a.precio_base || 0));
         } else {
             finalItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
         }
@@ -496,7 +550,11 @@ router.get('/search', async (req, res) => {
 router.get('/:co_art', async (req, res) => {
     try {
         const { co_art } = req.params;
-        const servers = getServers();
+        const requestedSede = req.query.sede || req.query.sede_id;
+        let servers = getServers();
+        if (requestedSede && requestedSede !== "Todas") {
+            servers = servers.filter(srv => srv.id === requestedSede || srv.name === requestedSede);
+        }
 
         const results = await Promise.all(servers.map(async (srv) => {
             try {
@@ -511,6 +569,7 @@ router.get('/:co_art', async (req, res) => {
                                 RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
                                 RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
                                 RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
+                                RTRIM(a.tipo_imp) AS tipo_imp,
                                 CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                          FROM saArticulo a
                          LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
@@ -529,15 +588,17 @@ router.get('/:co_art', async (req, res) => {
                          WHERE LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(@co_art))`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
-                        `SELECT RTRIM(co_alma) AS co_alma,
-                                SUM(CASE WHEN RTRIM(tipo)='ACT' THEN stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(tipo)='COM' THEN stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(tipo)='DES' THEN stock ELSE 0 END) AS stock
-                         FROM saStockAlmacen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
-                         GROUP BY co_alma
-                         HAVING (SUM(CASE WHEN RTRIM(tipo)='ACT' THEN stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(tipo)='COM' THEN stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(tipo)='DES' THEN stock ELSE 0 END)) > 0`
+                        `SELECT RTRIM(s.co_alma) AS co_alma, RTRIM(alm.des_alma) AS des_alma,
+                                SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
+                                - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
+                                - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END) AS stock
+                         FROM saStockAlmacen s
+                         LEFT JOIN saAlmacen alm ON s.co_alma = alm.co_alma
+                         WHERE LTRIM(RTRIM(s.co_art)) = LTRIM(RTRIM(@co_art))
+                         GROUP BY s.co_alma, alm.des_alma
+                         HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
+                                - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
+                                - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END)) > 0`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `WITH UP AS (SELECT RTRIM(co_precio) AS id_precio, monto AS precio,
@@ -946,16 +1007,16 @@ router.delete('/:co_art', async (req, res) => {
 router.put('/:co_art/ubicaciones', async (req, res) => {
     try {
         const { co_art } = req.params;
-        const { 
-            sede, 
+        const {
+            sede,
             co_alma = '01'
         } = req.body;
-        
+
         // Capturar valores permitiendo null/vacío, pero sabiendo si fueron provistos
         const hasU1 = req.body.hasOwnProperty('co_ubicacion');
         const hasU2 = req.body.hasOwnProperty('co_ubicacion2');
         const hasU3 = req.body.hasOwnProperty('co_ubicacion3');
-        
+
         const u1 = hasU1 ? req.body.co_ubicacion : null;
         const u2 = hasU2 ? req.body.co_ubicacion2 : null;
         const u3 = hasU3 ? req.body.co_ubicacion3 : null;
@@ -968,7 +1029,7 @@ router.put('/:co_art/ubicaciones', async (req, res) => {
             const r = new sql.Request(pool);
             const cleanCoArt = co_art.trim();
             const cleanCoAlma = co_alma.trim();
-            
+
             const finalU1 = (typeof u1 === 'string' && u1.trim() !== '') ? u1.trim() : null;
             const finalU2 = (typeof u2 === 'string' && u2.trim() !== '') ? u2.trim() : null;
             const finalU3 = (typeof u3 === 'string' && u3.trim() !== '') ? u3.trim() : null;
@@ -981,7 +1042,7 @@ router.put('/:co_art/ubicaciones', async (req, res) => {
             r.input('hasU1', sql.Bit, hasU1 ? 1 : 0);
             r.input('hasU2', sql.Bit, hasU2 ? 1 : 0);
             r.input('hasU3', sql.Bit, hasU3 ? 1 : 0);
-            
+
             const auditUser = (req.sqlAuth && req.sqlAuth.user) ? req.sqlAuth.user : (req.body.usuario_id || '999');
             r.input('user', sql.VarChar(10), auditUser);
 
@@ -992,10 +1053,10 @@ router.put('/:co_art/ubicaciones', async (req, res) => {
             if (almaCheck.recordset.length === 0) throw new Error(`El almacén "${cleanCoAlma}" no existe en esta sede.`);
 
             const auCheck = await r.query('SELECT 1 FROM saArtUbicacion WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_alma)) = LTRIM(RTRIM(@co_alma))');
-            
+
             if (auCheck.recordset.length > 0) {
                 const isAllEmpty = finalU1 === null && finalU2 === null && finalU3 === null;
-                
+
                 if (isAllEmpty) {
                     await r.query(`DELETE FROM saArtUbicacion WHERE LTRIM(RTRIM(co_art)) = @co_art AND LTRIM(RTRIM(co_alma)) = @co_alma`);
                 } else {

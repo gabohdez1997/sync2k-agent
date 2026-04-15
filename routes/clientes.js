@@ -231,6 +231,9 @@ async function requireCoVen(pool, profitUser) {
  *       - in: query
  *         name: limit
  *         schema: { type: integer, default: 10 }
+ *       - in: query
+ *         name: co_ven
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Listado de clientes
@@ -249,24 +252,36 @@ router.get('/', async (req, res) => {
         const allData = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
+                const co_ven = req.query.co_ven;
                 
+                let whereSQL = "WHERE cli.inactivo = 0 ";
+                const request = pool.request();
+                
+                if (co_ven) {
+                    request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
+                    whereSQL += " AND LTRIM(RTRIM(cli.co_ven)) = @co_ven_filter ";
+                }
+
                 // Fetch Total Count
-                const countRes = await pool.request().query("SELECT COUNT(*) AS total FROM saCliente WHERE inactivo = 0");
+                const countRes = await request.query(`SELECT COUNT(*) AS total FROM saCliente cli ${whereSQL}`);
                 globalTotal += countRes.recordset[0].total;
 
                 // Fetch Paginated Chunk
-                const r = pool.request();
-                r.input('offset', sql.Int, offset);
-                r.input('limit', sql.Int, limit);
+                request.input('offset', sql.Int, offset);
+                request.input('limit', sql.Int, limit);
                 
-                const result = await r.query(
-                    `SELECT RTRIM(co_cli) AS co_cli, RTRIM(cli_des) AS descripcion,
-                            RTRIM(rif) AS rif, RTRIM(direc1) AS direccion,
-                            RTRIM(telefonos) AS telefonos, RTRIM(email) AS email,
-                            RTRIM(co_zon) AS co_zon, contrib,
-                            RTRIM(tipo_per) AS tipo_per, contribu_e, porc_esp
-                     FROM saCliente WHERE inactivo = 0 
-                     ORDER BY cli_des
+                const result = await request.query(
+                    `SELECT RTRIM(cli.co_cli) AS co_cli, RTRIM(cli.cli_des) AS descripcion,
+                            RTRIM(cli.rif) AS rif, RTRIM(cli.direc1) AS direc1,
+                            RTRIM(cli.telefonos) AS telefonos, RTRIM(cli.email) AS email,
+                            RTRIM(cli.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des,
+                            cli.contrib, RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp,
+                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des
+                     FROM saCliente cli
+                     LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven
+                     LEFT JOIN saZona z ON cli.co_zon = z.co_zon
+                     ${whereSQL} 
+                     ORDER BY cli.cli_des
                      OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`
                 );
                 return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
@@ -302,7 +317,8 @@ router.get('/search', async (req, res) => {
 
         const FIELD_MAP = {
             co_cli: 'co_cli', descripcion: 'cli_des', rif: 'rif',
-            direccion: 'direc1', telefonos: 'telefonos', email: 'email'
+            direccion: 'direc1', telefonos: 'telefonos', email: 'email',
+            co_ven: 'co_ven'
         };
 
         const filters = Object.entries(req.query)
@@ -312,7 +328,10 @@ router.get('/search', async (req, res) => {
         if (!filters.length)
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
 
-        const whereClause = 'WHERE inactivo = 0 ' + filters.map(f => `AND ${f.column} LIKE '%' + @${f.param} + '%'`).join(' ');
+        const whereClause = 'WHERE cli.inactivo = 0 ' + filters.map(f => {
+            if (f.param === 'co_ven') return `AND LTRIM(RTRIM(cli.${f.column})) = @${f.param}`;
+            return `AND cli.${f.column} LIKE '%' + @${f.param} + '%'`;
+        }).join(' ');
         let servers = getServers();
         if (req.query.sede_id) servers = servers.filter(s => s.id === req.query.sede_id);
         else if (req.query.sede) servers = servers.filter(s => s.id === req.query.sede);
@@ -327,7 +346,7 @@ router.get('/search', async (req, res) => {
                 // Fetch Total Count
                 const countReq = pool.request();
                 filters.forEach(f => countReq.input(f.param, sql.VarChar, f.value));
-                const countRes = await countReq.query(`SELECT COUNT(*) AS total FROM saCliente ${whereClause}`);
+                const countRes = await countReq.query(`SELECT COUNT(*) AS total FROM saCliente cli LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven LEFT JOIN saZona z ON cli.co_zon = z.co_zon ${whereClause}`);
                 globalTotal += countRes.recordset[0].total;
 
                 // Fetch Paginated Chunk
@@ -337,13 +356,17 @@ router.get('/search', async (req, res) => {
                 r.input('limit', sql.Int, limit);
                 
                 const result = await r.query(
-                    `SELECT RTRIM(co_cli) AS co_cli, RTRIM(cli_des) AS descripcion,
-                            RTRIM(rif) AS rif, RTRIM(direc1) AS direccion,
-                            RTRIM(telefonos) AS telefonos, RTRIM(email) AS email,
-                            RTRIM(co_zon) AS co_zon, contrib,
-                            RTRIM(tipo_per) AS tipo_per, contribu_e, porc_esp
-                     FROM saCliente ${whereClause} 
-                     ORDER BY cli_des
+                    `SELECT RTRIM(cli.co_cli) AS co_cli, RTRIM(cli.cli_des) AS descripcion,
+                            RTRIM(cli.rif) AS rif, RTRIM(cli.direc1) AS direc1,
+                            RTRIM(cli.telefonos) AS telefonos, RTRIM(cli.email) AS email,
+                            RTRIM(cli.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des,
+                            cli.contrib, RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp,
+                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des
+                     FROM saCliente cli
+                     LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven
+                     LEFT JOIN saZona z ON cli.co_zon = z.co_zon
+                     ${whereClause} 
+                     ORDER BY cli.cli_des
                      OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`
                 );
                 return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
@@ -397,13 +420,17 @@ router.get('/:co_cli', async (req, res) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const result = await pool.request().input('co_cli', sql.VarChar, co_cli).query(
-                    `SELECT RTRIM(co_cli) AS co_cli, RTRIM(cli_des) AS descripcion,
-                            RTRIM(rif) AS rif, RTRIM(direc1) AS direccion,
-                            RTRIM(telefonos) AS telefonos, RTRIM(email) AS email,
-                            RTRIM(co_ven) AS co_ven, RTRIM(co_zon) AS co_zon,
-                            RTRIM(co_seg) AS co_seg, inactivo, contrib,
-                            RTRIM(tipo_per) AS tipo_per, contribu_e, porc_esp
-                     FROM saCliente WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))`
+                    `SELECT RTRIM(cli.co_cli) AS co_cli, RTRIM(cli.cli_des) AS descripcion,
+                            RTRIM(cli.rif) AS rif, RTRIM(cli.direc1) AS direc1,
+                            RTRIM(cli.telefonos) AS telefonos, RTRIM(cli.email) AS email,
+                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des,
+                            RTRIM(cli.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des,
+                            RTRIM(cli.co_seg) AS co_seg, cli.inactivo, cli.contrib,
+                            RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp
+                     FROM saCliente cli
+                     LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven
+                     LEFT JOIN saZona z ON cli.co_zon = z.co_zon
+                     WHERE LTRIM(RTRIM(cli.co_cli)) = LTRIM(RTRIM(@co_cli))`
                 );
                 if (!result.recordset.length) return null;
                 return { ...result.recordset[0], sede_id: srv.id, sede_nombre: srv.name };

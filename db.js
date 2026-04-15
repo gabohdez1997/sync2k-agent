@@ -81,10 +81,11 @@ async function getPool(serverId, sqlAuth = null) {
             server: config.host,
             database: config.database,
             options: {
-                // Forzamos sin encriptación estricta y cert de confianza true para SQL antiguos (2008 - 2012)
                 encrypt: false, 
                 trustServerCertificate: true,
-                enableArithAbort: true
+                enableArithAbort: true,
+                connectionTimeout: 10000, // 10s timeout
+                requestTimeout: 30000     // 30s timeout
             },
             pool: { 
                 max: 10, 

@@ -17,7 +17,7 @@ const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/m
  * @swagger
  * /api/v1/pedidos:
  *   get:
- *     summary: Obtener listado paginado de pedidos de venta
+ *     summary: Obtener listado paginado de pedidos de venta con filtros
  *     tags: [Pedidos]
  *     parameters:
  *       - in: query
@@ -29,7 +29,15 @@ const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/m
  *       - in: query
  *         name: sede
  *         schema: { type: string }
- *         description: ID de la sede para filtrar
+ *       - in: query
+ *         name: doc_num
+ *         schema: { type: string }
+ *       - in: query
+ *         name: co_cli
+ *         schema: { type: string }
+ *       - in: query
+ *         name: co_ven
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Listado de pedidos
@@ -38,7 +46,7 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 10;
-        const { sede } = req.query;
+        const { sede, doc_num, co_cli, co_ven } = req.query;
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -48,8 +56,26 @@ router.get('/', async (req, res) => {
         const allData = await Promise.all(targets.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
+                const request = pool.request();
+                let whereClauses = ["1=1"];
+
+                if (doc_num) {
+                    request.input('doc_num', sql.VarChar, `%${doc_num}%`);
+                    whereClauses.push("p.doc_num LIKE @doc_num");
+                }
+                if (co_cli) {
+                    request.input('co_cli_search', sql.VarChar, `%${co_cli}%`);
+                    whereClauses.push("(p.co_cli LIKE @co_cli_search OR c.cli_des LIKE @co_cli_search)");
+                }
+                if (co_ven) {
+                    request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
+                    whereClauses.push("LTRIM(RTRIM(p.co_ven)) = @co_ven_filter");
+                }
+
+                const whereSQL = whereClauses.join(" AND ");
+                
                 const [result, resTasa] = await Promise.all([
-                    pool.request().query(`
+                    request.query(`
                         SELECT RTRIM(p.doc_num) AS doc_num, RTRIM(p.descrip) AS descrip,
                                RTRIM(p.co_cli)  AS co_cli,  RTRIM(c.cli_des) AS cli_des,
                                p.fec_emis, p.fec_venc, p.status, p.anulado,
@@ -57,11 +83,13 @@ router.get('/', async (req, res) => {
                                p.tasa AS tasa_doc, p.total_neto, p.saldo
                         FROM saPedidoVenta p
                         LEFT JOIN saCliente c ON p.co_cli = c.co_cli
+                        WHERE ${whereSQL}
                         ORDER BY p.fec_emis DESC, p.doc_num DESC
                     `),
                     pool.request().query(`SELECT TOP 1 tasa_v AS tasa_bcv FROM saTasa
                                           WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD') ORDER BY fecha DESC`)
                 ]);
+
                 const tasa_bcv = resTasa.recordset[0]?.tasa_bcv || null;
                 return result.recordset.map(p => ({ ...p, tasa_bcv, sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) { return []; }
