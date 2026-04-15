@@ -17,7 +17,7 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h } = req.query;
+        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h, search } = req.query;
         
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
@@ -35,6 +35,10 @@ router.get('/', async (req, res) => {
                 if (co_cli) {
                     request.input('co_cli_search', sql.VarChar, `%${co_cli}%`);
                     whereClauses.push("(c.co_cli LIKE @co_cli_search OR cl.cli_des LIKE @co_cli_search)");
+                }
+                if (search) {
+                    request.input('search_all', sql.VarChar, `%${search}%`);
+                    whereClauses.push("(c.doc_num LIKE @search_all OR c.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all)");
                 }
                 if (co_ven) {
                     request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
