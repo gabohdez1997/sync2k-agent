@@ -34,7 +34,7 @@ router.get('/', async (req, res) => {
                 }
                 if (co_cli) {
                     request.input('co_cli_search', sql.VarChar, `%${co_cli}%`);
-                    whereClauses.push("(c.co_cli LIKE @co_cli_search OR cl.cli_des LIKE @co_cli_search)");
+                    whereClauses.push("(c.co_cli LIKE @co_cli_search OR cl.cli_des LIKE @co_cli_search OR c.doc_num LIKE @co_cli_search)");
                 }
                 if (search) {
                     request.input('search_all', sql.VarChar, `%${search}%`);
@@ -166,7 +166,7 @@ router.post('/', async (req, res) => {
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
         // 1. Cargar Catálogos y Parámetros Globales (Fallbacks)
-        const [resMoneda, resUSD, resAlma, resVen, resCond, resSucu, resCli, resTax] = await Promise.all([
+        const [resMoneda, resUSD, resAlma, resVen, resCond, resSucu, resCli, resTax, resTasa] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_mone)  AS co_mone   FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_alma) AS co_alma FROM saAlmacen`),
@@ -174,7 +174,8 @@ router.post('/', async (req, res) => {
             pool.request().query(`SELECT TOP 1 RTRIM(co_cond) AS co_cond FROM saCondicionPago`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
             pool.request().input('co_cli', sql.Char(16), data.co_cli).query(`SELECT RTRIM(co_mone) as co_mone, RTRIM(cond_pag) as cond_pag, RTRIM(co_ven) as co_ven, RTRIM(co_sucu_in) as co_sucu FROM saCliente WHERE co_cli = @co_cli`),
-            pool.request().query(`SELECT TOP 1 RTRIM(tax_id) AS tax_id FROM saTax`)
+            pool.request().query(`SELECT TOP 1 RTRIM(tax_id) AS tax_id FROM saTax`),
+            pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`)
         ]);
 
         const cli = resCli.recordset[0] || {};
@@ -310,7 +311,12 @@ router.post('/', async (req, res) => {
                 isUSD = String(data.co_mone || existingHeader?.co_mone || '').includes('US');
             }
             
-            const tasaDoc = Number(data.tasa || existingHeader?.tasa || 1);
+            const currentTasa = resTasa.recordset[0]?.tasa_v || 1;
+            let tasaDoc = Number(data.tasa || existingHeader?.tasa || currentTasa);
+            
+            if (tasaDoc <= 1 && currentTasa > 1) {
+                tasaDoc = currentTasa; // Auto-corrección de bug anterior
+            }
             
             // Recalcular Totales desde Renglones (Importante para que no guarde en cero)
             // En Profit, los totales de cabecera suelen almacenarse en MONEDA BASE (BS)
