@@ -185,7 +185,12 @@ router.get('/', async (req, res) => {
 
                 // Conteo real espejado con la data
                 const fromClause = `FROM saArticulo a 
-                                   ${whereSQL.includes('au.') ? 'LEFT JOIN saArtUbicacion au ON a.co_art = au.co_art' : ''}`;
+                                   LEFT JOIN (
+                                       SELECT co_art, co_ubicacion, co_ubicacion2, co_ubicacion3,
+                                              ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY co_ubicacion) as rn
+                                       FROM saArtUbicacion
+                                       ${co_alma ? "WHERE co_alma = @co_alma" : ""}
+                                   ) au ON a.co_art = au.co_art AND au.rn = 1`;
 
                 const resCount = await r.query(`SELECT COUNT(DISTINCT a.co_art) as total ${fromClause} WHERE ${whereSQL} ${stockCondition}`);
                 globalTotal += resCount.recordset[0]?.total || 0;

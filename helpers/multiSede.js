@@ -132,4 +132,24 @@ function paginatedResponse(res, combined, page, limit) {
     });
 }
 
-module.exports = { aggregateRead, aggregateUnique, executeWrite, writeResponse, paginatedResponse };
+/**
+ * Rellena una cadena con espacios al final para coincidir con la longitud de un campo CHAR en Profit Plus.
+ * @param {string|number|null} val - Valor a procesar
+ * @param {number} length - Longitud total deseada
+ * @returns {string} Cadena acolchada
+ */
+function padProfit(val, length) {
+    if (val === null || val === undefined) return ' '.repeat(length);
+    const str = String(val).trim();
+    if (str.length >= length) return str.substring(0, length);
+    return str.padEnd(length, ' ');
+}
+
+module.exports = { 
+    aggregateRead, 
+    aggregateUnique, 
+    executeWrite, 
+    writeResponse, 
+    paginatedResponse,
+    padProfit
+};

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
-const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
+const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 
 console.log("🛠️ [AGENT] Iniciando Módulo de Cotizaciones (Versión Unificada POST)");
 
@@ -347,14 +347,14 @@ router.post('/', async (req, res) => {
             const finalMone = isUSD ? usdCode : bsCode;
             
             const rH = new sql.Request(transaction);
-            rH.input('sDoc_Num',          sql.Char(20),         docNum);
+            rH.input('sDoc_Num',          sql.Char(20),         padProfit(docNum, 20));
             rH.input('sDescrip',          sql.VarChar(60),      (data.descrip || existingHeader?.descrip || 'COTIZACION WEB').substring(0, 60));
-            rH.input('sCo_Cli',           sql.Char(16),         data.co_cli  || existingHeader?.co_cli);
-            rH.input('sCo_Cta_Ingr_Egr',  sql.Char(20),         existingHeader?.co_cta_ingr_egr || null);
-            rH.input('sCo_Tran',          sql.Char(6),          existingHeader?.co_tran || '001');
-            rH.input('sCo_Mone',          sql.Char(6),          finalMone);
-            rH.input('sCo_Ven',           sql.Char(6),          data.co_ven  || existingHeader?.co_ven  || defVen);
-            rH.input('sCo_Cond',          sql.Char(6),          data.co_cond || existingHeader?.co_cond || defCond);
+            rH.input('sCo_Cli',           sql.Char(16),         padProfit(data.co_cli  || existingHeader?.co_cli, 16));
+            rH.input('sCo_Cta_Ingr_Egr',  sql.Char(20),         padProfit(existingHeader?.co_cta_ingr_egr || null, 20));
+            rH.input('sCo_Tran',          sql.Char(6),          padProfit(existingHeader?.co_tran || '001', 6));
+            rH.input('sCo_Mone',          sql.Char(6),          padProfit(finalMone, 6));
+            rH.input('sCo_Ven',           sql.Char(6),          padProfit(data.co_ven  || existingHeader?.co_ven  || defVen, 6));
+            rH.input('sCo_Cond',          sql.Char(6),          padProfit(data.co_cond || existingHeader?.co_cond || defCond, 6));
             rH.input('sdFec_Emis',        sql.SmallDateTime,    isUpdate ? existingHeader.fec_emis : tsDate);
             rH.input('sdFec_Venc',        sql.SmallDateTime,    fVenc);
             rH.input('sdFec_Reg',         sql.SmallDateTime,    isUpdate ? existingHeader.fec_reg : tsDate);
@@ -388,8 +388,8 @@ router.post('/', async (req, res) => {
             rH.input('sImpfis',           sql.VarChar(20),      existingHeader?.impfis || '');
             rH.input('sImpfisfac',        sql.VarChar(20),      existingHeader?.impfisfac || '');
             rH.input('bVen_Ter',          sql.Bit,              existingHeader?.ven_ter || 0);
-            rH.input('sCo_Us_In',         sql.Char(6),          isUpdate ? (existingHeader.co_us_in || auditUser) : auditUser);
-            rH.input('sCo_Sucu_In',       sql.Char(6),          isUpdate ? (existingHeader.co_sucu_in || defSucu) : (data.co_sucu_in || defSucu));
+            rH.input('sCo_Us_In',         sql.Char(6),          padProfit(isUpdate ? (existingHeader.co_us_in || auditUser) : auditUser, 6));
+            rH.input('sCo_Sucu_In',       sql.Char(6),          padProfit(isUpdate ? (existingHeader.co_sucu_in || defSucu) : (data.co_sucu_in || defSucu), 6));
             rH.input('sRevisado',         sql.Char(1),          existingHeader?.revisado || '0');
             rH.input('sTrasnfe',          sql.Char(1),          existingHeader?.trasnfe  || '0');
             rH.input('sMaquina',          sql.VarChar(60),      'SYNC2K');
@@ -414,13 +414,13 @@ router.post('/', async (req, res) => {
 
                 const rL = new sql.Request(transaction);
                 rL.input('iReng_Num',          sql.Int,              i + 1);
-                rL.input('sDoc_Num',           sql.Char(20),         docNum);
-                rL.input('sCo_Art',            sql.Char(30),         item.co_art);
+                rL.input('sDoc_Num',           sql.Char(20),         padProfit(docNum, 20));
+                rL.input('sCo_Art',            sql.Char(30),         padProfit(item.co_art, 30));
                 rL.input('sDes_Art',           sql.VarChar(120),      (item.art_des || '').substring(0, 120));
-                rL.input('sCo_Uni',            sql.Char(6),          item.co_uni || 'UNI');
-                rL.input('sSco_Uni',           sql.Char(6),          null);
-                rL.input('sCo_Alma',           sql.Char(6),          item.co_alma || defAlma);
-                rL.input('sCo_Precio',         sql.Char(6),          coPrecio || '01');
+                rL.input('sCo_Uni',            sql.Char(6),          padProfit(item.co_uni || 'UNI', 6));
+                rL.input('sSco_Uni',           sql.Char(6),          padProfit(null, 6));
+                rL.input('sCo_Alma',           sql.Char(6),          padProfit(item.co_alma || defAlma, 6));
+                rL.input('sCo_Precio',         sql.Char(6),          padProfit(coPrecio || '01', 6));
                 rL.input('sTipo_Imp',          sql.Char(1),          item.tipo_imp || '1');
                 rL.input('sTipo_Imp2',         sql.Char(1),          null);
                 rL.input('sTipo_Imp3',         sql.Char(1),          null);
@@ -454,8 +454,8 @@ router.post('/', async (req, res) => {
                 rL.input('deMonto_Dev',        sql.Decimal(18, 5),    0); // NO PERMITE NULL
                 rL.input('sComentario',        sql.VarChar(sql.MAX),  '');
                 rL.input('sDis_Cen',           sql.VarChar(sql.MAX),  null);
-                rL.input('sCo_Sucu_In',        sql.Char(6),           data.co_sucu_in || defSucu);
-                rL.input('sCo_Us_In',          sql.Char(6),           auditUser);
+                rL.input('sCo_Sucu_In',        sql.Char(6),           padProfit(data.co_sucu_in || defSucu, 6));
+                rL.input('sCo_Us_In',          sql.Char(6),           padProfit(auditUser, 6));
                 rL.input('sREVISADO',          sql.Char(1),           '0');
                 rL.input('sTRASNFE',           sql.Char(1),           '0');
                 rL.input('sMaquina',           sql.VarChar(60),      'SYNC2K');
@@ -463,7 +463,7 @@ router.post('/', async (req, res) => {
 
                 await transaction.request()
                     .input('om', sql.Decimal(18, 5), prcUSD)
-                    .input('doc', sql.Char(20), docNum)
+                    .input('doc', sql.Char(20), padProfit(docNum, 20))
                     .input('reng', sql.Int, i + 1)
                     .query(`UPDATE saCotizacionClienteReng SET prec_vta_om = @om WHERE doc_num = @doc AND reng_num = @reng`);
             }

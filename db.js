@@ -30,15 +30,25 @@ let cachedServers = [];
  * Se DEBE llamar al iniciar el servidor para cargar la configuración.
  */
 async function initServers() {
-    console.log('📡 [Agente DB] Sincronizando configuración de sedes desde PostgreSQL Local...');
+    const localBranchName = process.env.LOCAL_BRANCH_NAME;
+    console.log(`📡 [Agente DB] Sincronizando configuración de sedes desde PostgreSQL Local...${localBranchName ? ` (Filtrando por: ${localBranchName})` : ''}`);
     try {
-        const { rows } = await pgPool.query('SELECT id, name, sql_config FROM branches WHERE active = true');
+        let query = 'SELECT id, name, sql_config, profit_branch_codes FROM branches WHERE active = true';
+        const params = [];
+
+        if (localBranchName) {
+            query += ' AND (name = $1 OR id = $1)';
+            params.push(localBranchName);
+        }
+
+        const { rows } = await pgPool.query(query, params);
         cachedServers = rows.map(r => ({
             id: r.id,
             name: r.name,
             server: r.sql_config?.host || r.sql_config?.server,
             database: r.sql_config?.database,
-            sql_config: r.sql_config
+            sql_config: r.sql_config,
+            profit_branch_codes: r.profit_branch_codes
         }));
         console.log(`✅ [Agente DB] Sincronización exitosa. ${cachedServers.length} sedes registradas.`);
         return cachedServers;

@@ -150,11 +150,26 @@ router.get('/condiciones_pago', (req, res) =>
  */
 router.get('/almacenes', async (req, res) => {
     try {
+        const requestedSede = req.query.sede || req.query.sede_id;
         const data = await aggregateRead(req.sqlAuth, async (pool, srv) => {
-            const r = await pool.request().query(
-                `SELECT RTRIM(co_alma) AS co_alma, RTRIM(des_alma) AS des_alma FROM saAlmacen`
-            );
-            return r.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
+            // Si se especificó una sede y no es ésta, ignorar
+            if (requestedSede && requestedSede !== 'Todas' && srv.id !== requestedSede && srv.name !== requestedSede) {
+                return [];
+            }
+
+            const r = pool.request();
+            let query = `SELECT RTRIM(co_alma) AS co_alma, RTRIM(des_alma) AS des_alma FROM saAlmacen`;
+            
+            // Filtrar por los códigos de sucursal de Profit asociados a esta sede
+            const codes = (srv.profit_branch_codes || []).map(c => typeof c === 'string' ? c : c.code).filter(Boolean);
+            if (codes.length > 0) {
+                const params = codes.map((c, i) => `@c${i}`).join(',');
+                codes.forEach((c, i) => r.input(`c${i}`, sql.Char, c));
+                query += ` WHERE co_sucur IN (${params})`;
+            }
+
+            const result = await r.query(query);
+            return result.recordset.map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
         });
         data.sort((a, b) => a.des_alma.localeCompare(b.des_alma));
         res.status(200).json({ success: true, count: data.length, data });

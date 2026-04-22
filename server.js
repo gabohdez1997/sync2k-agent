@@ -14,6 +14,24 @@ const swaggerSpecs = require('./swaggerOptions');
 const app = express();
 
 // Middlewares globales
+// Middleware para soportar Private Network Access (PNA)
+// Permite que sitios públicos (Vercel) accedan a redes privadas (Tailscale)
+app.use((req, res, next) => {
+    // Soporte para Private Network Access (PNA) - Requerido por Chrome para Tailscale
+    const origin = req.headers.origin;
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    
+    if (req.method === 'OPTIONS') {
+        console.log(`[PNA DEBUG] Respondiendo OPTIONS para: ${origin || 'Desconocido'}`);
+        res.setHeader('Access-Control-Allow-Origin', origin || '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+        res.setHeader('Access-Control-Allow-Headers', 'x-api-key, x-sql-auth, x-profit-user, content-type');
+        res.setHeader('Access-Control-Max-Age', '86400');
+        return res.sendStatus(204);
+    }
+    next();
+});
+
 app.use(cors());
 app.use(express.json());
 
