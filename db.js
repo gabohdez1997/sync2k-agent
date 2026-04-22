@@ -37,7 +37,7 @@ async function initServers() {
         const params = [];
 
         if (localBranchName) {
-            query += ' AND (name = $1 OR id = $1)';
+            query += ' AND (name = $1 OR id::text = $1)';
             params.push(localBranchName);
         }
 
