@@ -41,12 +41,24 @@ router.get('/', async (req, res) => {
         const results = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
-                const query = `
+                const r = pool.request();
+                
+                let query = `
                     SELECT RTRIM(co_ubicacion) AS id, RTRIM(des_ubicacion) AS descripcion
                     FROM saUbicacion
-                    ORDER BY des_ubicacion
                 `;
-                const dbRes = await pool.request().query(query);
+
+                // Filtrar por los códigos de sucursal de Profit asociados a esta sede
+                const codes = (srv.profit_branch_codes || []).map(c => typeof c === 'string' ? c : c.code).filter(Boolean);
+                if (codes.length > 0) {
+                    const params = codes.map((c, i) => `@c${i}`).join(',');
+                    codes.forEach((c, i) => r.input(`c${i}`, sql.Char, c));
+                    query += ` WHERE co_sucu_in IN (${params})`;
+                }
+
+                query += ` ORDER BY des_ubicacion`;
+                
+                const dbRes = await r.query(query);
                 return dbRes.recordset.map(u => ({ ...u, sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) {
                 console.error(`[GET /ubicaciones] Error en sede ${srv.id}:`, e.message);
