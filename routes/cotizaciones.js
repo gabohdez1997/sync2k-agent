@@ -166,7 +166,7 @@ router.post('/', async (req, res) => {
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
         // 1. Cargar Catálogos y Parámetros Globales (Fallbacks)
-        const [resMoneda, resUSD, resAlma, resVen, resCond, resSucu, resCli, resTax, resTasa] = await Promise.all([
+        const [resMoneda, resUSD, resAlma, resVen, resCond, resSucu, resCli, resTax, resTasa, resCtaIE, resTran] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_mone)  AS co_mone   FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_alma) AS co_alma FROM saAlmacen`),
@@ -175,7 +175,9 @@ router.post('/', async (req, res) => {
             pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
             pool.request().input('co_cli', sql.Char(16), data.co_cli).query(`SELECT RTRIM(co_mone) as co_mone, RTRIM(cond_pag) as cond_pag, RTRIM(co_ven) as co_ven, RTRIM(co_sucu_in) as co_sucu FROM saCliente WHERE co_cli = @co_cli`),
             pool.request().query(`SELECT TOP 1 RTRIM(tax_id) AS tax_id FROM saTax`),
-            pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`)
+            pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`),
+            pool.request().query(`SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr FROM saCuentaIngEgr`),
+            pool.request().query(`SELECT TOP 1 RTRIM(co_tran) AS co_tran FROM saTransporte`)
         ]);
 
         const cli = resCli.recordset[0] || {};
@@ -185,6 +187,8 @@ router.post('/', async (req, res) => {
         const defCond  = cli.cond_pag || resCond.recordset[0]?.co_cond   || '01';
         const defAlma  = resAlma.recordset[0]?.co_alma   || '01';
         const defSucu  = resSucu.recordset[0]?.co_sucur  || '01';
+        const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || '01';
+        const defTran  = resTran.recordset[0]?.co_tran || '01';
         const rawTax   = resTax.recordset[0]?.tax_id;
         const defTax   = rawTax ? rawTax.trim() : null;
         
@@ -350,8 +354,8 @@ router.post('/', async (req, res) => {
             rH.input('sDoc_Num',          sql.Char(20),         padProfit(docNum, 20));
             rH.input('sDescrip',          sql.VarChar(60),      (data.descrip || existingHeader?.descrip || 'COTIZACION WEB').substring(0, 60));
             rH.input('sCo_Cli',           sql.Char(16),         padProfit(data.co_cli  || existingHeader?.co_cli, 16));
-            rH.input('sCo_Cta_Ingr_Egr',  sql.Char(20),         padProfit(existingHeader?.co_cta_ingr_egr || null, 20));
-            rH.input('sCo_Tran',          sql.Char(6),          padProfit(existingHeader?.co_tran || '001', 6));
+            rH.input('sCo_Cta_Ingr_Egr',  sql.Char(20),         padProfit(existingHeader?.co_cta_ingr_egr || defCtaIE, 20));
+            rH.input('sCo_Tran',          sql.Char(6),          padProfit(existingHeader?.co_tran || data.co_tran || defTran, 6));
             rH.input('sCo_Mone',          sql.Char(6),          padProfit(finalMone, 6));
             rH.input('sCo_Ven',           sql.Char(6),          padProfit(data.co_ven  || existingHeader?.co_ven  || defVen, 6));
             rH.input('sCo_Cond',          sql.Char(6),          padProfit(data.co_cond || existingHeader?.co_cond || defCond, 6));

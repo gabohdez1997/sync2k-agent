@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
-const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
+const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 
 /**
  * @swagger
@@ -234,12 +234,14 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Campo obligatorio: co_cli' });
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
-        const [resTasa, resMoneda, resAlma, resVen, resCond] = await Promise.all([
+        const [resTasa, resMoneda, resAlma, resVen, resCond, resCtaIE, resTran] = await Promise.all([
             pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD') ORDER BY fecha DESC`),
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_alma) AS co_alma FROM saAlmacen`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_ven)  AS co_ven  FROM saVendedor`),
-            pool.request().query(`SELECT TOP 1 RTRIM(co_cond) AS co_cond FROM saCondicionPago`)
+            pool.request().query(`SELECT TOP 1 RTRIM(co_cond) AS co_cond FROM saCondicionPago`),
+            pool.request().query(`SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr FROM saCuentaIngEgr`),
+            pool.request().query(`SELECT TOP 1 RTRIM(co_tran) AS co_tran FROM saTransporte`)
         ]);
 
         const tasa     = resTasa.recordset[0]?.tasa_v || 1;
@@ -247,6 +249,8 @@ router.post('/', async (req, res) => {
         const defAlma  = resAlma.recordset[0]?.co_alma   || '01';
         const defVen   = resVen.recordset[0]?.co_ven     || '01';
         const defCond  = resCond.recordset[0]?.co_cond   || '01';
+        const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || '01';
+        const defTran  = resTran.recordset[0]?.co_tran || '01';
 
         const renglones   = data.renglones || [];
         const totalBruto  = renglones.reduce((s, r) => s + (parseFloat(r.cantidad)||0) * (parseFloat(r.precio)||0), 0);
@@ -260,9 +264,9 @@ router.post('/', async (req, res) => {
             rH.input('sDoc_Num',         sql.Char(20),         docNum);
             rH.input('sDescrip',         sql.VarChar(60),      data.descrip || 'Pedido API');
             rH.input('sCo_Cli',          sql.Char(16),         data.co_cli);
-            rH.input('sCo_Tran',         sql.Char(6),          data.co_tran || '01');
+            rH.input('sCo_Tran',         sql.Char(6),          padProfit(data.co_tran || defTran, 6));
             rH.input('sCo_Mone',         sql.Char(6),          data.co_mone || defMone);
-            rH.input('sCo_Cta_Ingr_Egr', sql.Char(20),         null);
+            rH.input('sCo_Cta_Ingr_Egr', sql.Char(20),         padProfit(defCtaIE, 20));
             rH.input('sCo_Ven',          sql.Char(6),          data.co_ven  || defVen);
             rH.input('sCo_Cond',         sql.Char(6),          data.co_cond || defCond);
             rH.input('sdFec_Emis',       sql.SmallDateTime,    tsDate);
@@ -304,10 +308,10 @@ router.post('/', async (req, res) => {
                 const rL   = new sql.Request(transaction);
                 rL.input('iReng_Num',    sql.Int,              i + 1);
                 rL.input('sDoc_Num',     sql.Char(20),         docNum);
-                rL.input('sCo_Art',      sql.Char(30),         item.co_art);
-                rL.input('sCo_Uni',      sql.Char(6),          'UNI');
-                rL.input('sCo_Alma',     sql.Char(6),          item.co_alma || defAlma);
-                rL.input('sCo_Precio',   sql.Char(6),          '01');
+                rL.input('sCo_Art',      sql.Char(30),         padProfit(item.co_art, 30));
+                rL.input('sCo_Uni',      sql.Char(6),          padProfit('UNI', 6));
+                rL.input('sCo_Alma',     sql.Char(6),          padProfit(item.co_alma || defAlma, 6));
+                rL.input('sCo_Precio',   sql.Char(6),          padProfit('01', 6));
                 rL.input('sTipo_Imp',    sql.Char(1),          '1');
                 rL.input('deTotal_Art',  sql.Decimal(18,5),    q);
                 rL.input('deSTotal_Art', sql.Decimal(18,5),    0);

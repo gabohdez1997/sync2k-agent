@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
-const { executeWrite, writeResponse } = require('../helpers/multiSede');
+const { executeWrite, writeResponse, padProfit } = require('../helpers/multiSede');
 
 /**
  * @swagger
@@ -184,24 +184,22 @@ router.post('/', async (req, res) => {
             if (check.recordset.length > 0) throw new Error('La ubicación ya existe.');
 
             const r = new sql.Request(pool);
-            r.input('sCo_Ubicacion', sql.Char(6), data.id);
+            r.input('sCo_Ubicacion', sql.Char(6), padProfit(data.id, 6));
             r.input('sDes_Ubicacion', sql.VarChar(60), data.descripcion);
-            r.input('sCo_Us_In', sql.Char(6), '999');
-            r.input('sCo_Sucu_In', sql.Char(6), data.co_sucu || data.sucursal || req.query.co_sucu || null);
+            r.input('sCo_Us_In', sql.Char(6), padProfit('999', 6));
+            r.input('sCo_Sucu_In', sql.Char(6), padProfit(data.co_sucu || data.sucursal || req.query.co_sucu || '01', 6));
             r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
             r.input('sRevisado', sql.Char(1), '0');
             r.input('sTrasnfe', sql.Char(1), '0');
             
-            // Usando procedimiento por defecto si no lo hay hacemos INSERT directo, pero como es Profit:
             try {
-                await r.execute('pInsertarUbicacion'); // Estándar profit
+                await r.execute('pInsertarUbicacion');
             } catch (pErr) {
-                // Fallback a INSERT si el proc no exites/es diferente
                 await pool.request()
-                    .input('co', sql.Char(6), data.id)
+                    .input('co', sql.Char(6), padProfit(data.id, 6))
                     .input('des', sql.VarChar(60), data.descripcion)
-                    .input('sucu', sql.Char(6), data.co_sucu || data.sucursal || req.query.co_sucu || null)
-                    .query('INSERT INTO saUbicacion (co_ubicacion, des_ubicacion, co_us_in, fe_us_in, co_sucu_in) VALUES (@co, @des, \'999\', GETDATE(), @sucu)');
+                    .input('sucu', sql.Char(6), padProfit(data.co_sucu || data.sucursal || req.query.co_sucu || '01', 6))
+                    .query('INSERT INTO saUbicacion (co_ubicacion, des_ubicacion, co_us_in, fe_us_in, co_sucu_in) VALUES (@co, @des, \'999   \', GETDATE(), @sucu)');
             }
         });
 
@@ -254,12 +252,12 @@ router.put('/:id', async (req, res) => {
             const r = new sql.Request(pool);
             r.input('id', sql.VarChar, id);
             r.input('des', sql.VarChar(60), data.descripcion);
-            r.input('sucu', sql.Char(6), data.co_sucu || data.sucursal || req.query.co_sucu || null);
+            r.input('sucu', sql.Char(6), padProfit(data.co_sucu || data.sucursal || req.query.co_sucu || '01', 6));
             
             const check = await r.query('SELECT 1 FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@id))');
             if (check.recordset.length === 0) throw new Error('Ubicación no existe.');
             
-            await r.query('UPDATE saUbicacion SET des_ubicacion = @des, co_sucu_mo = @sucu, fe_us_mo = GETDATE(), co_us_mo = \'999\' WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@id))');
+            await r.query('UPDATE saUbicacion SET des_ubicacion = @des, co_sucu_mo = @sucu, fe_us_mo = GETDATE(), co_us_mo = \'999   \' WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@id))');
         });
 
         return writeResponse(res, outcome, `Sede especificada no encontrada.`);

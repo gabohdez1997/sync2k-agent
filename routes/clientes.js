@@ -1,18 +1,18 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
-const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
+const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 
 // ── Helper: inputs del STORED PROCEDURE pInsertarCliente ───────────────────
 function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999') {
     const d = defaults;
-    r.input('sCo_Cli',           sql.Char(16),         data.co_cli);
+    r.input('sCo_Cli',           sql.Char(16),         padProfit(data.co_cli, 16));
     r.input('sLogin',            sql.Char(20),          '');
     r.input('sPassword',         sql.Char(20),          '');
     r.input('sSalesTax',         sql.Char(8),           null);
     r.input('sCli_Des',          sql.VarChar(60),       data.cli_des || data.descripcion);
-    r.input('sCo_Seg',           sql.Char(6),           '01');
-    r.input('sCo_Zon',           sql.Char(6),           data.co_zon   || d.co_zon);
+    r.input('sCo_Seg',           sql.Char(6),           padProfit('01', 6));
+    r.input('sCo_Zon',           sql.Char(6),           padProfit(data.co_zon || d.co_zon, 6));
     r.input('sCo_Ven',           sql.VarChar(10),       data.co_ven || d.co_ven || '01');
     r.input('sEstado',           sql.Char(1),           '1');
     r.input('bInactivo',         sql.Bit,               0);
@@ -34,13 +34,13 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sFax',              sql.VarChar(60),       '');
     r.input('sRespons',          sql.VarChar(60),       '');
     r.input('sdFecha_Reg',       sql.SmallDateTime,     ts);
-    r.input('sTip_Cli',          sql.Char(6),           data.tip_cli  || d.tip_cli);
+    r.input('sTip_Cli',          sql.Char(6),           padProfit(data.tip_cli || d.tip_cli, 6));
     r.input('sSerialP',          sql.Char(30),          '');
     r.input('iPuntaje',          sql.Int,               0);
     r.input('iId',               sql.Int,               0);
     r.input('deMont_Cre',        sql.Decimal(18,5),     0);
-    r.input('sCo_Mone',          sql.Char(6),           data.co_mone  || d.co_mone);
-    r.input('sCond_Pag',         sql.Char(6),           '01');
+    r.input('sCo_Mone',          sql.Char(6),           padProfit(data.co_mone || d.co_mone, 6));
+    r.input('sCond_Pag',         sql.Char(6),           padProfit('01', 6));
     r.input('iPlaz_pag',         sql.Int,               0);
     r.input('deDesc_ppago',      sql.Decimal(18,5),     0);
     r.input('deDesc_Glob',       sql.Decimal(18,5),     0);
@@ -51,7 +51,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sDis_cen',          sql.VarChar(sql.MAX),  '');
     r.input('sNit',              sql.VarChar(18),       '');
     r.input('sEmail',            sql.VarChar(60),       data.email || '');
-    r.input('sCo_Cta_Ingr_Egr', sql.Char(20),          '01');
+    r.input('sCo_Cta_Ingr_Egr', sql.Char(20),          padProfit(d.co_cta || '01', 20));
     r.input('sComentario',       sql.VarChar(sql.MAX),  'Creado vía API');
     r.input('sCampo1',           sql.VarChar(60),       '');
     r.input('sCampo2',           sql.VarChar(60),       '');
@@ -65,7 +65,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sMaquina',          sql.VarChar(60),       'SYNC2K');
     r.input('sRevisado',         sql.Char(1),           '0');
     r.input('sTrasnfe',          sql.Char(1),           '0');
-    r.input('sCo_Sucu_In',       sql.Char(6),           '01');
+    r.input('sCo_Sucu_In',       sql.Char(6),           padProfit('01', 6));
     r.input('bJuridico',         sql.Bit,               0);
     r.input('iTipo_Adi',         sql.Int,               1);
     r.input('sMatriz',           sql.Char(16),          null);
@@ -131,7 +131,7 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999') {
     r.input('sDis_cen',          sql.VarChar(sql.MAX),  '');
     r.input('sNit',              sql.VarChar(18),       '');
     r.input('sEmail',            sql.VarChar(60),       data.email || '');
-    r.input('sCo_Cta_Ingr_Egr',  sql.Char(20),          '01');
+    r.input('sCo_Cta_Ingr_Egr',  sql.Char(20),          padProfit(row.co_cta_ingr_egr || '01', 20));
     r.input('sComentario',       sql.VarChar(sql.MAX),  'Editado vía API');
     r.input('sCampo1',           sql.VarChar(60),       '');
     r.input('sCampo2',           sql.VarChar(60),       '');
