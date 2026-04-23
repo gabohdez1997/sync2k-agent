@@ -139,7 +139,7 @@ function paginatedResponse(res, combined, page, limit) {
  * @returns {string} Cadena acolchada
  */
 function padProfit(val, length) {
-    if (val === null || val === undefined) return ' '.repeat(length);
+    if (val === null || val === undefined) return null;
     const str = String(val).trim();
     if (str.length >= length) return str.substring(0, length);
     return str.padEnd(length, ' ');

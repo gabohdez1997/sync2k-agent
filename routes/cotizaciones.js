@@ -422,7 +422,7 @@ router.post('/', async (req, res) => {
                 rL.input('sCo_Art',            sql.Char(30),         padProfit(item.co_art, 30));
                 rL.input('sDes_Art',           sql.VarChar(120),      (item.art_des || '').substring(0, 120));
                 rL.input('sCo_Uni',            sql.Char(6),          padProfit(item.co_uni || 'UNI', 6));
-                rL.input('sSco_Uni',           sql.Char(6),          padProfit(null, 6));
+                rL.input('sSco_Uni',           sql.Char(6),          null);
                 rL.input('sCo_Alma',           sql.Char(6),          padProfit(item.co_alma || defAlma, 6));
                 rL.input('sCo_Precio',         sql.Char(6),          padProfit(coPrecio || '01', 6));
                 rL.input('sTipo_Imp',          sql.Char(1),          item.tipo_imp || '1');
