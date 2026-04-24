@@ -220,4 +220,106 @@ router.get('/tasa', async (req, res) => {
     }
 });
 
+// ── Tasa BCV (scraping directo desde bcv.org.ve) ────────────────────────────
+/**
+ * @swagger
+ * /api/v1/catalogos/bcv:
+ *   get:
+ *     summary: Obtener tasa del dólar publicada por el BCV (scraping en tiempo real)
+ *     tags: [Catalogos]
+ *     responses:
+ *       200:
+ *         description: Tasa del dólar USD obtenida de bcv.org.ve
+ */
+router.get('/bcv', async (req, res) => {
+    try {
+        const https = require('https');
+
+        const html = await new Promise((resolve, reject) => {
+            const options = {
+                hostname: 'www.bcv.org.ve',
+                port: 443,
+                path: '/',
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'es-ES,es;q=0.9'
+                },
+                rejectUnauthorized: false,
+                timeout: 15000
+            };
+
+            const request = https.request(options, (response) => {
+                let data = '';
+                response.on('data', chunk => data += chunk);
+                response.on('end', () => resolve(data));
+            });
+
+            request.on('error', reject);
+            request.on('timeout', () => {
+                request.destroy();
+                reject(new Error('Timeout al conectar con bcv.org.ve'));
+            });
+
+            request.end();
+        });
+
+        let tasa = null;
+        let fuente = null;
+
+        // Buscar: <div id="dolar" ...> ... <strong> 483,86950000 </strong>
+        const dolarMatch = html.match(/id="dolar"[\s\S]*?<strong>\s*([\d.,]+)\s*<\/strong>/);
+        if (dolarMatch && dolarMatch[1]) {
+            let val = dolarMatch[1].trim();
+            if (val.includes('.') && val.includes(',')) {
+                val = val.replace(/\./g, '').replace(',', '.');
+            } else {
+                val = val.replace(',', '.');
+            }
+            tasa = parseFloat(val);
+            fuente = 'id=dolar';
+        }
+
+        // Fallback: buscar "USD" seguido de un strong con cifra
+        if (!tasa) {
+            const usdMatch = html.match(/USD[\s\S]*?<strong>\s*([\d.,]+)\s*<\/strong>/i);
+            if (usdMatch && usdMatch[1]) {
+                let val = usdMatch[1].trim();
+                if (val.includes('.') && val.includes(',')) {
+                    val = val.replace(/\./g, '').replace(',', '.');
+                } else {
+                    val = val.replace(',', '.');
+                }
+                tasa = parseFloat(val);
+                fuente = 'fallback-USD';
+            }
+        }
+
+        if (tasa && !isNaN(tasa)) {
+            console.log(`[BCV] Tasa USD obtenida: ${tasa} (${fuente})`);
+            res.status(200).json({
+                success: true,
+                tasa,
+                moneda: 'USD',
+                fuente: 'https://www.bcv.org.ve/',
+                metodo: fuente,
+                fecha: new Date().toISOString()
+            });
+        } else {
+            console.warn('[BCV] No se pudo extraer la tasa del HTML');
+            res.status(404).json({
+                success: false,
+                message: 'No se pudo extraer la tasa del dólar de bcv.org.ve.'
+            });
+        }
+    } catch (error) {
+        console.error('[BCV] Error al consultar bcv.org.ve:', error.message);
+        res.status(502).json({
+            success: false,
+            message: `Error al conectar con bcv.org.ve: ${error.message}`
+        });
+    }
+});
+
 module.exports = router;
