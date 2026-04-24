@@ -159,7 +159,7 @@ router.get('/almacenes', async (req, res) => {
 
             const r = pool.request();
             let query = `SELECT RTRIM(co_alma) AS co_alma, RTRIM(des_alma) AS des_alma FROM saAlmacen`;
-            
+
             // Filtrar por los códigos de sucursal de Profit asociados a esta sede
             const codes = (srv.profit_branch_codes || []).map(c => typeof c === 'string' ? c : c.code).filter(Boolean);
             if (codes.length > 0) {
@@ -250,12 +250,20 @@ router.post('/tasa', async (req, res) => {
             // Verificar qué códigos de moneda existen (USD o US$)
             const moneRes = await pool.request().query("SELECT co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$')");
             const codes = moneRes.recordset.map(r => r.co_mone.trim());
-            
+
             if (codes.length === 0) {
                 throw new Error('No se encontró la moneda USD o US$ en la tabla saMoneda.');
             }
 
             for (const code of codes) {
+                // Intentar obtener el usuario de las credenciales SQL (x-sql-auth)
+                let user = 'RECON';
+                if (req.sqlAuth && req.sqlAuth.user) {
+                    user = req.sqlAuth.user;
+                } else {
+                    user = req.headers['x-profit-user'] || 'RECON';
+                }
+
                 await pool.request()
                     .input('tasa', sql.Decimal(18, 6), tasa)
                     .input('mone', sql.Char(6), code)
