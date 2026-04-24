@@ -267,15 +267,24 @@ router.post('/tasa', async (req, res) => {
                 await pool.request()
                     .input('tasa', sql.Decimal(18, 6), tasa)
                     .input('mone', sql.Char(6), code)
+                    .input('user', sql.VarChar, user)
                     .query(`
                         DECLARE @today DATETIME = CONVERT(VARCHAR(10), GETDATE(), 120);
+                        DECLARE @finalUser CHAR(10) = ISNULL(NULLIF(RTRIM(@user), ''), 'RECON');
+
                         IF EXISTS (SELECT 1 FROM saTasa WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today)
                         BEGIN
-                            UPDATE saTasa SET tasa_v = @tasa, tasa_c = @tasa WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today
+                            UPDATE saTasa 
+                            SET tasa_v = @tasa, 
+                                tasa_c = @tasa,
+                                co_us_mo = @finalUser,
+                                fe_us_mo = GETDATE()
+                            WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today
                         END
                         ELSE
                         BEGIN
-                            INSERT INTO saTasa (co_mone, tasa_v, tasa_c, fecha) VALUES (@mone, @tasa, @tasa, GETDATE())
+                            INSERT INTO saTasa (co_mone, tasa_v, tasa_c, fecha, co_us_in, fe_us_in, co_us_mo, fe_us_mo) 
+                            VALUES (@mone, @tasa, @tasa, GETDATE(), @finalUser, GETDATE(), @finalUser, GETDATE())
                         END
                     `);
             }
