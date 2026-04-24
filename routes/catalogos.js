@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool } = require('../db');
-const { aggregateRead, aggregateUnique, paginatedResponse } = require('../helpers/multiSede');
+const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse } = require('../helpers/multiSede');
 
 /**
  * @swagger
@@ -215,6 +215,66 @@ router.get('/tasa', async (req, res) => {
             return r.recordset.map(t => ({ ...t, sede_id: srv.id, sede_nombre: srv.name }));
         });
         res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/tasa:
+ *   post:
+ *     summary: Actualizar la tasa cambiaria en todas las sedes
+ *     tags: [Catalogos]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tasa:
+ *                 type: number
+ *     responses:
+ *       200:
+ *         description: Tasa actualizada exitosamente
+ */
+router.post('/tasa', async (req, res) => {
+    const { tasa } = req.body;
+    if (!tasa || isNaN(tasa)) {
+        return res.status(400).json({ success: false, message: 'Tasa inválida.' });
+    }
+
+    try {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            // Verificar qué códigos de moneda existen (USD o US$)
+            const moneRes = await pool.request().query("SELECT co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$')");
+            const codes = moneRes.recordset.map(r => r.co_mone.trim());
+            
+            if (codes.length === 0) {
+                throw new Error('No se encontró la moneda USD o US$ en la tabla saMoneda.');
+            }
+
+            for (const code of codes) {
+                await pool.request()
+                    .input('tasa', sql.Decimal(18, 6), tasa)
+                    .input('mone', sql.Char(6), code)
+                    .query(`
+                        DECLARE @today DATETIME = CONVERT(VARCHAR(10), GETDATE(), 120);
+                        IF EXISTS (SELECT 1 FROM saTasa WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today)
+                        BEGIN
+                            UPDATE saTasa SET tasa_v = @tasa, tasa_c = @tasa WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today
+                        END
+                        ELSE
+                        BEGIN
+                            INSERT INTO saTasa (co_mone, tasa_v, tasa_c, fecha) VALUES (@mone, @tasa, @tasa, GETDATE())
+                        END
+                    `);
+            }
+            return { message: 'Tasa actualizada correctamente.' };
+        });
+
+        return writeResponse(res, outcome);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
     }
