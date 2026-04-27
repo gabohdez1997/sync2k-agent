@@ -80,9 +80,9 @@ router.get('/articulos', async (req, res) => {
                 SELECT TOP 1 
                     n.fec_emis, 
                     r.cost_unit, 
-                    -- Si el costo OM es igual al costo BS y hay una tasa > 1, calculamos el USD real
+                    -- Si la tasa de la factura es 1 (Bolívares), buscamos la tasa de ese día en saTasa
                     CASE 
-                        WHEN (r.cost_unit_om >= r.cost_unit AND n.tasa > 1) THEN (r.cost_unit / n.tasa)
+                        WHEN (n.tasa <= 1) THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE co_mone = 'US' AND fecha <= n.fec_emis ORDER BY fecha DESC), 0))
                         ELSE r.cost_unit_om 
                     END AS cost_unit_om
                 FROM saFacturaCompraReng r
