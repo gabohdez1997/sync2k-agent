@@ -210,7 +210,7 @@ router.get('/tasa', async (req, res) => {
         const data = await aggregateRead(req.sqlAuth, async (pool, srv) => {
             const r = await pool.request().query(
                 `SELECT TOP 1 RTRIM(co_mone) AS co_mone, tasa_v AS tasa, fecha FROM saTasa
-                 WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD') ORDER BY fecha DESC`
+                 WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`
             );
             return r.recordset.map(t => ({ ...t, sede_id: srv.id, sede_nombre: srv.name }));
         });
