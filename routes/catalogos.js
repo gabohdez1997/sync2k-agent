@@ -206,16 +206,22 @@ router.get('/tipos_cliente', (req, res) =>
  *         description: Tasa de cambio por sede
  */
 router.get('/tasa', async (req, res) => {
+    console.log(`[TASA] Petición recibida. Auth User: ${req.profitUser || 'N/A'}`);
     try {
         const data = await aggregateRead(req.sqlAuth, async (pool, srv) => {
+            console.log(`[TASA] Consultando sede: ${srv.name}...`);
             const r = await pool.request().query(
                 `SELECT TOP 1 RTRIM(co_mone) AS co_mone, tasa_v AS tasa, fecha FROM saTasa
-                 WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`
+                 WHERE LTRIM(RTRIM(co_mone)) NOT IN ('BS','VES','VEB','VEF','BS.','BSF') 
+                 ORDER BY fecha DESC`
             );
+            console.log(`[TASA] Sede ${srv.name} encontró: ${r.recordset.length} registros.`);
             return r.recordset.map(t => ({ ...t, sede_id: srv.id, sede_nombre: srv.name }));
         });
+        console.log(`[TASA] Respuesta final: ${data.length} tasas encontradas.`);
         res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
+        console.error('[TASA] Error Crítico:', error.message);
         res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
     }
 });
