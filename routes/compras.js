@@ -80,11 +80,8 @@ router.get('/articulos', async (req, res) => {
                 SELECT TOP 1 
                     n.fec_emis, 
                     r.cost_unit, 
-                    -- Si la tasa de la factura es 1 (Bolívares), buscamos la tasa de ese día en saTasa
-                    CASE 
-                        WHEN (n.tasa <= 1) THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE co_mone = 'US' AND fecha <= n.fec_emis ORDER BY fecha DESC), 0))
-                        ELSE r.cost_unit_om 
-                    END AS cost_unit_om
+                    -- Cálculo directo: Costo BS / Tasa histórica de la fecha de factura
+                    (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE co_mone = 'US' AND fecha <= n.fec_emis ORDER BY fecha DESC), 0)) AS cost_unit_om
                 FROM saFacturaCompraReng r
                 INNER JOIN saFacturaCompra n ON r.doc_num = n.doc_num
                 WHERE r.co_art = a.co_art AND n.anulado = 0
