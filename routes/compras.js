@@ -77,7 +77,14 @@ router.get('/articulos', async (req, res) => {
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
             LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             OUTER APPLY (
-                SELECT TOP 1 n.fec_emis, r.cost_unit, r.cost_unit_om
+                SELECT TOP 1 
+                    n.fec_emis, 
+                    r.cost_unit, 
+                    -- Si el costo OM es igual al costo BS y hay una tasa > 1, calculamos el USD real
+                    CASE 
+                        WHEN (r.cost_unit_om >= r.cost_unit AND n.tasa > 1) THEN (r.cost_unit / n.tasa)
+                        ELSE r.cost_unit_om 
+                    END AS cost_unit_om
                 FROM saFacturaCompraReng r
                 INNER JOIN saFacturaCompra n ON r.doc_num = n.doc_num
                 WHERE r.co_art = a.co_art AND n.anulado = 0
