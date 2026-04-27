@@ -60,7 +60,7 @@ router.get('/articulos', async (req, res) => {
         // QUERY USANDO FACTURA DE COMPRA (FUENTE DEFINITIVA)
         const querySQL = `
             SELECT 
-                a.co_art,
+                RTRIM(a.co_art) AS co_art, 
                 RTRIM(a.art_des) AS descripcion,
                 RTRIM(a.modelo) AS modelo, 
                 RTRIM(a.ref) AS referencia,
