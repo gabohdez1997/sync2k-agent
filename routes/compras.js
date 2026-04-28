@@ -3,9 +3,6 @@ const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 
 router.get('/articulos', async (req, res) => {
-    // LOG DE EMERGENCIA - Si ves esto en la consola del agente, la petición está llegando.
-    console.log('>>> [AGENTE COMPRAS] PETICIÓN RECIBIDA:', req.url);
-
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 12;
@@ -18,10 +15,7 @@ router.get('/articulos', async (req, res) => {
 
         let servers = getServers();
         const srv = servers[0];
-        if (!srv) {
-            console.error('[AGENTE COMPRAS] Error: No hay servidores configurados.');
-            return res.status(200).json({ success: true, data: [], pagination: { total: 0 } });
-        }
+        if (!srv) return res.status(200).json({ success: true, data: [], pagination: { total: 0 } });
 
         const pool = await getPool(srv.id, req.sqlAuth);
         const r = pool.request();
@@ -117,6 +111,33 @@ router.get('/articulos', async (req, res) => {
 
         const resData = await r.query(querySQL);
         const articulos = resData.recordset;
+
+        // --- BLOQUE DE DISPONIBILIDAD RESTAURADO ---
+        if (articulos.length > 0) {
+            const ids = articulos.map(a => `'${a.co_art.replace(/'/g, "''")}'`).join(',');
+            const resStock = await pool.request().query(`
+                SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma, RTRIM(al.des_alma) AS des_alma,
+                       SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END) AS stock
+                FROM saStockAlmacen s LEFT JOIN saAlmacen al ON s.co_alma = al.co_alma
+                WHERE LTRIM(RTRIM(s.co_art)) IN (${ids})
+                GROUP BY s.co_art, s.co_alma, al.des_alma
+            `);
+
+            const stockMap = {};
+            resStock.recordset.forEach(s => { 
+                (stockMap[s.co_art] = stockMap[s.co_art] || []).push({ 
+                    co_alma: s.co_alma, 
+                    des_alma: s.des_alma, 
+                    stock: s.stock 
+                }); 
+            });
+
+            articulos.forEach(a => {
+                a.disponibilidad = stockMap[a.co_art] || [];
+                a.total_stock = a.disponibilidad.reduce((sum, s) => sum + s.stock, 0);
+                a.sede_nombre = srv.name;
+            });
+        }
 
         return res.status(200).json({
             success: true,
