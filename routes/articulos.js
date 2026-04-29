@@ -201,7 +201,7 @@ router.get('/', async (req, res) => {
                              RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                              RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
                              RTRIM(au.co_ubicacion) AS co_ubicacion,
-                             RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
+                             RTRIM(ISNULL(NULLIF(RTRIM(aun.co_uni), ''), a.co_uni)) AS co_uni, RTRIM(ISNULL(un.des_uni, a.co_uni)) AS unidad,
                              RTRIM(a.tipo_imp) AS tipo_imp,
                              CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                              ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}

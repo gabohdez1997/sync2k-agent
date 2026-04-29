@@ -246,10 +246,13 @@ router.get('/tasa', async (req, res) => {
  *         description: Tasa actualizada exitosamente
  */
 router.post('/tasa', async (req, res) => {
-    const { tasa } = req.body;
+    let { tasa } = req.body;
     if (!tasa || isNaN(tasa)) {
         return res.status(400).json({ success: false, message: 'Tasa inválida.' });
     }
+    
+    // Aplicar redondeo matemático a 2 decimales para Profit Plus
+    tasa = Math.round(Number(tasa) * 100) / 100;
 
     try {
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
