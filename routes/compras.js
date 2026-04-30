@@ -3,6 +3,8 @@ const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 
 router.get('/articulos', async (req, res) => {
+    console.log('============= [COMPRAS/ARTICULOS HIT] =============');
+    console.log('[COMPRAS] QUERY COMPLETO:', JSON.stringify(req.query));
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 12;
@@ -22,6 +24,16 @@ router.get('/articulos', async (req, res) => {
 
         let whereClauses = ["1=1"]; 
         
+        const idsRaw = (req.query.ids || "").trim();
+        const idsParams = idsRaw ? idsRaw.split(',').map(id => id.trim()).filter(id => id) : [];
+        console.log('[COMPRAS] ids recibido:', JSON.stringify(req.query.ids), '| idsRaw:', JSON.stringify(idsRaw), '| idsParams:', idsParams);
+        if (idsParams.length > 0) {
+            const placeholders = idsParams.map((_, i) => `@id${i}`).join(',');
+            idsParams.forEach((id, i) => r.input(`id${i}`, sql.VarChar, id));
+            whereClauses.push(`LTRIM(RTRIM(a.co_art)) IN (${placeholders})`);
+            console.log('[COMPRAS] Filtro IDS aplicado:', `LTRIM(RTRIM(a.co_art)) IN (${placeholders})`);
+        }
+
         if (search !== "" && search !== "null" && search !== "undefined") { 
             r.input('search', sql.VarChar, `%${search}%`); 
             whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR a.modelo LIKE @search OR a.ref LIKE @search)"); 
@@ -70,6 +82,7 @@ router.get('/articulos', async (req, res) => {
                 p2.monto AS prec2, m2.monto_max AS margen2,
                 fact.fec_emis AS fecha_ultima_compra,
                 fact.cost_unit_om AS ultimo_costo_om,
+                RTRIM(fact.fact_doc_num) AS fact_doc_num,
                 ISNULL(pend.cantidad_por_llegar, 0) AS cantidad_por_llegar,
                 ROUND(CASE 
                     WHEN fact.cost_unit_om IS NULL AND p2.monto > 0 AND m2.monto_max > 0 THEN 
@@ -90,7 +103,7 @@ router.get('/articulos', async (req, res) => {
                 WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '02' OR LTRIM(RTRIM(co_precio)) = '2')
             ) m2
             OUTER APPLY (
-                SELECT TOP 1 n.fec_emis, 
+                SELECT TOP 1 n.fec_emis, RTRIM(n.doc_num) AS fact_doc_num,
                     CASE 
                         WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND CAST(fecha AS DATE) <= CAST(n.fec_emis AS DATE) ORDER BY fecha DESC), 0)) 
                         ELSE r.cost_unit_om 
