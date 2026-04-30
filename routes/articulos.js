@@ -19,15 +19,11 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         pool.request().query(`
             SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma,
                    RTRIM(a.des_alma) AS des_alma,
-                   SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
-                   - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
-                   - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END) AS stock
+                   SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) AS stock
             FROM saStockAlmacen s LEFT JOIN saAlmacen a ON s.co_alma = a.co_alma
             WHERE LTRIM(RTRIM(s.co_art)) IN (${ids}) ${authCondition}
             GROUP BY s.co_art, s.co_alma, a.des_alma
-            HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
-                   - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
-                   - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END)) > 0
+            HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)) > 0
         `),
         pool.request().query(`
             WITH UP AS (
@@ -594,16 +590,12 @@ router.get('/:co_art', async (req, res) => {
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `SELECT RTRIM(s.co_alma) AS co_alma, RTRIM(alm.des_alma) AS des_alma,
-                                SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END) AS stock
+                                SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) AS stock
                          FROM saStockAlmacen s
                          LEFT JOIN saAlmacen alm ON s.co_alma = alm.co_alma
                          WHERE LTRIM(RTRIM(s.co_art)) = LTRIM(RTRIM(@co_art))
                          GROUP BY s.co_alma, alm.des_alma
-                         HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
-                                - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END)) > 0`
+                         HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)) > 0`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `WITH UP AS (SELECT RTRIM(co_precio) AS id_precio, monto AS precio,
@@ -1106,6 +1098,55 @@ router.put('/:co_art/ubicaciones', async (req, res) => {
     } catch (e) {
         console.error(`[PUT /:co_art/ubicaciones] Error:`, e.message);
         res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 6. DELETE /api/v1/articulos/:co_art — Eliminar articulo (targeted o broadcast)
+// ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/{co_art}:
+ *   delete:
+ *     summary: Eliminar un artículo
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: path
+ *         name: co_art
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sede
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Artículo eliminado
+ */
+router.delete('/:co_art', async (req, res) => {
+    try {
+        const { co_art } = req.params;
+
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+            const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
+
+            const check = await pool.request().input('co_art', sql.VarChar, co_art).query(
+                `SELECT validador FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))`
+            );
+            if (!check.recordset.length) throw new Error('El artículo no existe en esta sede.');
+
+            const r = new sql.Request(pool);
+            r.input('sCo_ArtOri',  sql.Char(30),           co_art);
+            r.input('tsValidador', sql.VarBinary(8),       check.recordset[0].validador);
+            r.input('sMaquina',    sql.VarChar(60),        'SYNC2K');
+            r.input('sCo_Us_Mo',   sql.Char(6),            auditUser);
+            r.input('sCo_Sucu_Mo', sql.Char(6),            '01');
+            r.input('gRowguid',    sql.UniqueIdentifier,   null);
+            await r.execute('pEliminarArticulo');
+        });
+
+        return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al eliminar el artículo.', error: error.message });
     }
 });
 

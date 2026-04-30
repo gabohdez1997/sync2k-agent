@@ -36,9 +36,9 @@ router.get('/articulos', async (req, res) => {
         }
 
         if (stockFilter === 'true') { 
-            whereClauses.push(`EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s2.tipo)='COM' THEN s2.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s2.tipo)='DES' THEN s2.stock ELSE 0 END) > 0)`); 
+            whereClauses.push(`EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) > 0)`);
         } else if (stockFilter === 'false') {
-            whereClauses.push(`NOT EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s2.tipo)='COM' THEN s2.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s2.tipo)='DES' THEN s2.stock ELSE 0 END) > 0)`);
+            whereClauses.push(`NOT EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) > 0)`);
         }
 
         if (soloPendientes) { 
@@ -117,7 +117,7 @@ router.get('/articulos', async (req, res) => {
             const ids = articulos.map(a => `'${a.co_art.replace(/'/g, "''")}'`).join(',');
             const resStock = await pool.request().query(`
                 SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma, RTRIM(al.des_alma) AS des_alma,
-                       SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END) - SUM(CASE WHEN RTRIM(s.tipo)='DES' THEN s.stock ELSE 0 END) AS stock
+                       SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) AS stock
                 FROM saStockAlmacen s LEFT JOIN saAlmacen al ON s.co_alma = al.co_alma
                 WHERE LTRIM(RTRIM(s.co_art)) IN (${ids})
                 GROUP BY s.co_art, s.co_alma, al.des_alma
