@@ -40,8 +40,8 @@ async function catalogEndpoint(req, res, query, uniqueKey, sortKey, extraInputs 
  */
 router.get('/lineas', (req, res) =>
     catalogEndpoint(req, res,
-        `SELECT RTRIM(co_lin) AS co_lin, RTRIM(lin_des) AS lin_des FROM saLineaArticulo ORDER BY lin_des`,
-        'co_lin', 'lin_des'
+        `SELECT RTRIM(co_lin) AS co_lin, RTRIM(lin_des) AS lin_des FROM saLineaArticulo`,
+        'co_lin', 'co_lin'
     )
 );
 
@@ -49,13 +49,13 @@ router.get('/lineas', (req, res) =>
 router.get('/sublineas', async (req, res) => {
     const { co_lin } = req.query;
     const query = `SELECT RTRIM(co_subl) AS co_subl, RTRIM(subl_des) AS subl_des, RTRIM(co_lin) AS co_lin FROM saSubLinea`
-        + (co_lin ? ` WHERE RTRIM(co_lin) = @co_lin` : ` ORDER BY subl_des`);
+        + (co_lin ? ` WHERE RTRIM(co_lin) = @co_lin` : ``);
     try {
         const data = await aggregateUnique(req.sqlAuth, async (pool) => {
             const r = pool.request();
             if (co_lin) r.input('co_lin', sql.VarChar, co_lin);
             return (await r.query(query)).recordset;
-        }, 'co_subl', 'subl_des');
+        }, 'co_subl', 'co_subl');
         res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
@@ -66,7 +66,15 @@ router.get('/sublineas', async (req, res) => {
 router.get('/categorias', (req, res) =>
     catalogEndpoint(req, res,
         `SELECT RTRIM(co_cat) AS co_cat, RTRIM(cat_des) AS cat_des FROM saCatArticulo`,
-        'co_cat', 'cat_des'
+        'co_cat', 'co_cat'
+    )
+);
+
+// ── Unidades de Medida ──────────────────────────────────────────────────────
+router.get('/unidades', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(co_uni) AS co_uni, RTRIM(des_uni) AS des_uni FROM saUnidad`,
+        'co_uni', 'co_uni'
     )
 );
 
@@ -74,7 +82,7 @@ router.get('/categorias', (req, res) =>
 router.get('/colores', (req, res) =>
     catalogEndpoint(req, res,
         `SELECT RTRIM(co_color) AS co_color, RTRIM(des_color) AS des_color FROM saColor`,
-        'co_color', 'des_color'
+        'co_color', 'co_color'
     )
 );
 
@@ -82,7 +90,15 @@ router.get('/colores', (req, res) =>
 router.get('/ubicaciones', (req, res) =>
     catalogEndpoint(req, res,
         `SELECT RTRIM(co_ubicacion) AS co_ubicacion, RTRIM(des_ubicacion) AS des_ubicacion FROM saUbicacion`,
-        'co_ubicacion', 'des_ubicacion'
+        'co_ubicacion', 'co_ubicacion'
+    )
+);
+
+// ── Procedencias ────────────────────────────────────────────────────────────
+router.get('/procedencias', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(cod_proc) AS cod_proc, RTRIM(des_proc) AS des_proc FROM saProcedencia`,
+        'cod_proc', 'cod_proc'
     )
 );
 
