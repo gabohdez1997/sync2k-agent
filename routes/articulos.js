@@ -861,8 +861,10 @@ router.put('/:co_art', async (req, res) => {
     try {
         const coArtOri = req.params.co_art;
         const data = req.body;
+        console.log(`[PUT /articulos/:co_art] Petición recibida para UPSERT: ${coArtOri}`);
 
         const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+            console.log(`[UPSERT] Ejecutando en base de datos conectada...`);
             const check = await pool.request().input('co_art', sql.VarChar, coArtOri).query(
                 `SELECT validador, RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl,
                         RTRIM(co_cat) AS co_cat, RTRIM(co_color) AS co_color,
@@ -871,6 +873,8 @@ router.put('/:co_art', async (req, res) => {
             );
             
             const isNew = check.recordset.length === 0;
+            console.log(`[UPSERT] ¿Es artículo nuevo?: ${isNew}`);
+            
             const row = isNew ? {} : check.recordset[0];
             const f = new Date();
             const r = new sql.Request(pool);
@@ -908,8 +912,8 @@ router.put('/:co_art', async (req, res) => {
             r.input('sModelo', sql.VarChar(20), data.modelo || '');
             r.input('sRef', sql.VarChar(20), data.ref || '');
             r.input('bGenerico', sql.Bit, 0);
-            r.input('bManeja_Serial', sql.Bit, 0);
-            r.input('bManeja_Lote', sql.Bit, 0);
+            r.input('bManeja_Serial', sql.Bit, data.bManeja_Serial ? 1 : 0);
+            r.input('bManeja_Lote', sql.Bit, data.bManeja_Lote ? 1 : 0);
             r.input('bManeja_Lote_Venc', sql.Bit, 0);
             r.input('deMargen_Min', sql.Decimal(18, 5), 0);
             r.input('deMargen_Max', sql.Decimal(18, 5), 0);
@@ -958,7 +962,7 @@ router.put('/:co_art', async (req, res) => {
             } else {
                 r.input('sCo_Us_Mo', sql.Char(6), auditUser);
                 r.input('sCo_Sucu_Mo', sql.Char(6), null);
-                r.input('tsValidador', sql.VarBinary, row.validador);
+                r.input('tsValidador', sql.VarBinary(8), row.validador);
                 r.input('gRowguid', sql.UniqueIdentifier, null);
             }
             
@@ -968,11 +972,14 @@ router.put('/:co_art', async (req, res) => {
             r.input('sTrasnfe', sql.Char(1), '0');
             
             if (isNew) {
+                console.log(`[UPSERT] Ejecutando pInsertarArticulo...`);
                 await r.execute('pInsertarArticulo');
             } else {
+                console.log(`[UPSERT] Ejecutando pActualizarArticulo...`);
                 await r.execute('pActualizarArticulo');
             }
 
+            console.log(`[UPSERT] Actualizando saArtUnidad...`);
             // --- 2. Guardar Unidad de Medida Primaria (saArtUnidad) ---
             if (data.co_uni) {
                 const uCheck = await pool.request()
@@ -1044,11 +1051,13 @@ router.put('/:co_art', async (req, res) => {
                     }
                 }
             }
+            console.log(`[UPSERT] Operación completada exitosamente.`);
         });
 
         return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+        console.error(`[PUT /articulos/:co_art] Error Catastrófico:`, error);
+        res.status(500).json({ success: false, message: 'Error interno en UPSERT.', error: error.message });
     }
 });
 
