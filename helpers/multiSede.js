@@ -78,7 +78,8 @@ async function executeWrite(sedeId, sqlAuth, fn) {
                 const result = await fn(pool, srv);
                 return { sede_id: srv.id, sede_nombre: srv.name, success: true, ...result };
             } catch (err) {
-                return { sede_id: srv.id, sede_nombre: srv.name, success: false, error: err.message || String(err) };
+                const deepError = err.originalError?.info?.message || err.originalError?.message || err.message || String(err);
+                return { sede_id: srv.id, sede_nombre: srv.name, success: false, error: deepError };
             }
         })
     );
