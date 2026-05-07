@@ -78,7 +78,14 @@ async function executeWrite(sedeId, sqlAuth, fn) {
                 const result = await fn(pool, srv);
                 return { sede_id: srv.id, sede_nombre: srv.name, success: true, ...result };
             } catch (err) {
-                const deepError = err.originalError?.info?.message || err.originalError?.message || err.message || String(err);
+                let deepError = String(err);
+                if (err.precedingErrors && err.precedingErrors.length > 0) {
+                    deepError = err.precedingErrors.map(e => e.message).join(' | ');
+                } else if (err.originalError && err.originalError.info) {
+                    deepError = err.originalError.info.message;
+                } else if (err.message) {
+                    deepError = err.message;
+                }
                 return { sede_id: srv.id, sede_nombre: srv.name, success: false, error: deepError };
             }
         })

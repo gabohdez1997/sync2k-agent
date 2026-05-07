@@ -27,14 +27,16 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         `),
         pool.request().query(`
             WITH UP AS (
-                SELECT RTRIM(co_art) AS co_art, RTRIM(co_precio) AS id_precio,
-                       monto AS precio, RTRIM(co_mone) AS moneda,
-                       ROW_NUMBER() OVER(PARTITION BY co_art, co_precio ORDER BY desde DESC) AS rn
-                FROM saArtPrecio
-                WHERE LTRIM(RTRIM(co_art)) IN (${ids})
-                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                SELECT RTRIM(p.co_art) AS co_art, RTRIM(p.co_precio) AS id_precio,
+                       p.monto AS precio, RTRIM(p.co_mone) AS moneda,
+                       ISNULL(m.monto_min, 0) AS margen,
+                       ROW_NUMBER() OVER(PARTITION BY p.co_art, p.co_precio ORDER BY p.desde DESC) AS rn
+                FROM saArtPrecio p
+                LEFT JOIN saArtMargen m ON p.co_art = m.co_art AND p.co_precio = m.co_precio
+                WHERE LTRIM(RTRIM(p.co_art)) IN (${ids})
+                  AND p.Inactivo = 0 AND GETDATE() >= p.desde AND (p.hasta IS NULL OR GETDATE() <= p.hasta)
             )
-            SELECT co_art, id_precio, precio, moneda FROM UP WHERE rn = 1
+            SELECT co_art, id_precio, precio, moneda, margen FROM UP WHERE rn = 1
         `)
     ]);
 
@@ -43,7 +45,7 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
     const precioMap = {};
     resPrecios.recordset.forEach(p => {
         (precioMap[p.co_art] = precioMap[p.co_art] || []).push({
-            id_precio: p.id_precio, precio: p.precio, moneda: p.moneda,
+            id_precio: p.id_precio, precio: p.precio, moneda: p.moneda, margen: p.margen,
             precio_ves: ((p.moneda || '').includes('US') ? Number((p.precio * tasa).toFixed(2)) : p.precio)
         });
     });
@@ -609,16 +611,26 @@ router.get('/:co_art', async (req, res) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
 
-                const [resArt, resStock, resPre, resTasa] = await Promise.all([
+                const [resArt, resStock, resPre] = await Promise.all([
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                                 a.anulado, RTRIM(a.tipo) AS tipo_articulo,
-                                RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
+                                RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref, RTRIM(a.cod_proc) AS cod_proc,
+                                RTRIM(a.co_lin) AS co_lin, RTRIM(l.lin_des) AS linea, 
+                                RTRIM(a.co_subl) AS co_subl, RTRIM(sl.subl_des) AS sublinea, 
+                                RTRIM(a.co_cat) AS co_cat, RTRIM(c.cat_des) AS categoria,
+                                RTRIM(a.co_color) AS co_color,
                                 RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
                                 RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
                                 RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
                                 RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
                                 RTRIM(a.tipo_imp) AS tipo_imp,
+                                ISNULL(a.peso, 0) AS peso,
+                                ISNULL(a.volumen, 0) AS volumen,
+                                ISNULL(a.stock_min, 0) AS stock_min,
+                                ISNULL(a.stock_max, 0) AS stock_max,
+                                RTRIM(a.garantia) AS garantia,
+                                RTRIM(a.comentario) AS comentario,
                                 CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                          FROM saArticulo a
                          LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
@@ -646,18 +658,21 @@ router.get('/:co_art', async (req, res) => {
                          HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)) > 0`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
-                        `WITH UP AS (SELECT RTRIM(co_precio) AS id_precio, monto AS precio,
-                                RTRIM(co_mone) AS moneda,
-                                ROW_NUMBER() OVER(PARTITION BY co_precio ORDER BY desde DESC) AS rn
-                         FROM saArtPrecio WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
-                           AND Inactivo=0 AND GETDATE()>=desde AND (hasta IS NULL OR GETDATE()<=hasta))
-                         SELECT id_precio, precio, moneda FROM UP WHERE rn=1 ORDER BY id_precio`
-                    ),
-                    pool.request().query(QUERY_TASA)
+                        `WITH UP AS (
+                            SELECT RTRIM(p.co_precio) AS id_precio, p.monto AS precio,
+                                   RTRIM(p.co_mone) AS moneda, ISNULL(m.monto_min, 0) AS margen,
+                                   ROW_NUMBER() OVER(PARTITION BY p.co_precio ORDER BY p.desde DESC) AS rn
+                            FROM saArtPrecio p
+                            LEFT JOIN saArtMargen m ON p.co_art = m.co_art AND p.co_precio = m.co_precio
+                            WHERE LTRIM(RTRIM(p.co_art)) = LTRIM(RTRIM(@co_art))
+                              AND p.Inactivo=0 AND GETDATE()>=p.desde AND (p.hasta IS NULL OR GETDATE()<=p.hasta)
+                         )
+                         SELECT id_precio, precio, moneda, margen FROM UP WHERE rn=1 ORDER BY id_precio`
+                    )
                 ]);
 
                 if (!resArt.recordset.length) return null;
-                const tasa = resTasa.recordset[0]?.tasa_cambio || 1;
+                const tasa = await getExchangeRate(pool);
 
                 return {
                     sede_id: srv.id,
@@ -863,7 +878,9 @@ router.put('/:co_art', async (req, res) => {
         const data = req.body;
         console.log(`[PUT /articulos/:co_art] Petición recibida para UPSERT: ${coArtOri}`);
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+            // Obtener almacén por defecto de la configuración de la sede
+            const defaultAlmacen = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
             console.log(`[UPSERT] Ejecutando en base de datos conectada...`);
             const check = await pool.request().input('co_art', sql.VarChar, coArtOri).query(
                 `SELECT validador, RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl,
@@ -882,17 +899,22 @@ router.put('/:co_art', async (req, res) => {
             // Si es nuevo y no manda línea, intentamos agarrar la primera disponible para evitar errores NOT NULL
             let defaultLin = data.co_lin, defaultSubl = data.co_subl, defaultCat = data.co_cat, defaultColor = data.co_color, defaultUbic = data.co_ubicacion;
             if (isNew) {
-                const [resLin, resSubl, resCat, resCol, resUbic] = await Promise.all([
-                    pool.request().query('SELECT TOP 1 RTRIM(co_lin) AS id FROM saLineaArticulo'),
-                    pool.request().query('SELECT TOP 1 RTRIM(co_subl) AS id FROM saSubLinea'),
-                    pool.request().query('SELECT TOP 1 RTRIM(co_cat) AS id FROM saCatArticulo'),
-                    pool.request().query('SELECT TOP 1 RTRIM(co_color) AS id FROM saColor'),
+                const [resDefaults, resUbic] = await Promise.all([
+                    pool.request().query(`
+                        SELECT TOP 1 
+                            RTRIM(co_lin) as co_lin, 
+                            RTRIM(co_subl) as co_subl, 
+                            RTRIM(co_cat) as co_cat, 
+                            RTRIM(co_color) as co_color 
+                        FROM saArticulo
+                    `),
                     pool.request().query('SELECT TOP 1 RTRIM(co_ubicacion) AS id FROM saUbicacion')
                 ]);
-                defaultLin = data.co_lin || resLin.recordset[0]?.id || null;
-                defaultSubl = data.co_subl || resSubl.recordset[0]?.id || null;
-                defaultCat = data.co_cat || resCat.recordset[0]?.id || null;
-                defaultColor = data.co_color || resCol.recordset[0]?.id || null;
+                const defs = resDefaults.recordset[0] || {};
+                defaultLin = data.co_lin || defs.co_lin || '01';
+                defaultSubl = data.co_subl || defs.co_subl || '01';
+                defaultCat = data.co_cat || defs.co_cat || '01';
+                defaultColor = data.co_color || defs.co_color || '01';
                 defaultUbic = data.co_ubicacion || resUbic.recordset[0]?.id || 'CONT1A';
             }
 
@@ -958,10 +980,10 @@ router.put('/:co_art', async (req, res) => {
             
             if (isNew) {
                 r.input('sCo_Us_In', sql.Char(6), auditUser);
-                r.input('sCo_Sucu_In', sql.Char(6), null);
+                r.input('sCo_Sucu_In', sql.Char(6), defaultAlmacen);
             } else {
                 r.input('sCo_Us_Mo', sql.Char(6), auditUser);
-                r.input('sCo_Sucu_Mo', sql.Char(6), null);
+                r.input('sCo_Sucu_Mo', sql.Char(6), defaultAlmacen);
                 r.input('tsValidador', sql.VarBinary(8), row.validador);
                 r.input('gRowguid', sql.UniqueIdentifier, null);
             }
@@ -979,6 +1001,36 @@ router.put('/:co_art', async (req, res) => {
                 await r.execute('pActualizarArticulo');
             }
 
+            // Corregir columnas que el SP no mapea correctamente
+            const artId = data.co_art || coArtOri;
+            await pool.request()
+                .input('co_art', sql.Char(30), artId)
+                .input('revisado', sql.Char(1), '0')
+                .input('trasnfe', sql.Char(1), '0')
+                .input('tipo_imp2', sql.Char(1), data.tipo_imp || '7')
+                .input('tipo_imp3', sql.Char(1), data.tipo_imp || '7')
+                .input('garantia', sql.VarChar(30), data.garantia?.toString() || '0')
+                .input('ref', sql.VarChar(20), data.ref || '')
+                .input('fecha_inac', sql.SmallDateTime, null)
+                .input('sucu', sql.Char(6), defaultAlmacen)
+                .input('user', sql.Char(6), auditUser)
+                .query(`
+                    UPDATE saArticulo SET
+                        revisado   = ISNULL(revisado, @revisado),
+                        trasnfe    = ISNULL(trasnfe, @trasnfe),
+                        tipo_imp2  = ISNULL(tipo_imp2, @tipo_imp2),
+                        tipo_imp3  = ISNULL(tipo_imp3, @tipo_imp3),
+                        garantia   = ISNULL(garantia, @garantia),
+                        ref        = ISNULL(ref, @ref),
+                        fecha_inac = CASE WHEN anulado = 0 THEN NULL ELSE fecha_inac END,
+                        co_sucu_in = ISNULL(co_sucu_in, @sucu),
+                        co_sucu_mo = @sucu,
+                        co_us_mo   = @user,
+                        fe_us_mo   = GETDATE()
+                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
+                `);
+
+
             console.log(`[UPSERT] Actualizando saArtUnidad...`);
             // --- 2. Guardar Unidad de Medida Primaria (saArtUnidad) ---
             if (data.co_uni) {
@@ -995,8 +1047,8 @@ router.put('/:co_art', async (req, res) => {
                         .input('user', sql.Char(6), auditUser)
                         .query(`
                             UPDATE saArtUnidad SET uni_principal = 0 WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
-                            INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uso_ven, uso_com, uni_principal, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                            VALUES (@co_art, @co_uni, 1, 1, 1, 1, 1, @user, GETDATE(), @user, GETDATE());
+                            INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uso_venta, uso_compra, uni_principal, uso_principal, uni_secundaria, uso_secundaria, uso_numDecimales, num_decimales, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                            VALUES (@co_art, @co_uni, 1, 1, 1, 1, 1, 1, 0, 0, 0, 2, @user, GETDATE(), @user, GETDATE());
                         `);
                 } else {
                     // Si ya estaba enlazada, solo nos aseguramos de que sea la principal
@@ -1016,7 +1068,7 @@ router.put('/:co_art', async (req, res) => {
                 const margen = data[`margen_${i}`];
                 if (margen !== undefined && margen !== null && margen !== '') {
                     const numMargen = Number(margen);
-                    const precioId = String(i).padStart(2, '0'); // '01', '02', '03', '04', '05'
+                    const precioId = String(i); // '1', '2', '3', '4', '5' (según saTipoPrecio)
                     
                     const pCheck = await pool.request()
                         .input('co_art', sql.Char(30), data.co_art || coArtOri)
@@ -1028,13 +1080,14 @@ router.put('/:co_art', async (req, res) => {
                         await pool.request()
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
-                            .input('co_mone', sql.Char(6), 'US$') // Default a dolares según requerimiento anterior de multisede? o BS? BS es vacio o 'BS'
-                            // Mejor dejamos 'US$' si la empresa factura en dolares o configuramos como 'BS'
                             .input('margen', sql.Decimal(18,5), numMargen)
                             .input('user', sql.Char(6), auditUser)
                             .query(`
-                                INSERT INTO saArtPrecio (co_art, co_precio, co_mone, desde, hasta, inactivo, margen_min, margen_max, monto, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                VALUES (@co_art, @co_precio, 'US$', GETDATE(), '2050-12-31', 0, @margen, @margen, 0, @user, GETDATE(), @user, GETDATE());
+                                INSERT INTO saArtPrecio (co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                                VALUES (@co_art, @co_precio, 'US$', GETDATE(), '2050-12-31', 0, 0, 0, @user, GETDATE(), @user, GETDATE());
+                                
+                                INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                                VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
                             `);
                     } else {
                         // Actualizar precio existente
@@ -1044,9 +1097,17 @@ router.put('/:co_art', async (req, res) => {
                             .input('margen', sql.Decimal(18,5), numMargen)
                             .input('user', sql.Char(6), auditUser)
                             .query(`
-                                UPDATE saArtPrecio 
-                                SET margen_min = @margen, margen_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
-                                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio
+                                IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
+                                BEGIN
+                                    UPDATE saArtMargen 
+                                    SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
+                                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio
+                                END
+                                ELSE
+                                BEGIN
+                                    INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                                    VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
+                                END
                             `);
                     }
                 }
@@ -1237,7 +1298,7 @@ router.delete('/:co_art', async (req, res) => {
     try {
         const { co_art } = req.params;
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
             const check = await pool.request().input('co_art', sql.VarChar, co_art).query(
@@ -1245,14 +1306,25 @@ router.delete('/:co_art', async (req, res) => {
             );
             if (!check.recordset.length) throw new Error('El artículo no existe en esta sede.');
 
+            const defaultAlmacen = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code || (srv?.profit_branch_codes || [])[0]?.code || '01';
+            
             const r = new sql.Request(pool);
             r.input('sCo_ArtOri',  sql.Char(30),           co_art);
             r.input('tsValidador', sql.VarBinary(8),       check.recordset[0].validador);
             r.input('sMaquina',    sql.VarChar(60),        'SYNC2K');
             r.input('sCo_Us_Mo',   sql.Char(6),            auditUser);
-            r.input('sCo_Sucu_Mo', sql.Char(6),            '01');
+            r.input('sCo_Sucu_Mo', sql.Char(6),            defaultAlmacen);
             r.input('gRowguid',    sql.UniqueIdentifier,   null);
-            await r.execute('pEliminarArticulo');
+            
+            try {
+                await r.execute('pEliminarArticulo');
+            } catch (err) {
+                // If it's a foreign key constraint error, it means the article is in use
+                if (err.message && err.message.includes('REFERENCE constraint')) {
+                    throw new Error('El artículo no se puede eliminar porque ya tiene documentos o movimientos asociados en Profit Plus.');
+                }
+                throw err;
+            }
         });
 
         return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
