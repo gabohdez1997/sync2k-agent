@@ -1,24 +1,9 @@
-import { getPool } from '../db.js';
-
-async function checkSP() {
-    try {
-        const servers = [
-             { id: 'G3', name: 'G3' } // Adjust based on known servers
-        ];
-        
-        const pool = await getPool('G3'); // Assuming a default server
-        const res = await pool.request()
-            .input('spName', 'pInsertarCotizacionCliente')
-            .query(`
-                SELECT OBJECT_DEFINITION(OBJECT_ID(@spName)) as definition
-            `);
-        
-        console.log("SP Definition:", res.recordset[0]?.definition);
-        
-    } catch (e) {
-        console.error("Error checking SP:", e);
-    }
-    process.exit(0);
-}
-
-checkSP();
+const { getPool, initServers, closeAllPools } = require('./db');
+(async () => {
+    await initServers();
+    const s = require('./db').getServers();
+    const p = await getPool(s[0].id);
+    const r = await p.request().query("SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[pEliminarArticulo]') AND type in (N'P', N'PC')");
+    console.log('pEliminarArticulo exists:', r.recordset.length > 0);
+    await closeAllPools();
+})();

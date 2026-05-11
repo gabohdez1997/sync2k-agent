@@ -370,8 +370,8 @@ router.get('/bcv', async (req, res) => {
         let tasa = null;
         let fuente = null;
 
-        // Buscar: <div id="dolar" ...> ... <strong> 483,86950000 </strong>
-        const dolarMatch = html.match(/id="dolar"[\s\S]*?<strong>\s*([\d.,]+)\s*<\/strong>/);
+        // Buscar: <div id="dolar" ...> ... <strong...> 483,86950000 </strong>
+        const dolarMatch = html.match(/id="dolar"[\s\S]*?<strong[^>]*>\s*([\d.,]+)\s*<\/strong>/);
         if (dolarMatch && dolarMatch[1]) {
             let val = dolarMatch[1].trim();
             if (val.includes('.') && val.includes(',')) {
@@ -385,7 +385,7 @@ router.get('/bcv', async (req, res) => {
 
         // Fallback: buscar "USD" seguido de un strong con cifra
         if (!tasa) {
-            const usdMatch = html.match(/USD[\s\S]*?<strong>\s*([\d.,]+)\s*<\/strong>/i);
+            const usdMatch = html.match(/USD[\s\S]*?<strong[^>]*>\s*([\d.,]+)/i);
             if (usdMatch && usdMatch[1]) {
                 let val = usdMatch[1].trim();
                 if (val.includes('.') && val.includes(',')) {
