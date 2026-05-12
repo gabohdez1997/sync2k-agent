@@ -38,7 +38,7 @@ router.get('/', async (req, res) => {
                 }
                 if (search) {
                     request.input('search_all', sql.VarChar, `%${search}%`);
-                    whereClauses.push("(c.doc_num LIKE @search_all OR c.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all)");
+                    whereClauses.push("(c.doc_num LIKE @search_all OR c.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all OR cl.rif LIKE @search_all OR c.descrip LIKE @search_all)");
                 }
                 if (co_ven) {
                     request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());

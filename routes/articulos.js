@@ -778,10 +778,10 @@ router.post('/', async (req, res) => {
             r.input('sCo_Subl', sql.Char(6), data.co_subl || resSubl.recordset[0]?.id || null);
             r.input('sCo_Cat', sql.Char(6), data.co_cat || resCat.recordset[0]?.id || null);
             r.input('sCo_Color', sql.Char(6), data.co_color || resCol.recordset[0]?.id || null);
-            r.input('sCo_Ubicacion', sql.Char(6), data.co_ubicacion || resUbic.recordset[0]?.id || 'CONT1A');
+            r.input('sCo_Ubicacion', sql.Char(6), data.co_ubicacion || resUbic.recordset[0]?.id || '01');
             r.input('sItem', sql.VarChar(10), data.item || null);
             r.input('sModelo', sql.VarChar(20), data.modelo || '');
-            r.input('sRef', sql.VarChar(20), data.ref || '');
+            r.input('sRef', sql.VarChar(20), data.ref || null);
             r.input('bGenerico', sql.Bit, 0);
             r.input('bManeja_Serial', sql.Bit, 0);
             r.input('bManeja_Lote', sql.Bit, 0);
@@ -915,7 +915,7 @@ router.put('/:co_art', async (req, res) => {
                 defaultSubl = data.co_subl || defs.co_subl || '01';
                 defaultCat = data.co_cat || defs.co_cat || '01';
                 defaultColor = data.co_color || defs.co_color || '01';
-                defaultUbic = data.co_ubicacion || resUbic.recordset[0]?.id || 'CONT1A';
+                defaultUbic = data.co_ubicacion || resUbic.recordset[0]?.id || '01';
             }
 
             r.input('sCo_Art', sql.Char(30), data.co_art || coArtOri);
@@ -932,7 +932,7 @@ router.put('/:co_art', async (req, res) => {
             r.input('sCo_Ubicacion', sql.Char(6), isNew ? defaultUbic : (data.co_ubicacion || row.co_ubicacion));
             r.input('sItem', sql.VarChar(10), data.item || null);
             r.input('sModelo', sql.VarChar(20), data.modelo || '');
-            r.input('sRef', sql.VarChar(20), data.ref || '');
+            r.input('sRef', sql.VarChar(20), data.ref || null);
             r.input('bGenerico', sql.Bit, 0);
             r.input('bManeja_Serial', sql.Bit, data.bManeja_Serial ? 1 : 0);
             r.input('bManeja_Lote', sql.Bit, data.bManeja_Lote ? 1 : 0);
@@ -1010,7 +1010,7 @@ router.put('/:co_art', async (req, res) => {
                 .input('tipo_imp2', sql.Char(1), data.tipo_imp || '7')
                 .input('tipo_imp3', sql.Char(1), data.tipo_imp || '7')
                 .input('garantia', sql.VarChar(30), data.garantia?.toString() || '0')
-                .input('ref', sql.VarChar(20), data.ref || '')
+                .input('ref', sql.VarChar(20), data.ref || null)
                 .input('fecha_inac', sql.SmallDateTime, null)
                 .input('sucu', sql.Char(6), defaultAlmacen)
                 .input('user', sql.Char(6), auditUser)
