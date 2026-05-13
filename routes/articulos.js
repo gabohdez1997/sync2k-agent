@@ -197,7 +197,7 @@ router.get('/', async (req, res) => {
 
                 const querySQL = `SELECT ${topClause} RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                              RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
-                             RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
+                             RTRIM(a.co_lin) AS co_lin, RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
                              RTRIM(au.co_ubicacion) AS co_ubicacion,
                              RTRIM(ISNULL(NULLIF(RTRIM(aun.co_uni), ''), a.co_uni)) AS co_uni, RTRIM(ISNULL(un.des_uni, a.co_uni)) AS unidad,
                              RTRIM(a.tipo_imp) AS tipo_imp,
