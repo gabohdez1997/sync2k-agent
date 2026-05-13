@@ -759,12 +759,11 @@ router.post('/', async (req, res) => {
 
         const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const f = new Date();
-            const [resLin, resSubl, resCat, resCol, resUbic] = await Promise.all([
+            const [resLin, resSubl, resCat, resCol] = await Promise.all([
                 pool.request().query('SELECT TOP 1 RTRIM(co_lin) AS id FROM saLineaArticulo'),
                 pool.request().query('SELECT TOP 1 RTRIM(co_subl) AS id FROM saSubLinea'),
                 pool.request().query('SELECT TOP 1 RTRIM(co_cat) AS id FROM saCatArticulo'),
-                pool.request().query('SELECT TOP 1 RTRIM(co_color) AS id FROM saColor'),
-                pool.request().query('SELECT TOP 1 RTRIM(co_ubicacion) AS id FROM saUbicacion')
+                pool.request().query('SELECT TOP 1 RTRIM(co_color) AS id FROM saColor')
             ]);
 
             const r = new sql.Request(pool);
@@ -778,7 +777,7 @@ router.post('/', async (req, res) => {
             r.input('sCo_Subl', sql.Char(6), data.co_subl || resSubl.recordset[0]?.id || null);
             r.input('sCo_Cat', sql.Char(6), data.co_cat || resCat.recordset[0]?.id || null);
             r.input('sCo_Color', sql.Char(6), data.co_color || resCol.recordset[0]?.id || null);
-            r.input('sCo_Ubicacion', sql.Char(6), data.co_ubicacion || resUbic.recordset[0]?.id || '01');
+            r.input('sCo_Ubicacion', sql.Char(6), data.co_ubicacion || '01');
             r.input('sItem', sql.VarChar(10), data.item || null);
             r.input('sModelo', sql.VarChar(20), data.modelo || '');
             r.input('sRef', sql.VarChar(20), data.ref || null);
@@ -899,7 +898,7 @@ router.put('/:co_art', async (req, res) => {
             // Si es nuevo y no manda línea, intentamos agarrar la primera disponible para evitar errores NOT NULL
             let defaultLin = data.co_lin, defaultSubl = data.co_subl, defaultCat = data.co_cat, defaultColor = data.co_color, defaultUbic = data.co_ubicacion;
             if (isNew) {
-                const [resDefaults, resUbic] = await Promise.all([
+                const [resDefaults] = await Promise.all([
                     pool.request().query(`
                         SELECT TOP 1 
                             RTRIM(co_lin) as co_lin, 
@@ -907,15 +906,14 @@ router.put('/:co_art', async (req, res) => {
                             RTRIM(co_cat) as co_cat, 
                             RTRIM(co_color) as co_color 
                         FROM saArticulo
-                    `),
-                    pool.request().query('SELECT TOP 1 RTRIM(co_ubicacion) AS id FROM saUbicacion')
+                    `)
                 ]);
                 const defs = resDefaults.recordset[0] || {};
                 defaultLin = data.co_lin || defs.co_lin || '01';
                 defaultSubl = data.co_subl || defs.co_subl || '01';
                 defaultCat = data.co_cat || defs.co_cat || '01';
                 defaultColor = data.co_color || defs.co_color || '01';
-                defaultUbic = data.co_ubicacion || resUbic.recordset[0]?.id || '01';
+                defaultUbic = data.co_ubicacion || '01';
             }
 
             r.input('sCo_Art', sql.Char(30), data.co_art || coArtOri);
