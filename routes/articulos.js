@@ -777,7 +777,7 @@ router.post('/', async (req, res) => {
             r.input('sCo_Subl', sql.Char(6), data.co_subl || resSubl.recordset[0]?.id || null);
             r.input('sCo_Cat', sql.Char(6), data.co_cat || resCat.recordset[0]?.id || null);
             r.input('sCo_Color', sql.Char(6), data.co_color || resCol.recordset[0]?.id || null);
-            r.input('sCo_Ubicacion', sql.Char(6), data.co_ubicacion || '01');
+            r.input('sCo_Ubicacion', sql.Char(6), data.co_ubicacion || '01    ');
             r.input('sItem', sql.VarChar(10), data.item || null);
             r.input('sModelo', sql.VarChar(20), data.modelo || '');
             r.input('sRef', sql.VarChar(20), data.ref || null);
@@ -913,7 +913,7 @@ router.put('/:co_art', async (req, res) => {
                 defaultSubl = data.co_subl || defs.co_subl || '01';
                 defaultCat = data.co_cat || defs.co_cat || '01';
                 defaultColor = data.co_color || defs.co_color || '01';
-                defaultUbic = data.co_ubicacion || '01';
+                defaultUbic = data.co_ubicacion || '01    ';
             }
 
             r.input('sCo_Art', sql.Char(30), data.co_art || coArtOri);
