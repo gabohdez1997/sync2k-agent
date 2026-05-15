@@ -829,6 +829,12 @@ router.post('/', async (req, res) => {
             r.input('sRevisado', sql.Char(1), '0');
             r.input('sTrasnfe', sql.Char(1), '0');
             await r.execute('pInsertarArticulo');
+
+            // Refuerzo para asegurar ubicación por defecto
+            await pool.request()
+                .input('co_art', sql.Char(30), data.co_art)
+                .input('ubic', sql.Char(6), data.co_ubicacion || '01    ')
+                .query('UPDATE saArticulo SET co_ubicacion = @ubic WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))');
         });
 
         return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
@@ -1012,6 +1018,8 @@ router.put('/:co_art', async (req, res) => {
                 .input('fecha_inac', sql.SmallDateTime, null)
                 .input('sucu', sql.Char(6), defaultAlmacen)
                 .input('user', sql.Char(6), auditUser)
+                .input('is_new', sql.Bit, isNew ? 1 : 0)
+                .input('ubic', sql.Char(6), isNew ? defaultUbic : (data.co_ubicacion || null))
                 .query(`
                     UPDATE saArticulo SET
                         revisado   = ISNULL(revisado, @revisado),
@@ -1024,7 +1032,12 @@ router.put('/:co_art', async (req, res) => {
                         co_sucu_in = ISNULL(co_sucu_in, @sucu),
                         co_sucu_mo = @sucu,
                         co_us_mo   = @user,
-                        fe_us_mo   = GETDATE()
+                        fe_us_mo   = GETDATE(),
+                        co_ubicacion = CASE 
+                            WHEN @is_new = 1 THEN ISNULL(@ubic, co_ubicacion)
+                            WHEN @ubic IS NOT NULL THEN @ubic
+                            ELSE co_ubicacion 
+                        END
                     WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
                 `);
 
