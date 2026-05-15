@@ -552,7 +552,7 @@ router.get('/next-code', async (req, res) => {
 
         const servers = getServers();
         const serverToUse = servers.find(s => s.id === req.query.sede_id) || servers[0];
-        if (!serverToUse) return res.status(500).json({ success: false, message: 'No hay sedes conectadas.'});
+        if (!serverToUse) return res.status(500).json({ success: false, message: 'No hay sedes conectadas.' });
 
         const pool = await getPool(serverToUse.id, req.sqlAuth); // Usamos la sede disponible
         const result = await pool.request()
@@ -788,8 +788,8 @@ router.post('/', async (req, res) => {
             r.input('deMargen_Min', sql.Decimal(18, 5), 0);
             r.input('deMargen_Max', sql.Decimal(18, 5), 0);
             r.input('sTipo_Imp', sql.Char(1), data.tipo_imp || '1');
-            r.input('sTipo_Imp2', sql.Char(1), '7');
-            r.input('sTipo_Imp3', sql.Char(1), '7');
+            r.input('sTipo_Imp2', sql.Char(1), null);
+            r.input('sTipo_Imp3', sql.Char(1), null);
             r.input('sCo_Reten', sql.Char(6), null);
             r.input('sCod_Proc', sql.Char(6), null);
             r.input('sGarantia', sql.VarChar(30), '');
@@ -815,26 +815,37 @@ router.post('/', async (req, res) => {
             r.input('sI_Art_Des', sql.VarChar(120), null);
             r.input('sDis_Cen', sql.VarChar(sql.MAX), null);
             r.input('sReten_Iva_Tercero', sql.Char(16), null);
-            r.input('sCampo1', sql.VarChar(60), '');
-            r.input('sCampo2', sql.VarChar(60), '');
-            r.input('sCampo3', sql.VarChar(60), '');
-            r.input('sCampo4', sql.VarChar(60), '');
-            r.input('sCampo5', sql.VarChar(60), '');
-            r.input('sCampo6', sql.VarChar(60), '');
-            r.input('sCampo7', sql.VarChar(60), '');
-            r.input('sCampo8', sql.VarChar(60), '');
+            r.input('sCampo1', sql.VarChar(60), null);
+            r.input('sCampo2', sql.VarChar(60), null);
+            r.input('sCampo3', sql.VarChar(60), null);
+            r.input('sCampo4', sql.VarChar(60), null);
+            r.input('sCampo5', sql.VarChar(60), null);
+            r.input('sCampo6', sql.VarChar(60), null);
+            r.input('sCampo7', sql.VarChar(60), null);
+            r.input('sCampo8', sql.VarChar(60), null);
             r.input('sCo_Us_In', sql.Char(6), '999');
             r.input('sCo_Sucu_In', sql.Char(6), null);
             r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
-            r.input('sRevisado', sql.Char(1), '0');
-            r.input('sTrasnfe', sql.Char(1), '0');
+            r.input('sRevisado', sql.Char(1), null);
+            r.input('sTrasnfe', sql.Char(1), null);
             await r.execute('pInsertarArticulo');
 
-            // Refuerzo para asegurar ubicación por defecto
+            // Refuerzo para asegurar valores por defecto y tipos de impuesto
             await pool.request()
                 .input('co_art', sql.Char(30), data.co_art)
                 .input('ubic', sql.Char(6), data.co_ubicacion || '01    ')
-                .query('UPDATE saArticulo SET co_ubicacion = @ubic WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))');
+                .query(`
+                    UPDATE saArticulo 
+                    SET co_ubicacion = @ubic,
+                        tipo_imp2 = NULL,
+                        tipo_imp3 = NULL,
+                        relac_unidad = 0,
+                        revisado = NULL,
+                        trasnfe = NULL,
+                        campo1 = NULL, campo2 = NULL, campo3 = NULL, campo4 = NULL,
+                        campo5 = NULL, campo6 = NULL, campo7 = NULL, campo8 = NULL
+                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
+                `);
         });
 
         return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
@@ -893,14 +904,14 @@ router.put('/:co_art', async (req, res) => {
                         RTRIM(co_ubicacion) AS co_ubicacion, tipo_imp, tipo_cos
                  FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))`
             );
-            
+
             const isNew = check.recordset.length === 0;
             console.log(`[UPSERT] ¿Es artículo nuevo?: ${isNew}`);
-            
+
             const row = isNew ? {} : check.recordset[0];
             const f = new Date();
             const r = new sql.Request(pool);
-            
+
             // Si es nuevo y no manda línea, intentamos agarrar la primera disponible para evitar errores NOT NULL
             let defaultLin = data.co_lin, defaultSubl = data.co_subl, defaultCat = data.co_cat, defaultColor = data.co_color, defaultUbic = data.co_ubicacion;
             if (isNew) {
@@ -944,8 +955,8 @@ router.put('/:co_art', async (req, res) => {
             r.input('deMargen_Min', sql.Decimal(18, 5), 0);
             r.input('deMargen_Max', sql.Decimal(18, 5), 0);
             r.input('sTipo_Imp', sql.Char(1), data.tipo_imp || row.tipo_imp || '1');
-            r.input('sTipo_Imp2', sql.Char(1), '7');
-            r.input('sTipo_Imp3', sql.Char(1), '7');
+            r.input('sTipo_Imp2', sql.Char(1), null);
+            r.input('sTipo_Imp3', sql.Char(1), null);
             r.input('sCo_Reten', sql.Char(6), null);
             r.input('sCod_Proc', sql.Char(6), data.cod_proc || null);
             r.input('sGarantia', sql.VarChar(30), data.garantia?.toString() || '');
@@ -971,17 +982,17 @@ router.put('/:co_art', async (req, res) => {
             if (isNew) r.input('sI_Art_Des', sql.VarChar(120), null);
             r.input('sDis_Cen', sql.VarChar(sql.MAX), null);
             r.input('sReten_Iva_Tercero', sql.Char(16), null);
-            r.input('sCampo1', sql.VarChar(60), '');
-            r.input('sCampo2', sql.VarChar(60), '');
-            r.input('sCampo3', sql.VarChar(60), '');
-            r.input('sCampo4', sql.VarChar(60), '');
-            r.input('sCampo5', sql.VarChar(60), '');
-            r.input('sCampo6', sql.VarChar(60), '');
-            r.input('sCampo7', sql.VarChar(60), '');
-            r.input('sCampo8', sql.VarChar(60), '');
-            
+            r.input('sCampo1', sql.VarChar(60), null);
+            r.input('sCampo2', sql.VarChar(60), null);
+            r.input('sCampo3', sql.VarChar(60), null);
+            r.input('sCampo4', sql.VarChar(60), null);
+            r.input('sCampo5', sql.VarChar(60), null);
+            r.input('sCampo6', sql.VarChar(60), null);
+            r.input('sCampo7', sql.VarChar(60), null);
+            r.input('sCampo8', sql.VarChar(60), null);
+
             const auditUser = (req.profitUser || req.sqlAuth?.user || '999').substring(0, 10).toUpperCase();
-            
+
             if (isNew) {
                 r.input('sCo_Us_In', sql.Char(6), auditUser);
                 r.input('sCo_Sucu_In', sql.Char(6), defaultAlmacen);
@@ -991,12 +1002,12 @@ router.put('/:co_art', async (req, res) => {
                 r.input('tsValidador', sql.VarBinary(8), row.validador);
                 r.input('gRowguid', sql.UniqueIdentifier, null);
             }
-            
+
             r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
             if (!isNew) r.input('sCampos', sql.VarChar(sql.MAX), '');
-            r.input('sRevisado', sql.Char(1), '0');
-            r.input('sTrasnfe', sql.Char(1), '0');
-            
+            r.input('sRevisado', sql.Char(1), null);
+            r.input('sTrasnfe', sql.Char(1), null);
+
             if (isNew) {
                 console.log(`[UPSERT] Ejecutando pInsertarArticulo...`);
                 await r.execute('pInsertarArticulo');
@@ -1011,8 +1022,8 @@ router.put('/:co_art', async (req, res) => {
                 .input('co_art', sql.Char(30), artId)
                 .input('revisado', sql.Char(1), '0')
                 .input('trasnfe', sql.Char(1), '0')
-                .input('tipo_imp2', sql.Char(1), data.tipo_imp || '7')
-                .input('tipo_imp3', sql.Char(1), data.tipo_imp || '7')
+                .input('tipo_imp2', sql.Char(1), null)
+                .input('tipo_imp3', sql.Char(1), null)
                 .input('garantia', sql.VarChar(30), data.garantia?.toString() || '0')
                 .input('ref', sql.VarChar(20), data.ref || null)
                 .input('fecha_inac', sql.SmallDateTime, null)
@@ -1022,10 +1033,10 @@ router.put('/:co_art', async (req, res) => {
                 .input('ubic', sql.Char(6), isNew ? defaultUbic : (data.co_ubicacion || null))
                 .query(`
                     UPDATE saArticulo SET
-                        revisado   = ISNULL(revisado, @revisado),
-                        trasnfe    = ISNULL(trasnfe, @trasnfe),
-                        tipo_imp2  = ISNULL(tipo_imp2, @tipo_imp2),
-                        tipo_imp3  = ISNULL(tipo_imp3, @tipo_imp3),
+                        revisado   = NULL,
+                        trasnfe    = NULL,
+                        tipo_imp2  = NULL,
+                        tipo_imp3  = NULL,
                         garantia   = ISNULL(garantia, @garantia),
                         ref        = ISNULL(ref, @ref),
                         fecha_inac = CASE WHEN anulado = 0 THEN NULL ELSE fecha_inac END,
@@ -1033,6 +1044,9 @@ router.put('/:co_art', async (req, res) => {
                         co_sucu_mo = @sucu,
                         co_us_mo   = @user,
                         fe_us_mo   = GETDATE(),
+                        relac_unidad = 0,
+                        campo1 = NULL, campo2 = NULL, campo3 = NULL, campo4 = NULL,
+                        campo5 = NULL, campo6 = NULL, campo7 = NULL, campo8 = NULL,
                         co_ubicacion = CASE 
                             WHEN @is_new = 1 THEN ISNULL(@ubic, co_ubicacion)
                             WHEN @ubic IS NOT NULL THEN @ubic
@@ -1049,7 +1063,7 @@ router.put('/:co_art', async (req, res) => {
                     .input('co_art', sql.Char(30), data.co_art || coArtOri)
                     .input('co_uni', sql.Char(6), data.co_uni)
                     .query('SELECT 1 FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni))');
-                
+
                 // Si la unidad enviada no está enlazada al artículo, la insertamos y la marcamos como principal
                 if (uCheck.recordset.length === 0) {
                     await pool.request()
@@ -1080,18 +1094,18 @@ router.put('/:co_art', async (req, res) => {
                 if (margen !== undefined && margen !== null && margen !== '') {
                     const numMargen = Number(margen);
                     const precioId = String(i); // '1', '2', '3', '4', '5' (según saTipoPrecio)
-                    
+
                     const pCheck = await pool.request()
                         .input('co_art', sql.Char(30), data.co_art || coArtOri)
                         .input('co_precio', sql.Char(6), precioId)
                         .query('SELECT 1 FROM saArtPrecio WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio');
-                        
+
                     if (pCheck.recordset.length === 0) {
                         // Insertar precio
                         await pool.request()
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
-                            .input('margen', sql.Decimal(18,5), numMargen)
+                            .input('margen', sql.Decimal(18, 5), numMargen)
                             .input('user', sql.Char(6), auditUser)
                             .query(`
                                 INSERT INTO saArtPrecio (co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
@@ -1105,7 +1119,7 @@ router.put('/:co_art', async (req, res) => {
                         await pool.request()
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
-                            .input('margen', sql.Decimal(18,5), numMargen)
+                            .input('margen', sql.Decimal(18, 5), numMargen)
                             .input('user', sql.Char(6), auditUser)
                             .query(`
                                 IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
@@ -1318,15 +1332,15 @@ router.delete('/:co_art', async (req, res) => {
             if (!check.recordset.length) throw new Error('El artículo no existe en esta sede.');
 
             const defaultAlmacen = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code || (srv?.profit_branch_codes || [])[0]?.code || '01';
-            
+
             const r = new sql.Request(pool);
-            r.input('sCo_ArtOri',  sql.Char(30),           co_art);
-            r.input('tsValidador', sql.VarBinary(8),       check.recordset[0].validador);
-            r.input('sMaquina',    sql.VarChar(60),        'SYNC2K');
-            r.input('sCo_Us_Mo',   sql.Char(6),            auditUser);
-            r.input('sCo_Sucu_Mo', sql.Char(6),            defaultAlmacen);
-            r.input('gRowguid',    sql.UniqueIdentifier,   null);
-            
+            r.input('sCo_ArtOri', sql.Char(30), co_art);
+            r.input('tsValidador', sql.VarBinary(8), check.recordset[0].validador);
+            r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
+            r.input('sCo_Us_Mo', sql.Char(6), auditUser);
+            r.input('sCo_Sucu_Mo', sql.Char(6), defaultAlmacen);
+            r.input('gRowguid', sql.UniqueIdentifier, null);
+
             try {
                 await r.execute('pEliminarArticulo');
             } catch (err) {
