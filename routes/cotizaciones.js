@@ -359,8 +359,9 @@ router.post('/', async (req, res) => {
             rH.input('sCo_Mone',          sql.Char(6),          padProfit(finalMone, 6));
             rH.input('sCo_Ven',           sql.Char(6),          padProfit(data.co_ven  || existingHeader?.co_ven  || defVen, 6));
             rH.input('sCo_Cond',          sql.Char(6),          padProfit(data.co_cond || existingHeader?.co_cond || defCond, 6));
-            rH.input('sdFec_Emis',        sql.SmallDateTime,    isUpdate ? existingHeader.fec_emis : tsDate);
-            rH.input('sdFec_Venc',        sql.SmallDateTime,    fVenc);
+            const finalFecEmis = isUpdate ? existingHeader.fec_emis : tsDate;
+            rH.input('sdFec_Emis',        sql.SmallDateTime,    finalFecEmis);
+            rH.input('sdFec_Venc',        sql.SmallDateTime,    finalFecEmis);
             rH.input('sdFec_Reg',         sql.SmallDateTime,    isUpdate ? existingHeader.fec_reg : tsDate);
             rH.input('bAnulado',          sql.Bit,              existingHeader?.anulado || 0);
             rH.input('sStatus',           sql.Char(1),          existingHeader?.status  || '0');
