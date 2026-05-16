@@ -58,7 +58,7 @@ router.post('/lineas', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Código (co_lin) y descripción (lin_des) son obligatorios.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || 'RECON';
+        const user = req.headers['x-profit-user'] || '999';
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             // Verificar si ya existe
             const check = await pool.request()
@@ -68,7 +68,7 @@ router.post('/lineas', async (req, res) => {
                 throw new Error(`La línea "${co_lin.trim()}" ya existe en esta sede.`);
             }
 
-            await pool.request()
+            const result = await pool.request()
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
                 .input('lin_des', sql.VarChar(60), lin_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
@@ -88,6 +88,10 @@ router.post('/lineas', async (req, res) => {
                         NULL, NULL, NEWID(), NULL, NULL
                     )
                 `);
+            
+            if (result.rowsAffected[0] === 0) {
+                throw new Error(`El registro fue rechazado por la BD (usuario '${user}' inválido u otra regla de negocio).`);
+            }
             return { message: 'Línea creada.' };
         });
         return writeResponse(res, outcome);
@@ -110,9 +114,9 @@ router.put('/lineas/:co_lin', async (req, res) => {
         return res.status(400).json({ success: false, message: 'La descripción (lin_des) es obligatoria.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || 'RECON';
+        const user = req.headers['x-profit-user'] || '999';
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
-            await pool.request()
+            const result = await pool.request()
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
                 .input('lin_des', sql.VarChar(60), lin_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
@@ -125,6 +129,10 @@ router.put('/lineas/:co_lin', async (req, res) => {
                         fe_us_mo = GETDATE()
                     WHERE RTRIM(co_lin) = RTRIM(@co_lin)
                 `);
+            
+            if (result.rowsAffected[0] === 0) {
+                throw new Error(`El registro no fue actualizado (usuario '${user}' inválido, código no existe, u otra regla de negocio).`);
+            }
             return { message: 'Línea actualizada.' };
         });
         return writeResponse(res, outcome);
@@ -163,7 +171,7 @@ router.post('/sublineas', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Código (co_subl), descripción (subl_des) y línea (co_lin) son obligatorios.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || 'RECON';
+        const user = req.headers['x-profit-user'] || '999';
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const check = await pool.request()
                 .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
@@ -172,7 +180,7 @@ router.post('/sublineas', async (req, res) => {
                 throw new Error(`La sublínea "${co_subl.trim()}" ya existe en esta sede.`);
             }
 
-            await pool.request()
+            const result = await pool.request()
                 .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
                 .input('subl_des', sql.VarChar(60), subl_des.trim())
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
@@ -191,6 +199,10 @@ router.post('/sublineas', async (req, res) => {
                         NULL, NULL, NEWID()
                     )
                 `);
+            
+            if (result.rowsAffected[0] === 0) {
+                throw new Error(`El registro fue rechazado por la BD (usuario ${user} inválido u otra regla de negocio).`);
+            }
             return { message: 'Sublínea creada.' };
         });
         return writeResponse(res, outcome);
@@ -213,7 +225,7 @@ router.put('/sublineas/:co_subl', async (req, res) => {
         return res.status(400).json({ success: false, message: 'La descripción (subl_des) es obligatoria.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || 'RECON';
+        const user = req.headers['x-profit-user'] || '999';
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const updateFields = [`subl_des = @subl_des`, `co_us_mo = @user`, `co_sucu_mo = @sucu`, `fe_us_mo = GETDATE()`];
             const r = pool.request()
@@ -227,7 +239,11 @@ router.put('/sublineas/:co_subl', async (req, res) => {
                 updateFields.push(`co_lin = @co_lin`);
             }
 
-            await r.query(`UPDATE saSubLinea SET ${updateFields.join(', ')} WHERE RTRIM(co_subl) = RTRIM(@co_subl)`);
+            const result = await r.query(`UPDATE saSubLinea SET ${updateFields.join(', ')} WHERE RTRIM(co_subl) = RTRIM(@co_subl)`);
+            
+            if (result.rowsAffected[0] === 0) {
+                throw new Error(`El registro no fue actualizado (usuario '${user}' inválido, código no existe, u otra regla de negocio).`);
+            }
             return { message: 'Sublínea actualizada.' };
         });
         return writeResponse(res, outcome);
@@ -257,7 +273,7 @@ router.post('/categorias', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Código (co_cat) y descripción (cat_des) son obligatorios.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || 'RECON';
+        const user = req.headers['x-profit-user'] || '999';
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const check = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
@@ -266,7 +282,7 @@ router.post('/categorias', async (req, res) => {
                 throw new Error(`La categoría "${co_cat.trim()}" ya existe en esta sede.`);
             }
 
-            await pool.request()
+            const result = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
                 .input('cat_des', sql.VarChar(60), cat_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
@@ -284,6 +300,10 @@ router.post('/categorias', async (req, res) => {
                         NULL, NULL, NEWID()
                     )
                 `);
+            
+            if (result.rowsAffected[0] === 0) {
+                throw new Error(`El registro fue rechazado por la BD (usuario ${user} inválido u otra regla de negocio).`);
+            }
             return { message: 'Categoría creada.' };
         });
         return writeResponse(res, outcome);
@@ -306,9 +326,9 @@ router.put('/categorias/:co_cat', async (req, res) => {
         return res.status(400).json({ success: false, message: 'La descripción (cat_des) es obligatoria.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || 'RECON';
+        const user = req.headers['x-profit-user'] || '999';
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
-            await pool.request()
+            const result = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
                 .input('cat_des', sql.VarChar(60), cat_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
@@ -321,6 +341,10 @@ router.put('/categorias/:co_cat', async (req, res) => {
                         fe_us_mo = GETDATE()
                     WHERE RTRIM(co_cat) = RTRIM(@co_cat)
                 `);
+            
+            if (result.rowsAffected[0] === 0) {
+                throw new Error(`El registro no fue actualizado (usuario '${user}' inválido, código no existe, u otra regla de negocio).`);
+            }
             return { message: 'Categoría actualizada.' };
         });
         return writeResponse(res, outcome);
