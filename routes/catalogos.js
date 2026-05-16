@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool } = require('../db');
-const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse } = require('../helpers/multiSede');
+const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse, padProfit } = require('../helpers/multiSede');
 
 /**
  * @swagger
@@ -45,6 +45,94 @@ router.get('/lineas', (req, res) =>
     )
 );
 
+/**
+ * @swagger
+ * /api/v1/catalogos/lineas:
+ *   post:
+ *     summary: Crear nueva línea de artículo (broadcast a todas las sedes)
+ *     tags: [Catalogos]
+ */
+router.post('/lineas', async (req, res) => {
+    const { co_lin, lin_des } = req.body;
+    if (!co_lin || !lin_des) {
+        return res.status(400).json({ success: false, message: 'Código (co_lin) y descripción (lin_des) son obligatorios.' });
+    }
+    try {
+        const user = req.headers['x-profit-user'] || 'RECON';
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            // Verificar si ya existe
+            const check = await pool.request()
+                .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
+                .query(`SELECT co_lin FROM saLineaArticulo WHERE RTRIM(co_lin) = RTRIM(@co_lin)`);
+            if (check.recordset.length > 0) {
+                throw new Error(`La línea "${co_lin.trim()}" ya existe en esta sede.`);
+            }
+
+            await pool.request()
+                .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
+                .input('lin_des', sql.VarChar(60), lin_des.trim())
+                .input('user', sql.Char(6), padProfit(user, 6))
+                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .query(`
+                    INSERT INTO saLineaArticulo (
+                        co_lin, lin_des, dis_cen, co_imun, co_reten, comi_lin, comi_lin2,
+                        i_lin_des, va, movil,
+                        campo1, campo2, campo3, campo4, campo5, campo6, campo7, campo8,
+                        co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                        revisado, trasnfe, rowguid, feccom, numcom
+                    ) VALUES (
+                        @co_lin, @lin_des, NULL, NULL, NULL, 0.00, 0.00,
+                        '', '0', '0',
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                        @user, @sucu, GETDATE(), @user, @sucu, GETDATE(),
+                        NULL, NULL, NEWID(), NULL, NULL
+                    )
+                `);
+            return { message: 'Línea creada.' };
+        });
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/lineas/{co_lin}:
+ *   put:
+ *     summary: Actualizar descripción de una línea (broadcast a todas las sedes)
+ *     tags: [Catalogos]
+ */
+router.put('/lineas/:co_lin', async (req, res) => {
+    const co_lin = req.params.co_lin;
+    const { lin_des } = req.body;
+    if (!lin_des) {
+        return res.status(400).json({ success: false, message: 'La descripción (lin_des) es obligatoria.' });
+    }
+    try {
+        const user = req.headers['x-profit-user'] || 'RECON';
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            await pool.request()
+                .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
+                .input('lin_des', sql.VarChar(60), lin_des.trim())
+                .input('user', sql.Char(6), padProfit(user, 6))
+                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .query(`
+                    UPDATE saLineaArticulo
+                    SET lin_des = @lin_des,
+                        co_us_mo = @user,
+                        co_sucu_mo = @sucu,
+                        fe_us_mo = GETDATE()
+                    WHERE RTRIM(co_lin) = RTRIM(@co_lin)
+                `);
+            return { message: 'Línea actualizada.' };
+        });
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
 // ── SubLíneas (filtro opcional ?co_lin=XX) ──────────────────────────────────
 router.get('/sublineas', async (req, res) => {
     const { co_lin } = req.query;
@@ -62,6 +150,92 @@ router.get('/sublineas', async (req, res) => {
     }
 });
 
+/**
+ * @swagger
+ * /api/v1/catalogos/sublineas:
+ *   post:
+ *     summary: Crear nueva sublínea de artículo (broadcast a todas las sedes)
+ *     tags: [Catalogos]
+ */
+router.post('/sublineas', async (req, res) => {
+    const { co_subl, subl_des, co_lin } = req.body;
+    if (!co_subl || !subl_des || !co_lin) {
+        return res.status(400).json({ success: false, message: 'Código (co_subl), descripción (subl_des) y línea (co_lin) son obligatorios.' });
+    }
+    try {
+        const user = req.headers['x-profit-user'] || 'RECON';
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            const check = await pool.request()
+                .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
+                .query(`SELECT co_subl FROM saSubLinea WHERE RTRIM(co_subl) = RTRIM(@co_subl)`);
+            if (check.recordset.length > 0) {
+                throw new Error(`La sublínea "${co_subl.trim()}" ya existe en esta sede.`);
+            }
+
+            await pool.request()
+                .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
+                .input('subl_des', sql.VarChar(60), subl_des.trim())
+                .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
+                .input('user', sql.Char(6), padProfit(user, 6))
+                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .query(`
+                    INSERT INTO saSubLinea (
+                        co_lin, co_subl, subl_des, co_imun, co_reten, i_subl_des, movil,
+                        campo1, campo2, campo3, campo4, campo5, campo6, campo7, campo8,
+                        co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                        revisado, trasnfe, rowguid
+                    ) VALUES (
+                        @co_lin, @co_subl, @subl_des, NULL, NULL, NULL, '0',
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                        @user, @sucu, GETDATE(), @user, @sucu, GETDATE(),
+                        NULL, NULL, NEWID()
+                    )
+                `);
+            return { message: 'Sublínea creada.' };
+        });
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/sublineas/{co_subl}:
+ *   put:
+ *     summary: Actualizar una sublínea (broadcast a todas las sedes)
+ *     tags: [Catalogos]
+ */
+router.put('/sublineas/:co_subl', async (req, res) => {
+    const co_subl = req.params.co_subl;
+    const { subl_des, co_lin } = req.body;
+    if (!subl_des) {
+        return res.status(400).json({ success: false, message: 'La descripción (subl_des) es obligatoria.' });
+    }
+    try {
+        const user = req.headers['x-profit-user'] || 'RECON';
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            const updateFields = [`subl_des = @subl_des`, `co_us_mo = @user`, `co_sucu_mo = @sucu`, `fe_us_mo = GETDATE()`];
+            const r = pool.request()
+                .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
+                .input('subl_des', sql.VarChar(60), subl_des.trim())
+                .input('user', sql.Char(6), padProfit(user, 6))
+                .input('sucu', sql.Char(6), padProfit('01', 6));
+
+            if (co_lin) {
+                r.input('co_lin', sql.Char(6), padProfit(co_lin, 6));
+                updateFields.push(`co_lin = @co_lin`);
+            }
+
+            await r.query(`UPDATE saSubLinea SET ${updateFields.join(', ')} WHERE RTRIM(co_subl) = RTRIM(@co_subl)`);
+            return { message: 'Sublínea actualizada.' };
+        });
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
 // ── Categorías ──────────────────────────────────────────────────────────────
 router.get('/categorias', (req, res) =>
     catalogEndpoint(req, res,
@@ -69,6 +243,91 @@ router.get('/categorias', (req, res) =>
         'co_cat', 'co_cat'
     )
 );
+
+/**
+ * @swagger
+ * /api/v1/catalogos/categorias:
+ *   post:
+ *     summary: Crear nueva categoría de artículo (broadcast a todas las sedes)
+ *     tags: [Catalogos]
+ */
+router.post('/categorias', async (req, res) => {
+    const { co_cat, cat_des } = req.body;
+    if (!co_cat || !cat_des) {
+        return res.status(400).json({ success: false, message: 'Código (co_cat) y descripción (cat_des) son obligatorios.' });
+    }
+    try {
+        const user = req.headers['x-profit-user'] || 'RECON';
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            const check = await pool.request()
+                .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
+                .query(`SELECT co_cat FROM saCatArticulo WHERE RTRIM(co_cat) = RTRIM(@co_cat)`);
+            if (check.recordset.length > 0) {
+                throw new Error(`La categoría "${co_cat.trim()}" ya existe en esta sede.`);
+            }
+
+            await pool.request()
+                .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
+                .input('cat_des', sql.VarChar(60), cat_des.trim())
+                .input('user', sql.Char(6), padProfit(user, 6))
+                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .query(`
+                    INSERT INTO saCatArticulo (
+                        co_cat, cat_des, co_imun, co_reten, feccom, numcom, dis_cen, movil,
+                        campo1, campo2, campo3, campo4, campo5, campo6, campo7, campo8,
+                        co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                        revisado, trasnfe, rowguid
+                    ) VALUES (
+                        @co_cat, @cat_des, NULL, NULL, NULL, NULL, NULL, '0',
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                        @user, @sucu, GETDATE(), @user, @sucu, GETDATE(),
+                        NULL, NULL, NEWID()
+                    )
+                `);
+            return { message: 'Categoría creada.' };
+        });
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/categorias/{co_cat}:
+ *   put:
+ *     summary: Actualizar descripción de una categoría (broadcast a todas las sedes)
+ *     tags: [Catalogos]
+ */
+router.put('/categorias/:co_cat', async (req, res) => {
+    const co_cat = req.params.co_cat;
+    const { cat_des } = req.body;
+    if (!cat_des) {
+        return res.status(400).json({ success: false, message: 'La descripción (cat_des) es obligatoria.' });
+    }
+    try {
+        const user = req.headers['x-profit-user'] || 'RECON';
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+            await pool.request()
+                .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
+                .input('cat_des', sql.VarChar(60), cat_des.trim())
+                .input('user', sql.Char(6), padProfit(user, 6))
+                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .query(`
+                    UPDATE saCatArticulo
+                    SET cat_des = @cat_des,
+                        co_us_mo = @user,
+                        co_sucu_mo = @sucu,
+                        fe_us_mo = GETDATE()
+                    WHERE RTRIM(co_cat) = RTRIM(@co_cat)
+                `);
+            return { message: 'Categoría actualizada.' };
+        });
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
 
 // ── Unidades de Medida ──────────────────────────────────────────────────────
 router.get('/unidades', (req, res) =>
