@@ -58,7 +58,10 @@ router.post('/lineas', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Código (co_lin) y descripción (lin_des) son obligatorios.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || '999';
+        const user = req.headers['x-profit-user'];
+        if (!user || user.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
+        }
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             // Verificar si ya existe
             const check = await pool.request()
@@ -114,7 +117,10 @@ router.put('/lineas/:co_lin', async (req, res) => {
         return res.status(400).json({ success: false, message: 'La descripción (lin_des) es obligatoria.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || '999';
+        const user = req.headers['x-profit-user'];
+        if (!user || user.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
+        }
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const result = await pool.request()
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
@@ -171,7 +177,10 @@ router.post('/sublineas', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Código (co_subl), descripción (subl_des) y línea (co_lin) son obligatorios.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || '999';
+        const user = req.headers['x-profit-user'];
+        if (!user || user.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
+        }
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const check = await pool.request()
                 .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
@@ -225,7 +234,10 @@ router.put('/sublineas/:co_subl', async (req, res) => {
         return res.status(400).json({ success: false, message: 'La descripción (subl_des) es obligatoria.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || '999';
+        const user = req.headers['x-profit-user'];
+        if (!user || user.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
+        }
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const updateFields = [`subl_des = @subl_des`, `co_us_mo = @user`, `co_sucu_mo = @sucu`, `fe_us_mo = GETDATE()`];
             const r = pool.request()
@@ -273,7 +285,10 @@ router.post('/categorias', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Código (co_cat) y descripción (cat_des) son obligatorios.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || '999';
+        const user = req.headers['x-profit-user'];
+        if (!user || user.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
+        }
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const check = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
@@ -326,7 +341,10 @@ router.put('/categorias/:co_cat', async (req, res) => {
         return res.status(400).json({ success: false, message: 'La descripción (cat_des) es obligatoria.' });
     }
     try {
-        const user = req.headers['x-profit-user'] || '999';
+        const user = req.headers['x-profit-user'];
+        if (!user || user.trim() === '') {
+            return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
+        }
         const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
             const result = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
