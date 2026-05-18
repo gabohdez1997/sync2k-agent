@@ -58,7 +58,7 @@ router.get('/', async (req, res) => {
                 const result = await request.query(`
                     SELECT RTRIM(c.doc_num) AS doc_num, RTRIM(c.descrip) AS descrip,
                            RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
-                           c.fec_emis, c.fec_venc, RTRIM(c.status) AS status, c.anulado,
+                           c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
                            RTRIM(c.co_mone) AS co_mone, c.tasa, c.total_neto,
                            RTRIM(c.co_ven) AS co_ven
                     FROM saPedidoVenta c
@@ -103,7 +103,7 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                                RTRIM(c.co_ven)  AS co_ven,  RTRIM(v.ven_des)  AS ven_des,
                                RTRIM(c.co_cond) AS co_cond, RTRIM(cd.cond_des) AS cond_des,
-                               c.fec_emis, c.fec_venc, c.fec_us_mo, RTRIM(c.status) AS status, c.anulado,
+                               c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
                                RTRIM(c.co_mone) AS co_mone, c.tasa,
                                c.total_bruto, c.monto_imp, c.total_neto,
                                RTRIM(c.comentario) AS comentario,
