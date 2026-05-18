@@ -360,6 +360,7 @@ router.get('/search', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
         }
 
+        const globalSearch = req.query.search || req.query.q;
         const co_alma = req.query.co_alma;
         const authAlmacenes = req.query.authorized_almacenes;
         const in_stock_all = req.query.in_stock === 'all';
@@ -394,6 +395,10 @@ router.get('/search', async (req, res) => {
             whereClause += ofertaFilter.isOferta ? ` AND ${ofertaCondition}` : ` AND NOT ${ofertaCondition}`;
         }
 
+        if (globalSearch) {
+            whereClause += ` AND (a.co_art LIKE '%' + @globalSearch + '%' OR a.art_des LIKE '%' + @globalSearch + '%' OR a.modelo LIKE '%' + @globalSearch + '%' OR a.ref LIKE '%' + @globalSearch + '%') `;
+        }
+
         // --- LÓGICA DE ORDENAMIENTO ---
         let orderByClause = 'ORDER BY a.art_des ASC';
         let joinPrecioClause = '';
@@ -422,6 +427,7 @@ router.get('/search', async (req, res) => {
                 const r = pool.request();
                 normalFilters.forEach(f => r.input(f.param, sql.VarChar, f.value));
                 if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
+                if (globalSearch) r.input('globalSearch', sql.VarChar, globalSearch);
 
                 const resData = await r.query(
                     `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,

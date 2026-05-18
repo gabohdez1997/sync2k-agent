@@ -15,6 +15,7 @@ let masterConfig = {
     server:   process.env.MASTER_SERVER   || '127.0.0.1',
     database: process.env.MASTER_DATABASE || 'MasterProfitPro',
     options: {
+        useUTC: false,
         encrypt: false,
         trustServerCertificate: true,
         enableArithAbort: true
@@ -91,6 +92,7 @@ async function getPool(serverId, sqlAuth = null) {
             server: config.host,
             database: config.database,
             options: {
+                useUTC: false,
                 encrypt: false, 
                 trustServerCertificate: true,
                 enableArithAbort: true,
