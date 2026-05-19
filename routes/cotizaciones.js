@@ -108,7 +108,7 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
                                RTRIM(cl.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 
-                               cl.contribu_e
+                               cl.contribu_e, cl.porc_esp
                         FROM saCotizacionCliente c
                         LEFT JOIN saCliente      cl ON c.co_cli  = cl.co_cli
                         LEFT JOIN saVendedor     v  ON c.co_ven  = v.co_ven

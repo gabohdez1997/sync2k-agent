@@ -356,7 +356,7 @@ router.get('/search', async (req, res) => {
                 return { param: isNegative ? `${baseKey}_neg` : baseKey, column: FIELD_MAP[baseKey], value, isNegative };
             });
 
-        if (!filters.length && !req.query.sede && !req.query.sort) {
+        if (!filters.length && !req.query.sede && !req.query.sort && !globalSearch) {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
         }
 
