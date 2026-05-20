@@ -506,8 +506,8 @@ router.get('/precios', (req, res) =>
 // ── Tipos de Cliente ────────────────────────────────────────────────────────
 router.get('/tipos_cliente', (req, res) =>
     catalogEndpoint(req, res,
-        `SELECT RTRIM(tip_cli) AS tip_cli, RTRIM(tip_des) AS tip_des FROM saTipoCliente`,
-        'tip_cli', 'tip_des'
+        `SELECT RTRIM(tip_cli) AS tip_cli, RTRIM(des_tipo) AS des_tipo FROM saTipoCliente`,
+        'tip_cli', 'des_tipo'
     )
 );
 

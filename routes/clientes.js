@@ -276,7 +276,8 @@ router.get('/', async (req, res) => {
                             RTRIM(cli.telefonos) AS telefonos, RTRIM(cli.email) AS email,
                             RTRIM(cli.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des,
                             cli.contrib, RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp,
-                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des
+                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des,
+                            RTRIM(cli.tip_cli) AS tip_cli
                      FROM saCliente cli
                      LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven
                      LEFT JOIN saZona z ON cli.co_zon = z.co_zon
@@ -361,7 +362,8 @@ router.get('/search', async (req, res) => {
                             RTRIM(cli.telefonos) AS telefonos, RTRIM(cli.email) AS email,
                             RTRIM(cli.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des,
                             cli.contrib, RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp,
-                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des
+                            RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des,
+                            RTRIM(cli.tip_cli) AS tip_cli
                      FROM saCliente cli
                      LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven
                      LEFT JOIN saZona z ON cli.co_zon = z.co_zon
@@ -426,7 +428,8 @@ router.get('/:co_cli', async (req, res) => {
                             RTRIM(cli.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des,
                             RTRIM(cli.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des,
                             RTRIM(cli.co_seg) AS co_seg, cli.inactivo, cli.contrib,
-                            RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp
+                            RTRIM(cli.tipo_per) AS tipo_per, cli.contribu_e, cli.porc_esp,
+                            RTRIM(cli.tip_cli) AS tip_cli
                      FROM saCliente cli
                      LEFT JOIN saVendedor v ON cli.co_ven = v.co_ven
                      LEFT JOIN saZona z ON cli.co_zon = z.co_zon
