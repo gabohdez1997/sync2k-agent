@@ -124,7 +124,8 @@ router.get('/:doc_num', async (req, res) => {
                                r.total_art AS cantidad, RTRIM(r.co_alma) AS co_alma,
                                r.co_precio AS co_precio, r.prec_vta AS precio,
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
-                               r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad
+                               r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad,
+                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc
                         FROM saPedidoVentaReng r
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni
@@ -229,10 +230,10 @@ router.post('/', async (req, res) => {
 
                 // Resguardar renglones
                 const resL = await transaction.request().input('doc_num', sql.VarChar, docNum).query(
-                    `SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid FROM saPedidoVentaReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+                    `SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc FROM saPedidoVentaReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
                 );
 
-                console.log(`ðŸ—‘ï¸ [AGENT] Eliminando versión anterior para re-inserción...`);
+                console.log(`🗑️ [AGENT] Eliminando versión anterior para re-inserción...`);
                 for (const line of resL.recordset) {
                     const rStock = new sql.Request(transaction);
                     rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
@@ -243,6 +244,39 @@ router.post('/', async (req, res) => {
                     rStock.input('bSumarStock',           sql.Bit,      0); // Restar
                     rStock.input('bPermiteStockNegativo', sql.Bit,      1);
                     await rStock.execute('pStockActualizar');
+
+                    // --- REVERSIÓN DE COTIZACIÓN ANTES DE ELIMINAR ---
+                    if ((line.tipo_doc === 'COTI' || line.tipo_doc === 'CCLI') && line.rowguid_doc && line.num_doc) {
+                        console.log(`📈 [AGENT] Revirtiendo ${line.total_art} al pendiente de cotización ${line.num_doc}, renglón guid: ${line.rowguid_doc}`);
+                        const rRevert = new sql.Request(transaction);
+                        rRevert.input('qty', sql.Decimal(18, 5), line.total_art);
+                        rRevert.input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc);
+                        rRevert.input('num_doc', sql.Char(20), padProfit(line.num_doc, 20));
+                        rRevert.input('auditUser', sql.Char(6), padProfit(auditUser, 6));
+
+                        await rRevert.query(`
+                            UPDATE saCotizacionClienteReng
+                            SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
+                                fe_us_mo = GETDATE(),
+                                co_us_mo = @auditUser
+                            WHERE rowguid = @rowguid_doc AND doc_num = @num_doc;
+
+                            DECLARE @total_qty DECIMAL(18,5), @pending_qty DECIMAL(18,5);
+                            SELECT @total_qty = SUM(total_art), @pending_qty = SUM(pendiente)
+                            FROM saCotizacionClienteReng
+                            WHERE doc_num = @num_doc;
+
+                            UPDATE saCotizacionCliente
+                            SET status = CASE 
+                                WHEN @pending_qty = 0 THEN '1'
+                                WHEN @pending_qty < @total_qty THEN '2'
+                                ELSE '0'
+                            END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                            WHERE doc_num = @num_doc;
+                        `);
+                    }
 
                     const rE = new sql.Request(transaction);
                     rE.input('sDoc_NumOri',  sql.Char(20),          docNum);
@@ -462,9 +496,13 @@ router.post('/', async (req, res) => {
                 rL.input('deMonto_imp_afec_glob',  sql.Decimal(18, 5), 0);
                 rL.input('deMonto_imp2_afec_glob', sql.Decimal(18, 5), 0);
                 rL.input('deMonto_imp3_afec_glob', sql.Decimal(18, 5), 0);
-                rL.input('sTipo_Doc',          sql.Char(4),          null);
-                rL.input('gRowguid_Doc',       sql.UniqueIdentifier, null);
-                rL.input('sNum_Doc',           sql.VarChar(20),      null);
+                const tipoDocVal = (item.tipo_doc && String(item.tipo_doc).trim()) ? String(item.tipo_doc).trim().toUpperCase() : null;
+                const numDocVal = (item.num_doc && String(item.num_doc).trim()) ? String(item.num_doc).trim() : null;
+                const rowguidDocVal = (item.rowguid_doc && String(item.rowguid_doc).trim()) ? String(item.rowguid_doc).trim() : null;
+
+                rL.input('sTipo_Doc',          sql.Char(4),          tipoDocVal ? padProfit(tipoDocVal, 4) : null);
+                rL.input('gRowguid_Doc',       sql.UniqueIdentifier, rowguidDocVal || null);
+                rL.input('sNum_Doc',           sql.VarChar(20),      numDocVal ? padProfit(numDocVal, 20) : null);
                 rL.input('dePorc_Imp',         sql.Decimal(18, 5),    pImp);
                 rL.input('dePorc_Imp2',        sql.Decimal(18, 5),    0);
                 rL.input('dePorc_Imp3',        sql.Decimal(18, 5),    0);
@@ -488,6 +526,39 @@ router.post('/', async (req, res) => {
                     .input('doc', sql.Char(20), padProfit(docNum, 20))
                     .input('reng', sql.Int, i + 1)
                     .query(`UPDATE saPedidoVentaReng SET prec_vta_om = @om WHERE doc_num = @doc AND reng_num = @reng`);
+
+                // --- DECREMENTAR PENDIENTE EN COTIZACIÓN ORIGEN ---
+                if ((tipoDocVal === 'COTI' || tipoDocVal === 'CCLI') && rowguidDocVal && numDocVal) {
+                    console.log(`📉 [AGENT] Descontando ${qty} del pendiente en cotización ${numDocVal}, renglón guid: ${rowguidDocVal}`);
+                    const rQuote = new sql.Request(transaction);
+                    rQuote.input('qty', sql.Decimal(18, 5), qty);
+                    rQuote.input('rowguid_doc', sql.UniqueIdentifier, rowguidDocVal);
+                    rQuote.input('num_doc', sql.Char(20), padProfit(numDocVal, 20));
+                    rQuote.input('auditUser', sql.Char(6), padProfit(auditUser, 6));
+                    
+                    await rQuote.query(`
+                        UPDATE saCotizacionClienteReng
+                        SET pendiente = CASE WHEN pendiente >= @qty THEN pendiente - @qty ELSE 0 END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE rowguid = @rowguid_doc AND doc_num = @num_doc;
+
+                        DECLARE @total_qty DECIMAL(18,5), @pending_qty DECIMAL(18,5);
+                        SELECT @total_qty = SUM(total_art), @pending_qty = SUM(pendiente)
+                        FROM saCotizacionClienteReng
+                        WHERE doc_num = @num_doc;
+
+                        UPDATE saCotizacionCliente
+                        SET status = CASE 
+                            WHEN @pending_qty = 0 THEN '1' -- Procesado totalmente
+                            WHEN @pending_qty < @total_qty THEN '2' -- Procesado parcial
+                            ELSE '0' -- Sin procesar
+                        END,
+                        fe_us_mo = GETDATE(),
+                        co_us_mo = @auditUser
+                        WHERE doc_num = @num_doc;
+                    `);
+                }
 
                 // --- COMPROMETER STOCK ---
                 const rStockIn = new sql.Request(transaction);
@@ -533,7 +604,7 @@ router.delete('/:doc_num', async (req, res) => {
                 throw new Error(`No se puede eliminar ${doc_num}: solo se permiten Pedidos sin procesar (status=${currentStatus || 'N/A'}${isAnulada ? ', anulada=1' : ''}).`);
             }
             const resL = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
-                `SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid FROM saPedidoVentaReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+                `SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc FROM saPedidoVentaReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
             );
 
             const transaction = new sql.Transaction(pool);
@@ -555,6 +626,39 @@ router.delete('/:doc_num', async (req, res) => {
                     rStock.input('bSumarStock',           sql.Bit,      0); // Restar
                     rStock.input('bPermiteStockNegativo', sql.Bit,      1);
                     await rStock.execute('pStockActualizar');
+
+                    // --- REVERSIÓN DE COTIZACIÓN ANTES DE ELIMINAR ---
+                    if ((line.tipo_doc === 'COTI' || line.tipo_doc === 'CCLI') && line.rowguid_doc && line.num_doc) {
+                        console.log(`📈 [AGENT] Revirtiendo ${line.total_art} al pendiente de cotización ${line.num_doc}, renglón guid: ${line.rowguid_doc}`);
+                        const rRevert = new sql.Request(transaction);
+                        rRevert.input('qty', sql.Decimal(18, 5), line.total_art);
+                        rRevert.input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc);
+                        rRevert.input('num_doc', sql.Char(20), padProfit(line.num_doc, 20));
+                        rRevert.input('auditUser', sql.Char(6), padProfit(auditUser, 6));
+
+                        await rRevert.query(`
+                            UPDATE saCotizacionClienteReng
+                            SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
+                                fe_us_mo = GETDATE(),
+                                co_us_mo = @auditUser
+                            WHERE rowguid = @rowguid_doc AND doc_num = @num_doc;
+
+                            DECLARE @total_qty DECIMAL(18,5), @pending_qty DECIMAL(18,5);
+                            SELECT @total_qty = SUM(total_art), @pending_qty = SUM(pendiente)
+                            FROM saCotizacionClienteReng
+                            WHERE doc_num = @num_doc;
+
+                            UPDATE saCotizacionCliente
+                            SET status = CASE 
+                                WHEN @pending_qty = 0 THEN '1'
+                                WHEN @pending_qty < @total_qty THEN '2'
+                                ELSE '0'
+                            END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                            WHERE doc_num = @num_doc;
+                        `);
+                    }
 
                     const rL = new sql.Request(transaction);
                     rL.input('sDoc_NumOri',  sql.Char(20),          doc_num);

@@ -17,7 +17,7 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h, search } = req.query;
+        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h, search, only_available } = req.query;
         
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
@@ -51,6 +51,9 @@ router.get('/', async (req, res) => {
                 if (fec_h) {
                     request.input('fec_h', sql.SmallDateTime, fec_h);
                     whereClauses.push("c.fec_emis <= @fec_h");
+                }
+                if (only_available === 'true') {
+                    whereClauses.push("c.status IN ('0', '2') AND c.anulado = 0");
                 }
 
                 const whereSQL = whereClauses.join(" AND ");
@@ -118,7 +121,8 @@ router.get('/:doc_num', async (req, res) => {
                     `),
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`
                         SELECT r.reng_num, RTRIM(r.co_art) AS co_art, RTRIM(a.art_des) AS art_des,
-                               r.total_art AS cantidad, RTRIM(r.co_alma) AS co_alma,
+                               r.total_art AS cantidad, r.pendiente, r.rowguid AS rowguid_doc,
+                               RTRIM(r.co_alma) AS co_alma,
                                r.co_precio AS co_precio, r.prec_vta AS precio,
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
                                r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad
