@@ -1115,7 +1115,7 @@ router.put('/:co_art', async (req, res) => {
                             .input('user', sql.Char(6), auditUser)
                             .query(`
                                 INSERT INTO saArtPrecio (co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                VALUES (@co_art, @co_precio, 'US$', GETDATE(), '2050-12-31', 0, 0, 0, @user, GETDATE(), @user, GETDATE());
+                                VALUES (@co_art, @co_precio, 'USD', GETDATE(), '2050-12-31', 0, 0, 0, @user, GETDATE(), @user, GETDATE());
                                 
                                 INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
                                 VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
