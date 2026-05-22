@@ -979,7 +979,7 @@ router.put('/:co_art', async (req, res) => {
             r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
             r.input('sLic_Tipo', sql.Char(1), null);
             r.input('bPrec_Om', sql.Bit, 0);
-            r.input('sComentario', sql.VarChar(sql.MAX), data.comentario || null);
+            r.input('sComentario', sql.VarChar(sql.MAX), isNew ? 'Creado via API' : 'Editado via API');
             r.input('sTipo_Cos', sql.Char(4), isNew ? '1' : (data.tipo_cos || row.tipo_cos || '1'));
             r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
             r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
@@ -1037,6 +1037,7 @@ router.put('/:co_art', async (req, res) => {
                 .input('user', sql.Char(6), auditUser)
                 .input('is_new', sql.Bit, isNew ? 1 : 0)
                 .input('ubic', sql.Char(6), isNew ? defaultUbic : (data.co_ubicacion || null))
+                .input('comentario', sql.VarChar(sql.MAX), isNew ? 'Creado via API' : 'Editado via API')
                 .query(`
                     UPDATE saArticulo SET
                         revisado   = NULL,
@@ -1051,6 +1052,7 @@ router.put('/:co_art', async (req, res) => {
                         co_us_mo   = @user,
                         fe_us_mo   = GETDATE(),
                         relac_unidad = 0,
+                        comentario = @comentario,
                         campo1 = NULL, campo2 = NULL, campo3 = NULL, campo4 = NULL,
                         campo5 = NULL, campo6 = NULL, campo7 = NULL, campo8 = NULL,
                         co_ubicacion = CASE 
@@ -1075,20 +1077,23 @@ router.put('/:co_art', async (req, res) => {
                     await pool.request()
                         .input('co_art', sql.Char(30), data.co_art || coArtOri)
                         .input('co_uni', sql.Char(6), data.co_uni)
+                        .input('sucu', sql.Char(6), defaultAlmacen)
                         .input('user', sql.Char(6), auditUser)
                         .query(`
-                            UPDATE saArtUnidad SET uni_principal = 0 WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
-                            INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uso_venta, uso_compra, uni_principal, uso_principal, uni_secundaria, uso_secundaria, uso_numDecimales, num_decimales, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                            VALUES (@co_art, @co_uni, 1, 1, 1, 1, 1, 1, 0, 0, 0, 2, @user, GETDATE(), @user, GETDATE());
+                            UPDATE saArtUnidad SET uni_principal = 0, co_sucu_mo = @sucu, co_us_mo = @user, fe_us_mo = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
+                            INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uso_venta, uso_compra, uni_principal, uso_principal, uni_secundaria, uso_secundaria, uso_numDecimales, num_decimales, co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo)
+                            VALUES (@co_art, @co_uni, 1, 1, 1, 1, 1, 1, 0, 0, 0, 2, @user, GETDATE(), @user, GETDATE(), @sucu, @sucu);
                         `);
                 } else {
                     // Si ya estaba enlazada, solo nos aseguramos de que sea la principal
                     await pool.request()
                         .input('co_art', sql.Char(30), data.co_art || coArtOri)
                         .input('co_uni', sql.Char(6), data.co_uni)
+                        .input('sucu', sql.Char(6), defaultAlmacen)
+                        .input('user', sql.Char(6), auditUser)
                         .query(`
-                            UPDATE saArtUnidad SET uni_principal = 0 WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
-                            UPDATE saArtUnidad SET uni_principal = 1 WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni));
+                            UPDATE saArtUnidad SET uni_principal = 0, co_sucu_mo = @sucu, co_us_mo = @user, fe_us_mo = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
+                            UPDATE saArtUnidad SET uni_principal = 1, co_sucu_mo = @sucu, co_us_mo = @user, fe_us_mo = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni));
                         `);
                 }
             }
@@ -1097,8 +1102,12 @@ router.put('/:co_art', async (req, res) => {
             // Revisamos los tipos de precio 1, 2, 3, 4 y 5
             for (let i = 1; i <= 5; i++) {
                 const margen = data[`margen_${i}`];
-                if (margen !== undefined && margen !== null && margen !== '') {
-                    const numMargen = Number(margen);
+                const precio = data[`precio_${i}`];
+
+                if ((margen !== undefined && margen !== null && margen !== '') ||
+                    (precio !== undefined && precio !== null && precio !== '')) {
+                    const numMargen = margen !== undefined && margen !== null && margen !== '' ? Number(margen) : 0;
+                    const numPrecio = precio !== undefined && precio !== null && precio !== '' ? Number(precio) : 0;
                     const precioId = String(i); // '1', '2', '3', '4', '5' (según saTipoPrecio)
 
                     const pCheck = await pool.request()
@@ -1112,10 +1121,20 @@ router.put('/:co_art', async (req, res) => {
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
                             .input('margen', sql.Decimal(18, 5), numMargen)
+                            .input('monto', sql.Decimal(18, 5), numPrecio)
+                            .input('sucu', sql.Char(6), defaultAlmacen)
                             .input('user', sql.Char(6), auditUser)
                             .query(`
-                                INSERT INTO saArtPrecio (co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                VALUES (@co_art, @co_precio, 'USD', GETDATE(), '2050-12-31', 0, 0, 0, @user, GETDATE(), @user, GETDATE());
+                                INSERT INTO saArtPrecio (
+                                    co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, 
+                                    co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
+                                    montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
+                                )
+                                VALUES (
+                                    @co_art, @co_precio, 'USD', GETDATE(), NULL, 0, @monto, 1, 
+                                    @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
+                                    0.0, 0.0, 0.0, 0.0, 0.0
+                                );
                                 
                                 INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
                                 VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
@@ -1126,8 +1145,25 @@ router.put('/:co_art', async (req, res) => {
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
                             .input('margen', sql.Decimal(18, 5), numMargen)
+                            .input('monto', sql.Decimal(18, 5), numPrecio)
+                            .input('sucu', sql.Char(6), defaultAlmacen)
                             .input('user', sql.Char(6), auditUser)
                             .query(`
+                                UPDATE saArtPrecio SET
+                                    monto = @monto,
+                                    precioOm = 1,
+                                    hasta = NULL,
+                                    co_mone = 'USD',
+                                    co_sucu_mo = @sucu,
+                                    co_us_mo = @user,
+                                    fe_us_mo = GETDATE(),
+                                    montoadi1 = 0.0,
+                                    montoadi2 = 0.0,
+                                    montoadi3 = 0.0,
+                                    montoadi4 = 0.0,
+                                    montoadi5 = 0.0
+                                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio;
+
                                 IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
                                 BEGIN
                                     UPDATE saArtMargen 

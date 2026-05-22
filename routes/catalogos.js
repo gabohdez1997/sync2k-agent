@@ -62,7 +62,10 @@ router.post('/lineas', async (req, res) => {
         if (!user || user.trim() === '') {
             return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
         }
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const sucursalObj = (srv?.profit_branch_codes || []).find(b => b && b.is_default) || (srv?.profit_branch_codes || [])[0];
+            const sucursal = (sucursalObj && typeof sucursalObj === 'object' ? sucursalObj.code : sucursalObj) || '01';
+
             // Verificar si ya existe
             const check = await pool.request()
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
@@ -75,7 +78,7 @@ router.post('/lineas', async (req, res) => {
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
                 .input('lin_des', sql.VarChar(60), lin_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
-                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .input('sucu', sql.Char(6), padProfit(sucursal, 6))
                 .query(`
                     INSERT INTO saLineaArticulo (
                         co_lin, lin_des, dis_cen, co_imun, co_reten, comi_lin, comi_lin2,
@@ -121,12 +124,15 @@ router.put('/lineas/:co_lin', async (req, res) => {
         if (!user || user.trim() === '') {
             return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
         }
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const sucursalObj = (srv?.profit_branch_codes || []).find(b => b && b.is_default) || (srv?.profit_branch_codes || [])[0];
+            const sucursal = (sucursalObj && typeof sucursalObj === 'object' ? sucursalObj.code : sucursalObj) || '01';
+
             const result = await pool.request()
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
                 .input('lin_des', sql.VarChar(60), lin_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
-                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .input('sucu', sql.Char(6), padProfit(sucursal, 6))
                 .query(`
                     UPDATE saLineaArticulo
                     SET lin_des = @lin_des,
@@ -181,7 +187,10 @@ router.post('/sublineas', async (req, res) => {
         if (!user || user.trim() === '') {
             return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
         }
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const sucursalObj = (srv?.profit_branch_codes || []).find(b => b && b.is_default) || (srv?.profit_branch_codes || [])[0];
+            const sucursal = (sucursalObj && typeof sucursalObj === 'object' ? sucursalObj.code : sucursalObj) || '01';
+
             const check = await pool.request()
                 .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
                 .query(`SELECT co_subl FROM saSubLinea WHERE RTRIM(co_subl) = RTRIM(@co_subl)`);
@@ -194,7 +203,7 @@ router.post('/sublineas', async (req, res) => {
                 .input('subl_des', sql.VarChar(60), subl_des.trim())
                 .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
                 .input('user', sql.Char(6), padProfit(user, 6))
-                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .input('sucu', sql.Char(6), padProfit(sucursal, 6))
                 .query(`
                     INSERT INTO saSubLinea (
                         co_lin, co_subl, subl_des, co_imun, co_reten, i_subl_des, movil,
@@ -238,13 +247,16 @@ router.put('/sublineas/:co_subl', async (req, res) => {
         if (!user || user.trim() === '') {
             return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
         }
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const sucursalObj = (srv?.profit_branch_codes || []).find(b => b && b.is_default) || (srv?.profit_branch_codes || [])[0];
+            const sucursal = (sucursalObj && typeof sucursalObj === 'object' ? sucursalObj.code : sucursalObj) || '01';
+
             const updateFields = [`subl_des = @subl_des`, `co_us_mo = @user`, `co_sucu_mo = @sucu`, `fe_us_mo = GETDATE()`];
             const r = pool.request()
                 .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
                 .input('subl_des', sql.VarChar(60), subl_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
-                .input('sucu', sql.Char(6), padProfit('01', 6));
+                .input('sucu', sql.Char(6), padProfit(sucursal, 6));
 
             if (co_lin) {
                 r.input('co_lin', sql.Char(6), padProfit(co_lin, 6));
@@ -289,7 +301,10 @@ router.post('/categorias', async (req, res) => {
         if (!user || user.trim() === '') {
             return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
         }
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const sucursalObj = (srv?.profit_branch_codes || []).find(b => b && b.is_default) || (srv?.profit_branch_codes || [])[0];
+            const sucursal = (sucursalObj && typeof sucursalObj === 'object' ? sucursalObj.code : sucursalObj) || '01';
+
             const check = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
                 .query(`SELECT co_cat FROM saCatArticulo WHERE RTRIM(co_cat) = RTRIM(@co_cat)`);
@@ -301,7 +316,7 @@ router.post('/categorias', async (req, res) => {
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
                 .input('cat_des', sql.VarChar(60), cat_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
-                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .input('sucu', sql.Char(6), padProfit(sucursal, 6))
                 .query(`
                     INSERT INTO saCatArticulo (
                         co_cat, cat_des, co_imun, co_reten, feccom, numcom, dis_cen, movil,
@@ -345,12 +360,15 @@ router.put('/categorias/:co_cat', async (req, res) => {
         if (!user || user.trim() === '') {
             return res.status(400).json({ success: false, message: 'Usuario de Profit no proporcionado. Configure su "ID Agente SQL" en la plataforma.' });
         }
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const sucursalObj = (srv?.profit_branch_codes || []).find(b => b && b.is_default) || (srv?.profit_branch_codes || [])[0];
+            const sucursal = (sucursalObj && typeof sucursalObj === 'object' ? sucursalObj.code : sucursalObj) || '01';
+
             const result = await pool.request()
                 .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
                 .input('cat_des', sql.VarChar(60), cat_des.trim())
                 .input('user', sql.Char(6), padProfit(user, 6))
-                .input('sucu', sql.Char(6), padProfit('01', 6))
+                .input('sucu', sql.Char(6), padProfit(sucursal, 6))
                 .query(`
                     UPDATE saCatArticulo
                     SET cat_des = @cat_des,
