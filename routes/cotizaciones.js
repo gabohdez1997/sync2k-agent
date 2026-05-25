@@ -558,4 +558,72 @@ router.delete('/:doc_num', async (req, res) => {
     }
 });
 
+// --- ANULAR COTIZACIÓN ---
+router.post('/:doc_num/anular', async (req, res) => {
+    try {
+        const { doc_num } = req.params;
+        const { sede } = req.query;
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            const resH = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
+                `SELECT validador, rowguid, RTRIM(status) AS status, anulado
+                 FROM saCotizacionCliente
+                 WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+            );
+            if (!resH.recordset.length) throw new Error('Cotización no existe.');
+
+            const { status, anulado } = resH.recordset[0];
+            const currentStatus = String(status || '').trim();
+            const isAnulada = !!anulado;
+            if (isAnulada) {
+                throw new Error(`La cotización ${doc_num} ya está anulada.`);
+            }
+            if (currentStatus !== '0') {
+                throw new Error(`No se puede anular la cotización ${doc_num} porque ya ha sido procesada o modificada (status=${currentStatus}).`);
+            }
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+
+                // Anular cabecera
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saCotizacionCliente
+                        SET anulado = 1,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                    `);
+
+                // Renglones: poner pendientes a 0 al anularse la cotización
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saCotizacionClienteReng
+                        SET pendiente = 0,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                    `);
+
+                await transaction.commit();
+                return { success: true, doc_num: doc_num };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al anular cotización.', error: error.message });
+    }
+});
+
 module.exports = router;

@@ -356,11 +356,11 @@ router.get('/search', async (req, res) => {
                 return { param: isNegative ? `${baseKey}_neg` : baseKey, column: FIELD_MAP[baseKey], value, isNegative };
             });
 
+        var globalSearch = req.query.search || req.query.q;
+
         if (!filters.length && !req.query.sede && !req.query.sort && !globalSearch) {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
         }
-
-        const globalSearch = req.query.search || req.query.q;
         const co_alma = req.query.co_alma;
         const authAlmacenes = req.query.authorized_almacenes;
         const in_stock_all = req.query.in_stock === 'all';

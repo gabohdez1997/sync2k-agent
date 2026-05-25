@@ -110,6 +110,7 @@ app.use('/api/v1/config',      require('./routes/config'));
 app.use('/api/v1/cotizaciones', require('./routes/cotizaciones'));
 app.use('/api/v1/ubicaciones', require('./routes/ubicaciones'));
 app.use('/api/v1/compras',     require('./routes/compras'));
+app.use('/api/v1/reportes',    require('./routes/reportes'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

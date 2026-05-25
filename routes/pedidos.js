@@ -693,5 +693,124 @@ router.delete('/:doc_num', async (req, res) => {
     }
 });
 
+// --- ANULAR PEDIDO ---
+router.post('/:doc_num/anular', async (req, res) => {
+    try {
+        const { doc_num } = req.params;
+        const { sede } = req.query;
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            const resH = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
+                `SELECT validador, rowguid, RTRIM(status) AS status, anulado
+                 FROM saPedidoVenta
+                 WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+            );
+            if (!resH.recordset.length) throw new Error('Pedido no existe.');
+
+            const { status, anulado } = resH.recordset[0];
+            const currentStatus = String(status || '').trim();
+            const isAnulada = !!anulado;
+            if (isAnulada) {
+                throw new Error(`El pedido ${doc_num} ya está anulado.`);
+            }
+            if (currentStatus !== '0') {
+                throw new Error(`No se puede anular el pedido ${doc_num} porque ya ha sido procesado o facturado (status=${currentStatus}).`);
+            }
+
+            const resL = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
+                `SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc FROM saPedidoVentaReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+            );
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+
+                // 1. Anular cabecera
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saPedidoVenta
+                        SET anulado = 1,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                    `);
+
+                // 2. Anular renglones: poner pendiente a 0
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saPedidoVentaReng
+                        SET pendiente = 0,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                    `);
+
+                // 3. Devolver stock comprometido (restar stock tipo 'COM')
+                console.log(`🧹 [AGENT] Restando stock comprometido de ${resL.recordset.length} renglones...`);
+                for (const line of resL.recordset) {
+                    const rStock = new sql.Request(transaction);
+                    rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                    rStock.input('sCo_Art',               sql.Char(30), line.co_art);
+                    rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                    rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+                    rStock.input('sTipoStock',            sql.Char(4),  'COM');
+                    rStock.input('bSumarStock',           sql.Bit,      0); // Restar (liberar comprometido)
+                    rStock.input('bPermiteStockNegativo', sql.Bit,      1);
+                    await rStock.execute('pStockActualizar');
+
+                    // --- REVERSIÓN DE COTIZACIÓN ASOCIADA ---
+                    if ((line.tipo_doc === 'COTI' || line.tipo_doc === 'CCLI') && line.rowguid_doc && line.num_doc) {
+                        console.log(`📈 [AGENT] Revirtiendo ${line.total_art} al pendiente de cotización ${line.num_doc}, renglón guid: ${line.rowguid_doc}`);
+                        const rRevert = new sql.Request(transaction);
+                        rRevert.input('qty', sql.Decimal(18, 5), line.total_art);
+                        rRevert.input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc);
+                        rRevert.input('num_doc', sql.Char(20), padProfit(line.num_doc, 20));
+                        rRevert.input('auditUser', sql.Char(6), padProfit(auditUser, 6));
+
+                        await rRevert.query(`
+                            UPDATE saCotizacionClienteReng
+                            SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
+                                fe_us_mo = GETDATE(),
+                                co_us_mo = @auditUser
+                            WHERE rowguid = @rowguid_doc AND doc_num = @num_doc;
+
+                            DECLARE @total_qty DECIMAL(18,5), @pending_qty DECIMAL(18,5);
+                            SELECT @total_qty = SUM(total_art), @pending_qty = SUM(pendiente)
+                            FROM saCotizacionClienteReng
+                            WHERE doc_num = @num_doc;
+
+                            UPDATE saCotizacionCliente
+                            SET status = CASE 
+                                WHEN @pending_qty = 0 THEN '1'
+                                WHEN @pending_qty < @total_qty THEN '2'
+                                ELSE '0'
+                            END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                            WHERE doc_num = @num_doc;
+                        `);
+                    }
+                }
+
+                await transaction.commit();
+                return { success: true, doc_num: doc_num };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al anular pedido.', error: error.message });
+    }
+});
+
 module.exports = router;
 
