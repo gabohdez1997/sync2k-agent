@@ -53,7 +53,7 @@ router.get('/', async (req, res) => {
                     whereClauses.push("c.fec_emis <= @fec_h");
                 }
                 if (only_available === 'true') {
-                    whereClauses.push("c.status IN ('0', '2') AND c.anulado = 0");
+                    whereClauses.push("c.anulado = 0 AND EXISTS (SELECT 1 FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0)");
                 }
 
                 const whereSQL = whereClauses.join(" AND ");
@@ -61,9 +61,17 @@ router.get('/', async (req, res) => {
                 const result = await request.query(`
                     SELECT RTRIM(c.doc_num) AS doc_num, RTRIM(c.descrip) AS descrip,
                            RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
-                           c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
+                           c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, 
+                           c.anulado,
                            RTRIM(c.co_mone) AS co_mone, c.tasa, c.total_neto,
-                           RTRIM(c.co_ven) AS co_ven
+                           RTRIM(c.co_ven) AS co_ven,
+                           CASE 
+                               WHEN c.anulado = 1 THEN '3'
+                               WHEN NOT EXISTS (SELECT 1 FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) THEN '0'
+                               WHEN (SELECT SUM(r.pendiente) FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) = 0 THEN '2'
+                               WHEN (SELECT SUM(r.pendiente) FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) = (SELECT SUM(r.total_art) FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) THEN '0'
+                               ELSE '1'
+                           END AS status
                     FROM saCotizacionCliente c
                     LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
                     WHERE ${whereSQL}
@@ -103,7 +111,8 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                                RTRIM(c.co_ven)  AS co_ven,  RTRIM(v.ven_des)  AS ven_des,
                                RTRIM(c.co_cond) AS co_cond, RTRIM(cd.cond_des) AS cond_des,
-                               c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
+                               c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, 
+                               c.anulado,
                                RTRIM(c.co_mone) AS co_mone, c.tasa,
                                c.total_bruto, c.monto_imp, c.total_neto,
                                RTRIM(c.comentario) AS comentario,
@@ -111,7 +120,14 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
                                RTRIM(cl.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 
-                               cl.contribu_e, cl.porc_esp
+                               cl.contribu_e, cl.porc_esp,
+                               CASE 
+                                   WHEN c.anulado = 1 THEN '3'
+                                   WHEN NOT EXISTS (SELECT 1 FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) THEN '0'
+                                   WHEN (SELECT SUM(r.pendiente) FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) = 0 THEN '2'
+                                   WHEN (SELECT SUM(r.pendiente) FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) = (SELECT SUM(r.total_art) FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) THEN '0'
+                                   ELSE '1'
+                               END AS status
                         FROM saCotizacionCliente c
                         LEFT JOIN saCliente      cl ON c.co_cli  = cl.co_cli
                         LEFT JOIN saVendedor     v  ON c.co_ven  = v.co_ven

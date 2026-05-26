@@ -268,8 +268,8 @@ router.post('/', async (req, res) => {
 
                             UPDATE saCotizacionCliente
                             SET status = CASE 
-                                WHEN @pending_qty = 0 THEN '1'
-                                WHEN @pending_qty < @total_qty THEN '2'
+                                WHEN @pending_qty = 0 THEN '2'
+                                WHEN @pending_qty < @total_qty THEN '1'
                                 ELSE '0'
                             END,
                             fe_us_mo = GETDATE(),
@@ -550,8 +550,8 @@ router.post('/', async (req, res) => {
 
                         UPDATE saCotizacionCliente
                         SET status = CASE 
-                            WHEN @pending_qty = 0 THEN '1' -- Procesado totalmente
-                            WHEN @pending_qty < @total_qty THEN '2' -- Procesado parcial
+                            WHEN @pending_qty = 0 THEN '2' -- Procesado totalmente
+                            WHEN @pending_qty < @total_qty THEN '1' -- Procesado parcial
                             ELSE '0' -- Sin procesar
                         END,
                         fe_us_mo = GETDATE(),
@@ -650,8 +650,8 @@ router.delete('/:doc_num', async (req, res) => {
 
                             UPDATE saCotizacionCliente
                             SET status = CASE 
-                                WHEN @pending_qty = 0 THEN '1'
-                                WHEN @pending_qty < @total_qty THEN '2'
+                                WHEN @pending_qty = 0 THEN '2'
+                                WHEN @pending_qty < @total_qty THEN '1'
                                 ELSE '0'
                             END,
                             fe_us_mo = GETDATE(),
@@ -787,8 +787,8 @@ router.post('/:doc_num/anular', async (req, res) => {
 
                             UPDATE saCotizacionCliente
                             SET status = CASE 
-                                WHEN @pending_qty = 0 THEN '1'
-                                WHEN @pending_qty < @total_qty THEN '2'
+                                WHEN @pending_qty = 0 THEN '2'
+                                WHEN @pending_qty < @total_qty THEN '1'
                                 ELSE '0'
                             END,
                             fe_us_mo = GETDATE(),
