@@ -76,13 +76,15 @@ router.get('/cxc', async (req, res) => {
             });
         }
 
-        // Obtener tasa de cambio por si acaso para conversiones
+        // Obtener tasa de cambio actual para conversiones
         let currentRate = 50.0; // Tasa fallback
         try {
-            const rateObj = await getExchangeRate();
-            if (rateObj && rateObj.tasa) {
-                currentRate = parseFloat(rateObj.tasa);
+            const firstPool = await getPool(targets[0].id, req.sqlAuth);
+            const rateValue = await getExchangeRate(firstPool);
+            if (rateValue && typeof rateValue === 'number' && rateValue > 0) {
+                currentRate = rateValue;
             }
+            console.log('[REPORTES/CXC] Tasa actual obtenida:', currentRate);
         } catch (e) {
             console.warn('[REPORTES/CXC] No se pudo obtener tasa oficial, usando fallback:', currentRate);
         }
@@ -92,7 +94,7 @@ router.get('/cxc', async (req, res) => {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const r = pool.request();
                 
-                let whereClauses = ["d.saldo > 0 AND d.anulado = 0"];
+                let whereClauses = ["d.saldo <> 0 AND d.anulado = 0"];
 
                 if (search !== "") {
                     r.input('search', sql.VarChar, `%${search}%`);
@@ -129,7 +131,14 @@ router.get('/cxc', async (req, res) => {
                         d.anulado, 
                         RTRIM(d.co_ven) AS co_ven, 
                         RTRIM(d.co_mone) AS co_mone, 
-                        d.tasa
+                        d.tasa AS doc_tasa,
+                        (
+                            SELECT TOP 1 t.tasa_v
+                            FROM saTasa t
+                            WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
+                              AND t.fecha <= d.fec_emis
+                            ORDER BY t.fecha DESC
+                        ) AS tasa_bcv_fecha
                     FROM saDocumentoVenta d
                     LEFT JOIN saCliente c ON d.co_cli = c.co_cli
                     WHERE ${whereSQL}
@@ -139,27 +148,17 @@ router.get('/cxc', async (req, res) => {
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
                     const rowMone = (row.co_mone || "").trim().toUpperCase();
-                    const rowTasa = parseFloat(row.tasa) || currentRate || 1.0;
+                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || parseFloat(row.doc_tasa) || currentRate || 1.0;
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
-                    let saldoUsd = 0.0;
-                    let saldoBs = 0.0;
-                    let totalUsd = 0.0;
-                    let totalBs = 0.0;
+                    const isCred = (row.co_tipo_doc || "").trim().toUpperCase() === 'N/CR';
 
-                    if (rowMone === 'USD' || rowMone === 'US') {
-                        saldoUsd = saldo;
-                        saldoBs = saldo * rowTasa;
-                        totalUsd = total;
-                        totalBs = total * rowTasa;
-                    } else {
-                        // Es bolívares u otra moneda nacional
-                        saldoBs = saldo;
-                        saldoUsd = saldo / (rowTasa > 0 ? rowTasa : 1.0);
-                        totalBs = total;
-                        totalUsd = total / (rowTasa > 0 ? rowTasa : 1.0);
-                    }
+                    // El saldo y total siempre se almacenan en BS en saDocumentoVenta (moneda base bolívares en Profit)
+                    const saldoBs = isCred ? -saldo : saldo;
+                    const saldoUsd = isCred ? -saldo / (rowTasa > 0 ? rowTasa : 1.0) : saldo / (rowTasa > 0 ? rowTasa : 1.0);
+                    const totalBs = isCred ? -total : total;
+                    const totalUsd = isCred ? -total / (rowTasa > 0 ? rowTasa : 1.0) : total / (rowTasa > 0 ? rowTasa : 1.0);
 
                     // Calcular días de retraso / vencimiento
                     const today = new Date();
@@ -177,8 +176,8 @@ router.get('/cxc', async (req, res) => {
                         fec_venc: row.fec_venc,
                         co_mone: rowMone,
                         tasa: rowTasa,
-                        total_original: total,
-                        saldo_original: saldo,
+                        total_original: isCred ? -total : total,
+                        saldo_original: isCred ? -saldo : saldo,
                         total_usd: parseFloat(totalUsd.toFixed(2)),
                         total_bs: parseFloat(totalBs.toFixed(2)),
                         saldo_usd: parseFloat(saldoUsd.toFixed(2)),

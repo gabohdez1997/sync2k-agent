@@ -105,7 +105,7 @@ router.get('/articulos', async (req, res) => {
             OUTER APPLY (
                 SELECT TOP 1 n.fec_emis, RTRIM(n.doc_num) AS fact_doc_num,
                     CASE 
-                        WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND CAST(fecha AS DATE) <= CAST(n.fec_emis AS DATE) ORDER BY fecha DESC), 0)) 
+                        WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= n.fec_emis ORDER BY fecha DESC), 0)) 
                         ELSE r.cost_unit_om 
                     END AS cost_unit_om
                 FROM saFacturaCompraReng r INNER JOIN saFacturaCompra n ON r.doc_num = n.doc_num
