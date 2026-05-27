@@ -165,7 +165,7 @@ router.get('/cxc', async (req, res) => {
                     const fecVenc = new Date(row.fec_venc);
                     const diffTime = today.getTime() - fecVenc.getTime();
                     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                    const isVencido = diffDays > 0;
+                    const isVencido = !isCred && diffDays > 0;
 
                     return {
                         nro_doc: row.nro_doc,
