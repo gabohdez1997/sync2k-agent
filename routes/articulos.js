@@ -19,11 +19,13 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         pool.request().query(`
             SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma,
                    RTRIM(a.des_alma) AS des_alma,
-                   SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) AS stock
+                   (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
+                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) AS stock
             FROM saStockAlmacen s LEFT JOIN saAlmacen a ON s.co_alma = a.co_alma
             WHERE LTRIM(RTRIM(s.co_art)) IN (${ids}) ${authCondition}
             GROUP BY s.co_art, s.co_alma, a.des_alma
-            HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)) > 0
+            HAVING (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
+                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) > 0
         `),
         pool.request().query(`
             WITH UP AS (
@@ -656,12 +658,14 @@ router.get('/:co_art', async (req, res) => {
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `SELECT RTRIM(s.co_alma) AS co_alma, RTRIM(alm.des_alma) AS des_alma,
-                                SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) AS stock
-                         FROM saStockAlmacen s
-                         LEFT JOIN saAlmacen alm ON s.co_alma = alm.co_alma
-                         WHERE LTRIM(RTRIM(s.co_art)) = LTRIM(RTRIM(@co_art))
-                         GROUP BY s.co_alma, alm.des_alma
-                         HAVING (SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END)) > 0`
+                                (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
+                                 SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) AS stock
+                          FROM saStockAlmacen s
+                          LEFT JOIN saAlmacen alm ON s.co_alma = alm.co_alma
+                          WHERE LTRIM(RTRIM(s.co_art)) = LTRIM(RTRIM(@co_art))
+                          GROUP BY s.co_alma, alm.des_alma
+                          HAVING (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
+                                  SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) > 0`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `WITH UP AS (

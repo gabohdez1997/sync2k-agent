@@ -51,7 +51,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sDis_cen',          sql.VarChar(sql.MAX),  '');
     r.input('sNit',              sql.VarChar(18),       '');
     r.input('sEmail',            sql.VarChar(60),       data.email || '');
-    r.input('sCo_Cta_Ingr_Egr', sql.Char(20),          padProfit(d.co_cta || '01', 20));
+    r.input('sCo_Cta_Ingr_Egr', sql.Char(20),          padProfit(data.co_cta_ingr_egr || data.co_cta || '01', 20));
     r.input('sComentario',       sql.VarChar(sql.MAX),  'Creado vía API');
     r.input('sCampo1',           sql.VarChar(60),       '');
     r.input('sCampo2',           sql.VarChar(60),       '');
@@ -77,7 +77,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sWebSite',          sql.VarChar(200),      '');
     r.input('bContribu_E',       sql.Bit,               data.contribu_e ? 1 : 0);
     r.input('bRete_Regis_Doc',   sql.Bit,               0);
-    r.input('dePorc_Esp',        sql.Decimal(18,5),     data.porc_esp || 0);
+    r.input('dePorc_Esp',        sql.Decimal(18,5),     Number(data.porc_esp) || 0);
     r.input('sN_cr',             sql.Char(6),           null);
     r.input('sN_db',             sql.Char(6),           null);
     r.input('sTComp',            sql.Char(6),           null);
@@ -131,7 +131,7 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999') {
     r.input('sDis_cen',          sql.VarChar(sql.MAX),  '');
     r.input('sNit',              sql.VarChar(18),       '');
     r.input('sEmail',            sql.VarChar(60),       data.email || '');
-    r.input('sCo_Cta_Ingr_Egr',  sql.Char(20),          padProfit(row.co_cta_ingr_egr || '01', 20));
+    r.input('sCo_Cta_Ingr_Egr',  sql.Char(20),          padProfit(data.co_cta_ingr_egr || data.co_cta || row.co_cta_ingr_egr || '01', 20));
     r.input('sComentario',       sql.VarChar(sql.MAX),  'Editado vía API');
     r.input('sCampo1',           sql.VarChar(60),       '');
     r.input('sCampo2',           sql.VarChar(60),       '');
@@ -174,7 +174,7 @@ async function loadDefaults(pool) {
         pool.request().query('SELECT TOP 1 RTRIM(co_seg) AS id FROM saSegmento'),
         pool.request().query('SELECT TOP 1 RTRIM(co_zon) AS id FROM saZona'),
         pool.request().query('SELECT TOP 1 RTRIM(co_ven) AS id FROM saVendedor'),
-        pool.request().query('SELECT TOP 1 RTRIM(tip_cli) AS id FROM saTipoCliente'),
+        pool.request().query('SELECT TOP 1 RTRIM(tip_cli) AS id FROM saTipoCliente ORDER BY CASE WHEN RTRIM(tip_cli) = \'01\' THEN 0 ELSE 1 END, tip_cli'),
         pool.request().query('SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN co_mone IN (\'BS\',\'VES\',\'BSF\') THEN 0 ELSE 1 END, co_mone'),
         pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago')
     ]);
