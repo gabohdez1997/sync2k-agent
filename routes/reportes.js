@@ -132,6 +132,18 @@ router.get('/cxc', async (req, res) => {
                         RTRIM(d.co_ven) AS co_ven, 
                         RTRIM(d.co_mone) AS co_mone, 
                         d.tasa AS doc_tasa,
+                        RTRIM(d.nro_orig) AS nro_orig,
+                        RTRIM(d.doc_orig) AS doc_orig,
+                        (
+                            SELECT TOP 1 RTRIM(r.tipo_doc)
+                            FROM saDevolucionClienteReng r
+                            WHERE r.doc_num = d.nro_orig
+                        ) AS devol_tipo_doc,
+                        (
+                            SELECT TOP 1 RTRIM(r.num_doc)
+                            FROM saDevolucionClienteReng r
+                            WHERE r.doc_num = d.nro_orig
+                        ) AS devol_num_doc,
                         (
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
@@ -167,6 +179,14 @@ router.get('/cxc', async (req, res) => {
                     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                     const isVencido = !isCred && diffDays > 0;
 
+                    const docOrig = (row.doc_orig || "").trim().toUpperCase();
+                    const nroOrig = (row.nro_orig || "").trim();
+                    const devolTipoDoc = (row.devol_tipo_doc || "").trim();
+                    const devolNumDoc = (row.devol_num_doc || "").trim();
+
+                    const finalDocOrig = docOrig === 'DEVO' && devolTipoDoc ? devolTipoDoc : docOrig;
+                    const finalNroOrig = docOrig === 'DEVO' && devolNumDoc ? devolNumDoc : nroOrig;
+
                     return {
                         nro_doc: row.nro_doc,
                         co_tipo_doc: row.co_tipo_doc,
@@ -186,7 +206,9 @@ router.get('/cxc', async (req, res) => {
                         dias_vencidos: isVencido ? diffDays : 0,
                         vencido: isVencido,
                         sede_id: srv.id,
-                        sede_nombre: srv.name
+                        sede_nombre: srv.name,
+                        nro_orig: finalNroOrig,
+                        doc_orig: finalDocOrig
                     };
                 });
             } catch (e) {
