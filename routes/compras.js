@@ -164,4 +164,41 @@ router.get('/articulos', async (req, res) => {
     }
 });
 
+// GET /api/v1/compras/proveedores/:co_prov — Detalle del proveedor desde todas las sedes
+router.get('/proveedores/:co_prov', async (req, res) => {
+    try {
+        const { co_prov } = req.params;
+        const servers = getServers();
+
+        const results = await Promise.all(servers.map(async (srv) => {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const result = await pool.request().input('co_prov', sql.VarChar, co_prov).query(
+                    `SELECT RTRIM(p.co_prov) AS co_prov, RTRIM(p.prov_des) AS descripcion,
+                            RTRIM(p.rif) AS rif, RTRIM(p.direc1) AS direc1,
+                            RTRIM(p.telefonos) AS telefonos, RTRIM(p.email) AS email,
+                            p.inactivo,
+                            RTRIM(p.co_seg) AS co_seg, RTRIM(p.co_zon) AS co_zon,
+                            RTRIM(p.tip_pro) AS tip_pro,
+                            RTRIM(p.co_mone) AS co_mone, RTRIM(p.cond_pag) AS cond_pag,
+                            p.contribu_e, p.porc_esp,
+                            RTRIM(p.tipo_per) AS tipo_per
+                     FROM saProveedor p
+                     WHERE LTRIM(RTRIM(p.co_prov)) = LTRIM(RTRIM(@co_prov))`
+                );
+                if (!result.recordset.length) return null;
+                return { ...result.recordset[0], sede_id: srv.id, sede_nombre: srv.name };
+            } catch (e) { return { sede_id: srv.id, sede_nombre: srv.name, error: e.message }; }
+        }));
+
+        const found = results.filter(r => r && !r.error);
+        if (!found.length)
+            return res.status(404).json({ success: false, message: 'Proveedor no encontrado en ninguna sede.' });
+
+        res.status(200).json({ success: true, count: found.length, data: results.filter(r => r !== null) });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
 module.exports = router;
