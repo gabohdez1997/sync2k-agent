@@ -164,20 +164,21 @@ router.get('/cxc', async (req, res) => {
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
-                    const isCred = (row.co_tipo_doc || "").trim().toUpperCase() === 'N/CR';
+                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
+                    const isNegative = ['FACT', 'AJPA', 'IVANP', 'N/DB', 'NDEB', 'IVAP', 'GIRO'].includes(docType);
 
                     // El saldo y total siempre se almacenan en BS en saDocumentoVenta (moneda base bolívares en Profit)
-                    const saldoBs = isCred ? -saldo : saldo;
-                    const saldoUsd = isCred ? -saldo / (rowTasa > 0 ? rowTasa : 1.0) : saldo / (rowTasa > 0 ? rowTasa : 1.0);
-                    const totalBs = isCred ? -total : total;
-                    const totalUsd = isCred ? -total / (rowTasa > 0 ? rowTasa : 1.0) : total / (rowTasa > 0 ? rowTasa : 1.0);
+                    const saldoBs = isNegative ? -saldo : saldo;
+                    const saldoUsd = isNegative ? -saldo / (rowTasa > 0 ? rowTasa : 1.0) : saldo / (rowTasa > 0 ? rowTasa : 1.0);
+                    const totalBs = isNegative ? -total : total;
+                    const totalUsd = isNegative ? -total / (rowTasa > 0 ? rowTasa : 1.0) : total / (rowTasa > 0 ? rowTasa : 1.0);
 
                     // Calcular días de retraso / vencimiento
                     const today = new Date();
                     const fecVenc = new Date(row.fec_venc);
                     const diffTime = today.getTime() - fecVenc.getTime();
                     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                    const isVencido = !isCred && diffDays > 0;
+                    const isVencido = isNegative && diffDays > 0;
 
                     const docOrig = (row.doc_orig || "").trim().toUpperCase();
                     const nroOrig = (row.nro_orig || "").trim();
@@ -196,8 +197,8 @@ router.get('/cxc', async (req, res) => {
                         fec_venc: row.fec_venc,
                         co_mone: rowMone,
                         tasa: rowTasa,
-                        total_original: isCred ? -total : total,
-                        saldo_original: isCred ? -saldo : saldo,
+                        total_original: isNegative ? -total : total,
+                        saldo_original: isNegative ? -saldo : saldo,
                         total_usd: parseFloat(totalUsd.toFixed(2)),
                         total_bs: parseFloat(totalBs.toFixed(2)),
                         saldo_usd: parseFloat(saldoUsd.toFixed(2)),
