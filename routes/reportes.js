@@ -388,6 +388,8 @@ router.get('/cxp', async (req, res) => {
                         d.tasa AS doc_tasa,
                         RTRIM(d.nro_orig) AS nro_orig,
                         RTRIM(d.doc_orig) AS doc_orig,
+                        RTRIM(d.campo8) AS campo8,
+                        RTRIM(d.campo7) AS campo7,
                         (
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
@@ -408,20 +410,43 @@ router.get('/cxp', async (req, res) => {
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
-                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
-                    // FACT, AJPA (and NDEB/N/DB) represent liabilities to pay (negative cash/outstanding)
-                    // N/CR, NCR, AJNM (and ADEL/ISLR/IVAN) represent credits in our favor (positive)
-                    const isNegative = ['FACT', 'AJPA', 'NDEB', 'N/DB', 'IVAP'].includes(docType);
+                    // Validar expiración diaria de la tasa (campo7 debe ser la fecha de hoy local 'YYYY-MM-DD')
+                    const now = new Date();
+                    const offset = now.getTimezoneOffset();
+                    const localNow = new Date(now.getTime() - (offset * 60 * 1000));
+                    const todayStr = localNow.toISOString().split('T')[0];
+                    const rateDateStr = (row.campo7 || "").trim();
 
-                    const saldoBs = isNegative ? -saldo : saldo;
-                    const saldoUsd = isNegative ? -saldo / (rowTasa > 0 ? rowTasa : 1.0) : saldo / (rowTasa > 0 ? rowTasa : 1.0);
-                    const totalBs = isNegative ? -total : total;
-                    const totalUsd = isNegative ? -total / (rowTasa > 0 ? rowTasa : 1.0) : total / (rowTasa > 0 ? rowTasa : 1.0);
+                    let tasaProv = 0.0;
+                    if (rateDateStr === todayStr) {
+                        tasaProv = parseFloat(row.campo8) || 0.0;
+                    }
+
+                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
+                    // Facturas, ajustes de pagar y retenciones/otros débitos son negativos (deben restarse de los haberes / crédito)
+                    const isNegative = ['FACT', 'AJPA', 'IVANP', 'N/DB', 'NDEB', 'IVAP', 'GIRO'].includes(docType);
+
+                    const docTasa = parseFloat(row.doc_tasa) || 1.0;
+                    const bcvTasa = parseFloat(row.tasa_bcv_fecha) || docTasa;
+
+                    const isUSD = rowMone === 'USD' || rowMone === 'US$' || rowMone === 'US' || docTasa > 1.0;
+                    const docTasaBase = isUSD ? docTasa : bcvTasa;
+                    const conversionRate = docTasaBase > 0 ? docTasaBase : 1.0;
+
+                    const saldoUsd = parseFloat((isNegative ? -saldo / conversionRate : saldo / conversionRate).toFixed(2));
+                    const totalUsd = parseFloat((isNegative ? -total / conversionRate : total / conversionRate).toFixed(2));
+
+                    const saldoBs = tasaProv > 0 
+                        ? parseFloat((saldoUsd * tasaProv).toFixed(2)) 
+                        : parseFloat((saldoUsd * bcvTasa).toFixed(2));
+
+                    const totalBs = parseFloat((totalUsd * bcvTasa).toFixed(2));
 
                     const today = new Date();
                     const fecVenc = new Date(row.fec_venc);
                     const diffTime = today.getTime() - fecVenc.getTime();
                     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    // Solo los documentos de débito (negativos) se vencen
                     const isVencido = isNegative && diffDays > 0;
 
                     return {
@@ -432,13 +457,14 @@ router.get('/cxp', async (req, res) => {
                         fec_emis: row.fec_emis,
                         fec_venc: row.fec_venc,
                         co_mone: rowMone,
-                        tasa: rowTasa,
-                        total_original: isNegative ? -total : total,
-                        saldo_original: isNegative ? -saldo : saldo,
-                        total_usd: parseFloat(totalUsd.toFixed(2)),
-                        total_bs: parseFloat(totalBs.toFixed(2)),
-                        saldo_usd: parseFloat(saldoUsd.toFixed(2)),
-                        saldo_bs: parseFloat(saldoBs.toFixed(2)),
+                        tasa: bcvTasa,
+                        tasa_proveedor: tasaProv > 0 ? tasaProv : null,
+                        total_original: parseFloat((totalUsd * bcvTasa).toFixed(2)),
+                        saldo_original: parseFloat((saldoUsd * bcvTasa).toFixed(2)),
+                        total_usd: totalUsd,
+                        total_bs: totalBs,
+                        saldo_usd: saldoUsd,
+                        saldo_bs: saldoBs,
                         dias_vencidos: isVencido ? diffDays : 0,
                         vencido: isVencido,
                         sede_id: srv.id,
@@ -699,6 +725,68 @@ router.get('/cuenta-detallada', async (req, res) => {
     } catch (error) {
         console.error('[REPORTES/CUENTA-DETALLADA GLOBAL ERROR]:', error.message);
         res.status(500).json({ success: false, message: 'Error general al generar reporte de cuenta detallada.', error: error.message });
+    }
+});
+
+router.post('/cxp/tasa-proveedor', async (req, res) => {
+    console.log('============= [REPORTES/CXP/TASA-PROVEEDOR HIT] =============');
+    console.log('[REPORTES/CXP/TASA-PROVEEDOR] BODY:', JSON.stringify(req.body));
+    try {
+        const { co_tipo_doc, nro_doc, tasa, sede_id } = req.body;
+
+        if (!co_tipo_doc || !nro_doc || !sede_id) {
+            return res.status(400).json({ success: false, message: 'Faltan parámetros requeridos (co_tipo_doc, nro_doc, sede_id).' });
+        }
+
+        const parsedTasa = parseFloat(tasa);
+        if (isNaN(parsedTasa) || parsedTasa < 0) {
+            return res.status(400).json({ success: false, message: 'La tasa debe ser un número positivo válido.' });
+        }
+
+        const pool = await getPool(sede_id, req.sqlAuth);
+        const r = pool.request();
+        r.input('co_tipo_doc', sql.VarChar, co_tipo_doc.trim().toUpperCase());
+        r.input('nro_doc', sql.VarChar, nro_doc.trim());
+        
+        const now = new Date();
+        const offset = now.getTimezoneOffset();
+        const localNow = new Date(now.getTime() - (offset * 60 * 1000));
+        const todayStr = localNow.toISOString().split('T')[0];
+
+        let querySQL;
+        if (parsedTasa > 0) {
+            r.input('campo8', sql.VarChar, parsedTasa.toFixed(2));
+            r.input('campo7', sql.VarChar, todayStr);
+            querySQL = `
+                UPDATE saDocumentoCompra
+                SET campo8 = @campo8,
+                    campo7 = @campo7
+                WHERE LTRIM(RTRIM(co_tipo_doc)) = @co_tipo_doc
+                  AND LTRIM(RTRIM(nro_doc)) = @nro_doc
+            `;
+        } else {
+            querySQL = `
+                UPDATE saDocumentoCompra
+                SET campo8 = NULL
+                WHERE LTRIM(RTRIM(co_tipo_doc)) = @co_tipo_doc
+                  AND LTRIM(RTRIM(nro_doc)) = @nro_doc
+            `;
+        }
+
+        await r.query(querySQL);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Tasa de proveedor actualizada correctamente.',
+            data: {
+                co_tipo_doc,
+                nro_doc,
+                tasa: parsedTasa > 0 ? parsedTasa.toFixed(2) : null
+            }
+        });
+    } catch (error) {
+        console.error('[REPORTES/CXP/TASA-PROVEEDOR ERROR]:', error.message);
+        res.status(500).json({ success: false, message: 'Error al actualizar tasa de proveedor.', error: error.message });
     }
 });
 
