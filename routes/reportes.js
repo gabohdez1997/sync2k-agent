@@ -390,6 +390,9 @@ router.get('/cxp', async (req, res) => {
                         RTRIM(d.doc_orig) AS doc_orig,
                         RTRIM(d.campo8) AS campo8,
                         RTRIM(d.campo7) AS campo7,
+                        RTRIM(d.campo1) AS campo1,
+                        RTRIM(d.campo2) AS campo2,
+                        RTRIM(d.campo3) AS campo3,
                         (
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
@@ -470,7 +473,10 @@ router.get('/cxp', async (req, res) => {
                         sede_id: srv.id,
                         sede_nombre: srv.name,
                         nro_orig: (row.nro_orig || "").trim(),
-                        doc_orig: (row.doc_orig || "").trim()
+                        doc_orig: (row.doc_orig || "").trim(),
+                        campo1: row.campo1 ? parseFloat(row.campo1) || 0.0 : 0.0,
+                        campo2: row.campo2 ? parseFloat(row.campo2) || 0.0 : 0.0,
+                        campo3: row.campo3 ? parseFloat(row.campo3) || 0.0 : 0.0
                     };
                 });
             } catch (e) {
@@ -787,6 +793,60 @@ router.post('/cxp/tasa-proveedor', async (req, res) => {
     } catch (error) {
         console.error('[REPORTES/CXP/TASA-PROVEEDOR ERROR]:', error.message);
         res.status(500).json({ success: false, message: 'Error al actualizar tasa de proveedor.', error: error.message });
+    }
+});
+
+router.post('/cxp/descuentos', async (req, res) => {
+    console.log('============= [REPORTES/CXP/DESCUENTOS HIT] =============');
+    console.log('[REPORTES/CXP/DESCUENTOS] BODY:', JSON.stringify(req.body));
+    try {
+        const { co_tipo_doc, nro_doc, campo1, campo2, campo3, sede_id } = req.body;
+
+        if (!co_tipo_doc || !nro_doc || !sede_id) {
+            return res.status(400).json({ success: false, message: 'Faltan parámetros requeridos (co_tipo_doc, nro_doc, sede_id).' });
+        }
+
+        const val1 = parseFloat(campo1) || 0.0;
+        const val2 = parseFloat(campo2) || 0.0;
+        const val3 = parseFloat(campo3) || 0.0;
+
+        if (val1 < 0 || val1 > 100 || val2 < 0 || val2 > 100 || val3 < 0 || val3 > 100) {
+            return res.status(400).json({ success: false, message: 'Los descuentos deben estar entre 0 y 100.' });
+        }
+
+        const pool = await getPool(sede_id, req.sqlAuth);
+        const r = pool.request();
+        r.input('co_tipo_doc', sql.VarChar, co_tipo_doc.trim().toUpperCase());
+        r.input('nro_doc', sql.VarChar, nro_doc.trim());
+        r.input('campo1', sql.VarChar, val1.toFixed(2));
+        r.input('campo2', sql.VarChar, val2.toFixed(2));
+        r.input('campo3', sql.VarChar, val3.toFixed(2));
+
+        const querySQL = `
+            UPDATE saDocumentoCompra
+            SET campo1 = @campo1,
+                campo2 = @campo2,
+                campo3 = @campo3
+            WHERE LTRIM(RTRIM(co_tipo_doc)) = @co_tipo_doc
+              AND LTRIM(RTRIM(nro_doc)) = @nro_doc
+        `;
+
+        await r.query(querySQL);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Descuentos actualizados correctamente.',
+            data: {
+                co_tipo_doc,
+                nro_doc,
+                campo1: val1.toFixed(2),
+                campo2: val2.toFixed(2),
+                campo3: val3.toFixed(2)
+            }
+        });
+    } catch (error) {
+        console.error('[REPORTES/CXP/DESCUENTOS ERROR]:', error.message);
+        res.status(500).json({ success: false, message: 'Error al actualizar descuentos.', error: error.message });
     }
 });
 
