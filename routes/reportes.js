@@ -148,7 +148,14 @@ router.get('/cxc', async (req, res) => {
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
                             WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                              AND t.fecha <= d.fec_emis
+                              AND t.fecha <= COALESCE(
+                                  (SELECT TOP 1 orig.fec_emis 
+                                   FROM saDocumentoVenta orig 
+                                   WHERE orig.nro_doc = d.nro_orig 
+                                     AND orig.co_tipo_doc = d.doc_orig 
+                                     AND orig.co_cli = d.co_cli),
+                                  d.fec_emis
+                              )
                             ORDER BY t.fecha DESC
                         ) AS tasa_bcv_fecha
                     FROM saDocumentoVenta d
@@ -160,7 +167,7 @@ router.get('/cxc', async (req, res) => {
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
                     const rowMone = (row.co_mone || "").trim().toUpperCase();
-                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || parseFloat(row.doc_tasa) || currentRate || 1.0;
+                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
@@ -397,7 +404,14 @@ router.get('/cxp', async (req, res) => {
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
                             WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                              AND t.fecha <= d.fec_emis
+                              AND t.fecha <= COALESCE(
+                                  (SELECT TOP 1 orig.fec_emis 
+                                   FROM saDocumentoCompra orig 
+                                   WHERE orig.nro_doc = d.nro_orig 
+                                     AND orig.co_tipo_doc = d.doc_orig 
+                                     AND orig.co_prov = d.co_prov),
+                                  d.fec_emis
+                              )
                             ORDER BY t.fecha DESC
                         ) AS tasa_bcv_fecha
                     FROM saDocumentoCompra d
@@ -409,7 +423,6 @@ router.get('/cxp', async (req, res) => {
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
                     const rowMone = (row.co_mone || "").trim().toUpperCase();
-                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || parseFloat(row.doc_tasa) || currentRate || 1.0;
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
@@ -429,12 +442,8 @@ router.get('/cxp', async (req, res) => {
                     // Facturas, ajustes de pagar y retenciones/otros débitos son negativos (deben restarse de los haberes / crédito)
                     const isNegative = ['FACT', 'AJPA', 'IVANP', 'N/DB', 'NDEB', 'IVAP', 'GIRO'].includes(docType);
 
-                    const docTasa = parseFloat(row.doc_tasa) || 1.0;
-                    const bcvTasa = parseFloat(row.tasa_bcv_fecha) || docTasa;
-
-                    const isUSD = rowMone === 'USD' || rowMone === 'US$' || rowMone === 'US' || docTasa > 1.0;
-                    const docTasaBase = isUSD ? docTasa : bcvTasa;
-                    const conversionRate = docTasaBase > 0 ? docTasaBase : 1.0;
+                    const bcvTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
+                    const conversionRate = bcvTasa;
 
                     const saldoUsd = parseFloat((isNegative ? -saldo / conversionRate : saldo / conversionRate).toFixed(2));
                     const totalUsd = parseFloat((isNegative ? -total / conversionRate : total / conversionRate).toFixed(2));
@@ -577,9 +586,6 @@ router.get('/cuenta-detallada', async (req, res) => {
             console.warn('[REPORTES/CUENTA-DETALLADA] Error getting exchange rate:', e.message);
         }
 
-        const positiveTypes = ['FACT', 'N/DB', 'NDEB', 'IVAP', 'AJPA'];
-        const negativeTypes = ['N/CR', 'NCR', 'AJNA', 'AJNM', 'IVAN', 'ISLR', 'ADEL'];
-
         const allData = await Promise.all(targets.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
@@ -589,7 +595,7 @@ router.get('/cuenta-detallada', async (req, res) => {
 
                 if (search !== "") {
                     r.input('search', sql.VarChar, `%${search}%`);
-                    whereClauses.push("(d.nro_doc LIKE @search OR d.co_cli LIKE @search OR c.cli_des LIKE @search)");
+                    whereClauses.push("(d.nro_doc LIKE @search OR d.co_cli LIKE @search OR d.cli_des LIKE @search)");
                 }
 
                 if (co_ven !== "") {
@@ -606,54 +612,128 @@ router.get('/cuenta-detallada', async (req, res) => {
                 const whereSQL = whereClauses.length > 0 ? "WHERE " + whereClauses.join(" AND ") : "";
                 const querySQL = `
                     SELECT 
-                        RTRIM(d.nro_doc) AS nro_doc, 
-                        RTRIM(d.co_tipo_doc) AS co_tipo_doc, 
-                        RTRIM(d.co_cli) AS co_cli, 
-                        RTRIM(c.cli_des) AS cli_des,
+                        d.nro_doc, 
+                        d.co_tipo_doc, 
+                        d.co_cli, 
+                        d.cli_des,
                         d.fec_emis, 
                         d.fec_venc, 
                         d.total_neto, 
                         d.saldo, 
                         d.anulado, 
-                        RTRIM(d.co_ven) AS co_ven, 
-                        RTRIM(d.co_mone) AS co_mone, 
-                        d.tasa AS doc_tasa,
-                        RTRIM(d.nro_orig) AS nro_orig,
-                        RTRIM(d.doc_orig) AS doc_orig,
-                        (
-                            SELECT TOP 1 RTRIM(r.tipo_doc)
-                            FROM saDevolucionClienteReng r
-                            WHERE r.doc_num = d.nro_orig
-                        ) AS devol_tipo_doc,
-                        (
-                            SELECT TOP 1 RTRIM(r.num_doc)
-                            FROM saDevolucionClienteReng r
-                            WHERE r.doc_num = d.nro_orig
-                        ) AS devol_num_doc,
-                        (
-                            SELECT TOP 1 t.tasa_v
-                            FROM saTasa t
-                            WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                              AND t.fecha <= d.fec_emis
-                            ORDER BY t.fecha DESC
-                        ) AS tasa_bcv_fecha
-                    FROM saDocumentoVenta d
-                    LEFT JOIN saCliente c ON d.co_cli = c.co_cli
+                        d.co_ven, 
+                        d.co_mone, 
+                        d.doc_tasa,
+                        d.nro_orig,
+                        d.doc_orig,
+                        d.doc_tipo_pagado,
+                        d.devol_tipo_doc,
+                        d.devol_num_doc,
+                        d.tasa_bcv_fecha,
+                        d.source_table
+                    FROM (
+                        SELECT 
+                            RTRIM(d.nro_doc) AS nro_doc, 
+                            RTRIM(d.co_tipo_doc) AS co_tipo_doc, 
+                            RTRIM(d.co_cli) AS co_cli, 
+                            RTRIM(c.cli_des) AS cli_des,
+                            d.fec_emis, 
+                            d.fec_venc, 
+                            d.total_neto, 
+                            d.saldo, 
+                            d.anulado, 
+                            RTRIM(d.co_ven) AS co_ven, 
+                            RTRIM(d.co_mone) AS co_mone, 
+                            d.tasa AS doc_tasa,
+                            RTRIM(d.nro_orig) AS nro_orig,
+                            RTRIM(d.doc_orig) AS doc_orig,
+                            RTRIM(d.co_tipo_doc) AS doc_tipo_pagado,
+                            (
+                                SELECT TOP 1 RTRIM(r.tipo_doc)
+                                FROM saDevolucionClienteReng r
+                                WHERE r.doc_num = d.nro_orig
+                            ) AS devol_tipo_doc,
+                            (
+                                SELECT TOP 1 RTRIM(r.num_doc)
+                                FROM saDevolucionClienteReng r
+                                WHERE r.doc_num = d.nro_orig
+                            ) AS devol_num_doc,
+                            (
+                                SELECT TOP 1 t.tasa_v
+                                FROM saTasa t
+                                WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
+                                  AND t.fecha <= COALESCE(
+                                      (SELECT TOP 1 orig.fec_emis 
+                                       FROM saDocumentoVenta orig 
+                                       WHERE orig.nro_doc = d.nro_orig 
+                                         AND orig.co_tipo_doc = d.doc_orig 
+                                         AND orig.co_cli = d.co_cli),
+                                      d.fec_emis
+                                  )
+                                ORDER BY t.fecha DESC
+                            ) AS tasa_bcv_fecha,
+                            'DOC' AS source_table
+                        FROM saDocumentoVenta d
+                        LEFT JOIN saCliente c ON d.co_cli = c.co_cli
+
+                        UNION ALL
+
+                        SELECT 
+                            RTRIM(cob.cob_num) AS nro_doc, 
+                            'COBR' AS co_tipo_doc, 
+                            RTRIM(cob.co_cli) AS co_cli, 
+                            RTRIM(c.cli_des) AS cli_des,
+                            cob.fecha AS fec_emis, 
+                            cob.fecha AS fec_venc, 
+                            reng.mont_cob AS total_neto, 
+                            reng.mont_cob AS saldo, 
+                            cob.anulado, 
+                            RTRIM(cob.co_ven) AS co_ven, 
+                            RTRIM(cob.co_mone) AS co_mone, 
+                            cob.tasa AS doc_tasa,
+                            RTRIM(reng.nro_doc) AS nro_orig,
+                            RTRIM(reng.co_tipo_doc) AS doc_orig,
+                            RTRIM(reng.co_tipo_doc) AS doc_tipo_pagado,
+                            NULL AS devol_tipo_doc,
+                            NULL AS devol_num_doc,
+                            (
+                                SELECT TOP 1 t.tasa_v
+                                FROM saTasa t
+                                WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
+                                  AND t.fecha <= COALESCE(
+                                      (SELECT TOP 1 orig.fec_emis 
+                                       FROM saDocumentoVenta orig 
+                                       WHERE orig.nro_doc = reng.nro_doc 
+                                         AND orig.co_tipo_doc = reng.co_tipo_doc 
+                                         AND orig.co_cli = cob.co_cli),
+                                      cob.fecha
+                                  )
+                                ORDER BY t.fecha DESC
+                            ) AS tasa_bcv_fecha,
+                            'COB' AS source_table
+                        FROM saCobroDocReng reng
+                        JOIN saCobro cob ON reng.cob_num = cob.cob_num
+                        LEFT JOIN saCliente c ON cob.co_cli = c.co_cli
+                    ) AS d
                     ${whereSQL}
                     ORDER BY d.fec_emis DESC
                 `;
 
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
-                    let rowTasa = parseFloat(row.doc_tasa) || 1.0;
-                    if (rowTasa === 1.0) {
-                        rowTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
-                    }
+                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
                     const docType = (row.co_tipo_doc || "").trim().toUpperCase();
-                    const isNegative = negativeTypes.includes(docType);
+                    const docTipoPagado = (row.doc_tipo_pagado || "").trim().toUpperCase();
+
+                    let isNegative = false;
+                    if (row.source_table === 'DOC') {
+                        isNegative = ['FACT', 'AJPA', 'AJPM', 'IVAP', 'N/DB', 'NDEB', 'GIRO'].includes(docTipoPagado);
+                    } else if (row.source_table === 'COB') {
+                        isNegative = ['ADEL', 'AJNA', 'AJNM', 'ISLR', 'IVAN', 'N/CR', 'NCR'].includes(docTipoPagado);
+                    }
 
                     const saldoBs = isNegative ? -saldo : saldo;
                     const saldoUsd = isNegative ? -saldo / rowTasa : saldo / rowTasa;
@@ -663,7 +743,8 @@ router.get('/cuenta-detallada', async (req, res) => {
                     const today = new Date();
                     const fecVenc = new Date(row.fec_venc);
                     const diffDays = Math.ceil((today.getTime() - fecVenc.getTime()) / (1000 * 60 * 60 * 24));
-                    const isVencido = !isNegative && saldo > 0 && diffDays > 0;
+                    // Solo los documentos de débito (negativos) se vencen
+                    const isVencido = row.source_table === 'DOC' && !isNegative && saldo > 0 && diffDays > 0;
 
                     const docOrig = (row.doc_orig || "").trim().toUpperCase();
                     const nroOrig = (row.nro_orig || "").trim();
@@ -709,8 +790,8 @@ router.get('/cuenta-detallada', async (req, res) => {
         let totalOutstandingUsd = 0;
         let totalOutstandingBs = 0;
         combined.forEach(doc => {
-            totalOutstandingUsd += doc.total_usd;
-            totalOutstandingBs += doc.total_bs;
+            totalOutstandingUsd = parseFloat((totalOutstandingUsd + doc.total_usd).toFixed(2));
+            totalOutstandingBs = parseFloat((totalOutstandingBs + doc.total_bs).toFixed(2));
         });
 
         combined.sort((a, b) => new Date(b.fec_emis) - new Date(a.fec_emis));
