@@ -931,4 +931,129 @@ router.post('/cxp/descuentos', async (req, res) => {
     }
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// GET /api/v1/reportes/cajero-mes — Reporte de ventas de Cajeros por Mes
+// ────────────────────────────────────────────────────────────────────────────
+router.get('/cajero-mes', async (req, res) => {
+    console.log('============= [REPORTES/CAJERO-MES HIT] =============');
+    console.log('[REPORTES/CAJERO-MES] QUERY:', JSON.stringify(req.query));
+    try {
+        const monthParam = req.query.month || new Date().toISOString().substring(0, 7); // format 'YYYY-MM'
+        const [yearStr, monthStr] = monthParam.split('-');
+        const year = parseInt(yearStr);
+        const month = parseInt(monthStr);
+
+        if (isNaN(year) || isNaN(month) || month < 1 || month > 12) {
+            return res.status(400).json({ success: false, message: 'Filtro de mes inválido. Formato esperado: YYYY-MM.' });
+        }
+
+        const sede = req.query.sede || "";
+        const servers = getServers();
+        const targets = sede ? servers.filter(s => s.id === sede) : servers;
+
+        if (targets.length === 0) {
+            return res.status(200).json({ success: true, filter: { month: monthParam, year, month }, data: [] });
+        }
+
+        // 1. Fetch sales aggregated by cashier (co_us_in) from target branch company databases
+        const branchResults = await Promise.all(targets.map(async (srv) => {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const r = pool.request();
+                r.input('year', sql.Int, year);
+                r.input('month', sql.Int, month);
+                
+                const query = `
+                    SELECT 
+                        RTRIM(f.co_us_in) AS co_us_in,
+                        COUNT(f.doc_num) AS total_facturas,
+                        SUM(f.total_neto) AS total_neto_bs,
+                        SUM(f.total_neto / NULLIF(f.tasa, 0)) AS total_neto_usd
+                    FROM saFacturaVenta f
+                    WHERE f.anulado = 0
+                      AND YEAR(f.fec_emis) = @year
+                      AND MONTH(f.fec_emis) = @month
+                    GROUP BY f.co_us_in
+                `;
+                
+                const result = await r.query(query);
+                return result.recordset.map(row => ({
+                    ...row,
+                    sede_id: srv.id,
+                    sede_nombre: srv.name
+                }));
+            } catch (err) {
+                console.error(`[REPORTES/CAJERO-MES] Error on branch ${srv.name}:`, err.message);
+                return [];
+            }
+        }));
+
+        // Flatten the results
+        const rawRows = branchResults.flat();
+
+        // 2. Fetch cashier names from MasterProfitPro database
+        const nameMap = {};
+        try {
+            const masterPool = await getMasterPool();
+            const masterRes = await masterPool.request().query(`
+                SELECT RTRIM(Cod_Usuario) AS cod_usuario, RTRIM(Desc_Usuario) AS nombre
+                FROM MpUsuario
+            `);
+            masterRes.recordset.forEach(u => {
+                nameMap[u.cod_usuario.toUpperCase()] = u.nombre;
+            });
+        } catch (masterErr) {
+            console.warn('[REPORTES/CAJERO-MES] Error fetching user names from Master DB:', masterErr.message);
+        }
+
+        // 3. Consolidate results: aggregate by cashier across all target branches
+        const cashierMap = {};
+        for (const row of rawRows) {
+            const code = (row.co_us_in || 'DESCONOCIDO').trim().toUpperCase();
+            if (!cashierMap[code]) {
+                cashierMap[code] = {
+                    co_us_in: code,
+                    nombre: nameMap[code] || `Usuario ${code}`,
+                    total_facturas: 0,
+                    total_neto_bs: 0,
+                    total_neto_usd: 0,
+                    detalles_sede: []
+                };
+            }
+            const c = cashierMap[code];
+            const facturas = Number(row.total_facturas) || 0;
+            const netoBs = Number(row.total_neto_bs) || 0;
+            const netoUsd = Number(row.total_neto_usd) || 0;
+
+            c.total_facturas += facturas;
+            c.total_neto_bs += netoBs;
+            c.total_neto_usd += netoUsd;
+            c.detalles_sede.push({
+                sede_id: row.sede_id,
+                sede_nombre: row.sede_nombre,
+                total_facturas: facturas,
+                total_neto_bs: parseFloat(netoBs.toFixed(2)),
+                total_neto_usd: parseFloat(netoUsd.toFixed(2))
+            });
+        }
+
+        // Clean decimal values and convert to sorted array
+        const sortedCashiers = Object.values(cashierMap).map((c) => ({
+            ...c,
+            total_neto_bs: parseFloat(c.total_neto_bs.toFixed(2)),
+            total_neto_usd: parseFloat(c.total_neto_usd.toFixed(2))
+        })).sort((a, b) => b.total_facturas - a.total_facturas); // Sort by highest invoice count (documents processed)
+
+        res.status(200).json({
+            success: true,
+            filter: { month: monthParam, year, month },
+            data: sortedCashiers
+        });
+
+    } catch (error) {
+        console.error('[REPORTES/CAJERO-MES] Error Crítico:', error.message);
+        res.status(500).json({ success: false, message: 'Error interno en el reporte de cajero del mes.', error: error.message });
+    }
+});
+
 module.exports = router;
