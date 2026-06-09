@@ -909,6 +909,12 @@ router.put('/:co_art', async (req, res) => {
             // Obtener almacén por defecto de la configuración de la sede
             const defaultAlmacen = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
             console.log(`[UPSERT] Ejecutando en base de datos conectada...`);
+
+            // Descubrir código de moneda para dólares (USD, US$, etc.)
+            const resUSD = await pool.request().query(
+                `SELECT TOP 1 RTRIM(co_mone) AS co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'`
+            );
+            const usdCode = resUSD.recordset[0]?.co_mone || 'USD';
             const check = await pool.request().input('co_art', sql.VarChar, coArtOri).query(
                 `SELECT validador, RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl,
                         RTRIM(co_cat) AS co_cat, RTRIM(co_color) AS co_color,
@@ -1129,6 +1135,7 @@ router.put('/:co_art', async (req, res) => {
                             .input('monto', sql.Decimal(18, 5), numPrecio)
                             .input('sucu', sql.Char(6), defaultAlmacen)
                             .input('user', sql.Char(6), auditUser)
+                            .input('mone', sql.Char(6), usdCode)
                             .query(`
                                 INSERT INTO saArtPrecio (
                                     co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, 
@@ -1136,7 +1143,7 @@ router.put('/:co_art', async (req, res) => {
                                     montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
                                 )
                                 VALUES (
-                                    @co_art, @co_precio, 'USD', GETDATE(), NULL, 0, @monto, 1, 
+                                    @co_art, @co_precio, @mone, GETDATE(), NULL, 0, @monto, 1, 
                                     @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
                                     0.0, 0.0, 0.0, 0.0, 0.0
                                 );
@@ -1153,12 +1160,13 @@ router.put('/:co_art', async (req, res) => {
                             .input('monto', sql.Decimal(18, 5), numPrecio)
                             .input('sucu', sql.Char(6), defaultAlmacen)
                             .input('user', sql.Char(6), auditUser)
+                            .input('mone', sql.Char(6), usdCode)
                             .query(`
                                 UPDATE saArtPrecio SET
                                     monto = @monto,
                                     precioOm = 1,
                                     hasta = NULL,
-                                    co_mone = 'USD',
+                                    co_mone = @mone,
                                     co_sucu_mo = @sucu,
                                     co_us_mo = @user,
                                     fe_us_mo = GETDATE(),
