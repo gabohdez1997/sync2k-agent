@@ -790,8 +790,10 @@ router.get('/cuenta-detallada', async (req, res) => {
         let totalOutstandingUsd = 0;
         let totalOutstandingBs = 0;
         combined.forEach(doc => {
-            totalOutstandingUsd = parseFloat((totalOutstandingUsd + doc.total_usd).toFixed(2));
-            totalOutstandingBs = parseFloat((totalOutstandingBs + doc.total_bs).toFixed(2));
+            if (!doc.anulado) {
+                totalOutstandingUsd = parseFloat((totalOutstandingUsd + doc.total_usd).toFixed(2));
+                totalOutstandingBs = parseFloat((totalOutstandingBs + doc.total_bs).toFixed(2));
+            }
         });
 
         combined.sort((a, b) => new Date(b.fec_emis) - new Date(a.fec_emis));
