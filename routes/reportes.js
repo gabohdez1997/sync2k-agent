@@ -1058,4 +1058,94 @@ router.get('/cajero-mes', async (req, res) => {
     }
 });
 
+// --- REPORT ARTICULOS CON PRECIOS ---
+router.get('/articulos-precios', async (req, res) => {
+    try {
+        const { sede, search, co_lin, co_cat } = req.query;
+        const servers = getServers();
+        const targets = sede ? servers.filter(s => s.id === sede) : servers;
+
+        if (targets.length === 0) {
+            return res.status(200).json({ success: true, data: [] });
+        }
+
+        const srv = targets[0];
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const r = pool.request();
+
+        let whereClauses = ["a.anulado = 0"];
+        if (search) {
+            r.input('search', sql.VarChar, `%${search}%`);
+            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search)");
+        }
+        if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
+            r.input('co_lin', sql.VarChar, co_lin);
+            whereClauses.push("a.co_lin = @co_lin");
+        }
+        if (co_cat && co_cat !== 'all' && co_cat !== 'null') {
+            r.input('co_cat', sql.VarChar, co_cat);
+            whereClauses.push("a.co_cat = @co_cat");
+        }
+
+        const whereSQL = whereClauses.join(" AND ");
+
+        const querySQL = `
+            SELECT 
+                RTRIM(a.co_art) AS co_art, 
+                RTRIM(a.art_des) AS art_des,
+                p1.monto AS precio1, 
+                m1.monto_min AS margen1, 
+                p2.monto AS precio2, 
+                m2.monto_min AS margen2, 
+                COALESCE(fact.cost_unit_om, 
+                    ROUND(CASE WHEN p2.monto > 0 AND m2.monto_max > 0 THEN (p2.monto / (1 + (m2.monto_max / 100))) ELSE 0 END, 2)
+                ) AS costo
+            FROM saArticulo a
+            LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+            LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+            OUTER APPLY (
+                SELECT TOP 1 monto FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '01' OR LTRIM(RTRIM(co_precio)) = '1')
+                AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p1
+            OUTER APPLY (
+                SELECT TOP 1 monto_min FROM saArtMargen 
+                WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '01' OR LTRIM(RTRIM(co_precio)) = '1')
+            ) m1
+            OUTER APPLY (
+                SELECT TOP 1 monto FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '02' OR LTRIM(RTRIM(co_precio)) = '2')
+                AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p2
+            OUTER APPLY (
+                SELECT TOP 1 monto_min, monto_max FROM saArtMargen 
+                WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '02' OR LTRIM(RTRIM(co_precio)) = '2')
+            ) m2
+            OUTER APPLY (
+                SELECT TOP 1 
+                    CASE 
+                        WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= n.fec_emis ORDER BY fecha DESC), 0)) 
+                        ELSE r.cost_unit_om 
+                    END AS cost_unit_om
+                FROM saFacturaCompraReng r INNER JOIN saFacturaCompra n ON r.doc_num = n.doc_num
+                WHERE r.co_art = a.co_art AND n.anulado = 0
+                ORDER BY n.fec_emis DESC
+            ) fact
+            WHERE ${whereSQL}
+            ORDER BY a.co_art ASC
+        `;
+
+        const resData = await r.query(querySQL);
+        return res.status(200).json({
+            success: true,
+            data: resData.recordset
+        });
+    } catch (error) {
+        console.error('[REPORTES/ARTICULOS-PRECIOS ERROR]:', error.message);
+        res.status(500).json({ success: false, message: 'Error al consultar Artículos con Precios.', error: error.message });
+    }
+});
+
 module.exports = router;
