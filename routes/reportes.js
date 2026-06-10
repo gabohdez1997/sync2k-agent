@@ -1103,7 +1103,16 @@ router.get('/articulos-precios', async (req, res) => {
                         ROUND(CASE WHEN p2.monto > 0 AND m2.monto_max > 0 THEN (p2.monto / (1 + (m2.monto_max / 100))) ELSE 0 END, 2)
                     ), 
                     0
-                ) AS costo
+                ) AS costo,
+                ISNULL(
+                    (
+                        SELECT SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) -
+                               SUM(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END)
+                        FROM saStockAlmacen s
+                        WHERE s.co_art = a.co_art
+                    ),
+                    0
+                ) AS stock_global
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
             LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
