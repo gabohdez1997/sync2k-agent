@@ -34,11 +34,11 @@ router.get('/', async (req, res) => {
                 }
                 if (co_cli) {
                     request.input('co_cli_search', sql.VarChar, `%${co_cli}%`);
-                    whereClauses.push("(c.co_cli LIKE @co_cli_search OR cl.cli_des LIKE @co_cli_search OR c.doc_num LIKE @co_cli_search)");
+                    whereClauses.push("(c.co_cli LIKE @co_cli_search OR cl.cli_des LIKE @co_cli_search OR c.doc_num LIKE @co_cli_search OR cl.rif LIKE @co_cli_search)");
                 }
                 if (search) {
                     request.input('search_all', sql.VarChar, `%${search}%`);
-                    whereClauses.push("(c.doc_num LIKE @search_all OR c.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all)");
+                    whereClauses.push("(c.doc_num LIKE @search_all OR c.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all OR cl.rif LIKE @search_all)");
                 }
                 if (co_ven) {
                     request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
