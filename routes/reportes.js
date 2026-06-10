@@ -1073,7 +1073,7 @@ router.get('/articulos-precios', async (req, res) => {
         const pool = await getPool(srv.id, req.sqlAuth);
         const r = pool.request();
 
-        let whereClauses = ["a.anulado = 0"];
+        let whereClauses = [];
         if (search) {
             r.input('search', sql.VarChar, `%${search}%`);
             whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search)");
@@ -1087,18 +1087,22 @@ router.get('/articulos-precios', async (req, res) => {
             whereClauses.push("a.co_cat = @co_cat");
         }
 
-        const whereSQL = whereClauses.join(" AND ");
+        const whereSQL = whereClauses.length > 0 ? whereClauses.join(" AND ") : "1=1";
 
         const querySQL = `
             SELECT 
                 RTRIM(a.co_art) AS co_art, 
                 RTRIM(a.art_des) AS art_des,
-                p1.monto AS precio1, 
-                m1.monto_min AS margen1, 
-                p2.monto AS precio2, 
-                m2.monto_min AS margen2, 
-                COALESCE(fact.cost_unit_om, 
-                    ROUND(CASE WHEN p2.monto > 0 AND m2.monto_max > 0 THEN (p2.monto / (1 + (m2.monto_max / 100))) ELSE 0 END, 2)
+                a.anulado,
+                ISNULL(p1.monto, 0) AS precio1, 
+                ISNULL(m1.monto_min, 0) AS margen1, 
+                ISNULL(p2.monto, 0) AS precio2, 
+                ISNULL(m2.monto_min, 0) AS margen2, 
+                ISNULL(
+                    COALESCE(fact.cost_unit_om, 
+                        ROUND(CASE WHEN p2.monto > 0 AND m2.monto_max > 0 THEN (p2.monto / (1 + (m2.monto_max / 100))) ELSE 0 END, 2)
+                    ), 
+                    0
                 ) AS costo
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
