@@ -112,6 +112,7 @@ app.use('/api/v1/ubicaciones', require('./routes/ubicaciones'));
 app.use('/api/v1/compras',     require('./routes/compras'));
 app.use('/api/v1/reportes',    require('./routes/reportes'));
 app.use('/api/v1/impresion',   require('./routes/impresion'));
+app.use('/api/v1/facturas',    require('./routes/facturas'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

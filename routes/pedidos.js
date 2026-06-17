@@ -17,7 +17,7 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h, search } = req.query;
+        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h, search, status, anulado } = req.query;
         
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
@@ -52,22 +52,46 @@ router.get('/', async (req, res) => {
                     request.input('fec_h', sql.SmallDateTime, fec_h);
                     whereClauses.push("c.fec_emis <= @fec_h");
                 }
+                if (status) {
+                    const statusVals = status.split(',').map(s => s.trim());
+                    const statusClauses = [];
+                    statusVals.forEach((val, idx) => {
+                        const paramName = `status_val_${idx}`;
+                        request.input(paramName, sql.Char(1), val);
+                        statusClauses.push(`c.status = @${paramName}`);
+                    });
+                    if (statusClauses.length > 0) {
+                        whereClauses.push(`(${statusClauses.join(" OR ")})`);
+                    }
+                }
+                if (anulado !== undefined && anulado !== '') {
+                    request.input('anulado_val', sql.Bit, anulado === 'true' || anulado === '1' ? 1 : 0);
+                    whereClauses.push("c.anulado = @anulado_val");
+                }
 
                 const whereSQL = whereClauses.join(" AND ");
                 
-                const result = await request.query(`
-                    SELECT RTRIM(c.doc_num) AS doc_num, RTRIM(c.descrip) AS descrip,
-                           RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
-                           c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
-                           RTRIM(c.co_mone) AS co_mone, c.tasa, c.total_neto,
-                           RTRIM(c.co_ven) AS co_ven
-                    FROM saPedidoVenta c
-                    LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
-                    WHERE ${whereSQL}
-                    ORDER BY c.fec_emis DESC, c.doc_num DESC
-                `);
+                const [result, currentRate] = await Promise.all([
+                    request.query(`
+                        SELECT RTRIM(c.doc_num) AS doc_num, RTRIM(c.descrip) AS descrip,
+                               RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
+                               c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
+                               RTRIM(c.co_mone) AS co_mone, c.tasa, c.total_neto,
+                               RTRIM(c.co_ven) AS co_ven
+                        FROM saPedidoVenta c
+                        LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
+                        WHERE ${whereSQL}
+                        ORDER BY c.fec_emis DESC, c.doc_num DESC
+                    `),
+                    getExchangeRate(pool)
+                ]);
 
-                return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
+                return result.recordset.map(c => ({ 
+                    ...c, 
+                    tasa_actual: currentRate,
+                    sede_id: srv.id, 
+                    sede_nombre: srv.name 
+                }));
             } catch (e) { 
                 console.error(`[PEDIDOS] Error en sede ${srv.id}:`, e.message);
                 return []; 

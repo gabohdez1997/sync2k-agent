@@ -1165,6 +1165,7 @@ router.put('/:co_art', async (req, res) => {
                                 UPDATE saArtPrecio SET
                                     monto = @monto,
                                     precioOm = 1,
+                                    desde = GETDATE(),
                                     hasta = NULL,
                                     co_mone = @mone,
                                     co_sucu_mo = @sucu,
