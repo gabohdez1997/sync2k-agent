@@ -1121,12 +1121,17 @@ router.put('/:co_art', async (req, res) => {
                     const numPrecio = precio !== undefined && precio !== null && precio !== '' ? Number(precio) : 0;
                     const precioId = String(i); // '1', '2', '3', '4', '5' (según saTipoPrecio)
 
-                    const pCheck = await pool.request()
+                    const activePriceRes = await pool.request()
                         .input('co_art', sql.Char(30), data.co_art || coArtOri)
                         .input('co_precio', sql.Char(6), precioId)
-                        .query('SELECT 1 FROM saArtPrecio WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio');
+                        .query(`
+                            SELECT TOP 1 desde, co_alma_calculado 
+                            FROM saArtPrecio 
+                            WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio
+                            ORDER BY desde DESC
+                        `);
 
-                    if (pCheck.recordset.length === 0) {
+                    if (activePriceRes.recordset.length === 0) {
                         // Insertar precio
                         await pool.request()
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
@@ -1153,6 +1158,9 @@ router.put('/:co_art', async (req, res) => {
                             `);
                     } else {
                         // Actualizar precio existente
+                        const originalDesde = activePriceRes.recordset[0].desde;
+                        const originalAlma = activePriceRes.recordset[0].co_alma_calculado;
+
                         await pool.request()
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
@@ -1161,6 +1169,8 @@ router.put('/:co_art', async (req, res) => {
                             .input('sucu', sql.Char(6), defaultAlmacen)
                             .input('user', sql.Char(6), auditUser)
                             .input('mone', sql.Char(6), usdCode)
+                            .input('originalDesde', sql.SmallDateTime, originalDesde)
+                            .input('originalAlma', sql.Char(6), originalAlma)
                             .query(`
                                 UPDATE saArtPrecio SET
                                     monto = @monto,
@@ -1176,7 +1186,10 @@ router.put('/:co_art', async (req, res) => {
                                     montoadi3 = 0.0,
                                     montoadi4 = 0.0,
                                     montoadi5 = 0.0
-                                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio;
+                                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) 
+                                  AND LTRIM(RTRIM(co_precio)) = @co_precio
+                                  AND desde = @originalDesde
+                                  AND co_alma_calculado = @originalAlma;
 
                                 IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
                                 BEGIN
