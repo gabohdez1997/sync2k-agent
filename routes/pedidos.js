@@ -150,7 +150,7 @@ router.get('/:doc_num', async (req, res) => {
                                r.co_precio AS co_precio, r.prec_vta AS precio,
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
                                 r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad,
-                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc
+                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc, r.rowguid
                         FROM saPedidoVentaReng r
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni

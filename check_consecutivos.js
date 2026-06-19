@@ -11,12 +11,14 @@ async function check() {
             return;
         }
         
-        console.log("Checking server:", servers[0].name);
-        const pool = await getPool(servers[0].id);
-        
-        const res = await pool.request().query("SELECT RTRIM(co_consecutivo) as co_consecutivo, RTRIM(co_serie) as co_serie FROM saConsecutivo WHERE co_consecutivo LIKE '%CLI%' OR co_consecutivo LIKE '%COT%'");
-        console.log("Consecutivos encontrados en saConsecutivo:");
-        console.table(res.recordset);
+        const pg = require('pg');
+        const pgUrl = process.env.LOCAL_PG_URL || 'postgresql://postgres:Galpe2021*@localhost:5432/sync2k';
+        const client = new pg.Client({ connectionString: pgUrl });
+        await client.connect();
+        const res = await client.query("SELECT profit_branch_codes FROM branches");
+        console.log("profit_branch_codes in PG:", JSON.stringify(res.rows[0].profit_branch_codes, null, 2));
+        await client.end();
+        process.exit(0);
 
         if (res.recordset.length > 0) {
             const series = res.recordset.filter(r => r.co_serie).map(r => `'${r.co_serie.trim()}'`).join(",");

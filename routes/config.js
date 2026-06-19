@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { setServers, setMasterConfig, getServers, addOrUpdateServer, removeServer } = require('../db');
+const { setServers, setMasterConfig, getServers, addOrUpdateServer, removeServer, getPool } = require('../db');
 
 /**
  * @swagger
@@ -147,6 +147,43 @@ router.delete('/database/:id', async (req, res) => {
 router.get('/database', (req, res) => {
     const servers = getServers().map(s => ({ id: s.id, name: s.name, server: s.server }));
     res.status(200).json({ success: true, servers });
+});
+
+/**
+ * @swagger
+ * /api/v1/config/test-connection/{serverId}:
+ *   get:
+ *     summary: Prueba la conexión SQL a una sede específica
+ *     tags: [Config]
+ *     parameters:
+ *       - in: path
+ *         name: serverId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Conexión exitosa
+ *       500:
+ *         description: Error al conectar
+ */
+router.get('/test-connection/:serverId', async (req, res) => {
+    try {
+        const { serverId } = req.params;
+        const pool = await getPool(serverId, req.sqlAuth);
+        const result = await pool.request().query('SELECT GETDATE() as now');
+        res.status(200).json({
+            success: true,
+            message: 'Conexión a la base de datos SQL Server establecida con éxito.',
+            timestamp: result.recordset[0].now
+        });
+    } catch (error) {
+        console.error(`[GET /config/test-connection/${req.params.serverId}]`, error);
+        res.status(500).json({
+            success: false,
+            message: 'Error al conectar con la base de datos de la sucursal.',
+            error: error.message
+        });
+    }
 });
 
 module.exports = router;
