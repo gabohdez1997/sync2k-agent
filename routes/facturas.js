@@ -61,7 +61,7 @@ router.get('/', async (req, res) => {
                     SELECT RTRIM(f.doc_num) AS doc_num, RTRIM(f.descrip) AS descrip,
                            RTRIM(f.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                            f.fec_emis, f.fec_venc, f.fec_reg, f.fe_us_in AS fec_us_in, f.fe_us_mo AS fec_us_mo, f.anulado,
-                           RTRIM(f.co_mone) AS co_mone, f.tasa, f.total_neto,
+                           RTRIM(f.co_mone) AS co_mone, f.tasa, f.total_neto, f.monto_imp,
                            RTRIM(f.co_ven) AS co_ven, RTRIM(f.co_us_in) AS co_us_in
                     FROM saFacturaVenta f
                     LEFT JOIN saCliente cl ON f.co_cli = cl.co_cli
@@ -231,6 +231,31 @@ router.post('/:doc_num/anular', async (req, res) => {
                     rStock.input('bSumarStock',           sql.Bit,      1); // Sumar stock (devolver)
                     rStock.input('bPermiteStockNegativo', sql.Bit,      1);
                     await rStock.execute('pStockActualizar');
+
+                    // 3.b. Restar de Stock por Despachar (DES)
+                    const rStockDes = new sql.Request(transaction);
+                    rStockDes.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                    rStockDes.input('sCo_Art',               sql.Char(30), line.co_art);
+                    rStockDes.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                    rStockDes.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+                    rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                    rStockDes.input('bSumarStock',           sql.Bit,      0); // Restar stock
+                    rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                    await rStockDes.execute('pStockActualizar');
+
+                    // 3.c. Si venía de Pedido, volver a Comprometer (COM)
+                    if ((line.tipo_doc === 'PCLI' || line.tipo_doc === 'PEDI' || line.tipo_doc === 'PED') && line.rowguid_doc && line.num_doc) {
+                        console.log(`📈 [AGENT] Volviendo a comprometer stock (COM) de ${line.total_art} para el pedido ${line.num_doc}`);
+                        const rStockCom = new sql.Request(transaction);
+                        rStockCom.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                        rStockCom.input('sCo_Art',               sql.Char(30), line.co_art);
+                        rStockCom.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                        rStockCom.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+                        rStockCom.input('sTipoStock',            sql.Char(4),  'COM');
+                        rStockCom.input('bSumarStock',           sql.Bit,      1); // Sumar stock
+                        rStockCom.input('bPermiteStockNegativo', sql.Bit,      1);
+                        await rStockCom.execute('pStockActualizar');
+                    }
 
                     // 4. Si la línea se originó de un Pedido de venta ('PCLI', 'PEDI' o 'PED'), revertimos su pendiente
                     if ((line.tipo_doc === 'PCLI' || line.tipo_doc === 'PEDI' || line.tipo_doc === 'PED') && line.rowguid_doc && line.num_doc) {
@@ -421,14 +446,14 @@ router.post('/', async (req, res) => {
             rH.input('deOtros2',          sql.Decimal(18, 2),   0);
             rH.input('deOtros3',          sql.Decimal(18, 2),   0);
             rH.input('deTotal_Neto',      sql.Decimal(18, 2),   totalNetoBs);
-            rH.input('sDis_Cen',          sql.VarChar(sql.MAX), '');
+            rH.input('sDis_Cen',          sql.VarChar(sql.MAX), null);
             rH.input('sComentario',       sql.VarChar(sql.MAX), (data.comentario || 'Creado vía API').substring(0, 500));
             rH.input('sDir_Ent',          sql.VarChar(sql.MAX), null);
             rH.input('bContrib',          sql.Bit,              data.contrib ?? 1);
             rH.input('bImpresa',          sql.Bit,              0);
             rH.input('sSalestax',         sql.Char(8),          defTax);
-            rH.input('sImpfis',           sql.VarChar(20),      '');
-            rH.input('sImpfisfac',        sql.VarChar(20),      '');
+            rH.input('sImpfis',           sql.VarChar(20),      null);
+            rH.input('sImpfisfac',        sql.VarChar(20),      null);
             rH.input('sImp_nro_z',        sql.Char(15),         null);
             rH.input('bVen_Ter',          sql.Bit,              0);
             rH.input('sCo_Us_In',         sql.Char(6),          padProfit(auditUser, 6));
@@ -550,7 +575,7 @@ router.post('/', async (req, res) => {
                     `);
                 }
 
-                // 9. Actualizar Stock (Restar de Almacén tipo 'ACT')
+                // 9. Actualizar Stock Físico (Restar de Almacén tipo 'ACT')
                 const rStock = new sql.Request(transaction);
                 rStock.input('sCo_Alma',              sql.Char(6),  padProfit(item.co_alma || defAlma, 6));
                 rStock.input('sCo_Art',               sql.Char(30), padProfit(item.co_art, 30));
@@ -560,6 +585,31 @@ router.post('/', async (req, res) => {
                 rStock.input('bSumarStock',           sql.Bit,      0); // Restar stock
                 rStock.input('bPermiteStockNegativo', sql.Bit,      1);
                 await rStock.execute('pStockActualizar');
+
+                // 9.b. Sumar a Stock por Despachar (DES)
+                const rStockDes = new sql.Request(transaction);
+                rStockDes.input('sCo_Alma',              sql.Char(6),  padProfit(item.co_alma || defAlma, 6));
+                rStockDes.input('sCo_Art',               sql.Char(30), padProfit(item.co_art, 30));
+                rStockDes.input('sCo_Uni',               sql.Char(6),  padProfit(finalUni, 6));
+                rStockDes.input('deCantidad',            sql.Decimal(18, 5), qty);
+                rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                rStockDes.input('bSumarStock',           sql.Bit,      1); // Sumar stock
+                rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                await rStockDes.execute('pStockActualizar');
+
+                // 9.c. Restar de Stock Comprometido (COM) si viene de un Pedido
+                if ((tipoDocVal === 'PCLI' || tipoDocVal === 'PEDI' || tipoDocVal === 'PED') && rowguidDocVal && numDocVal) {
+                    console.log(`📉 [AGENT] Restando ${qty} de stock comprometido (COM) por pedido de venta ${numDocVal}`);
+                    const rStockCom = new sql.Request(transaction);
+                    rStockCom.input('sCo_Alma',              sql.Char(6),  padProfit(item.co_alma || defAlma, 6));
+                    rStockCom.input('sCo_Art',               sql.Char(30), padProfit(item.co_art, 30));
+                    rStockCom.input('sCo_Uni',               sql.Char(6),  padProfit(finalUni, 6));
+                    rStockCom.input('deCantidad',            sql.Decimal(18, 5), qty);
+                    rStockCom.input('sTipoStock',            sql.Char(4),  'COM');
+                    rStockCom.input('bSumarStock',           sql.Bit,      0); // Restar stock
+                    rStockCom.input('bPermiteStockNegativo', sql.Bit,      1);
+                    await rStockCom.execute('pStockActualizar');
+                }
             }
 
             // 10. Insertar Documento de Venta en saDocumentoVenta
