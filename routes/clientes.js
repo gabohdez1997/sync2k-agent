@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
-const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
+const { executeWrite, writeResponse, paginatedResponse, padProfit, aggregateRead } = require('../helpers/multiSede');
 
 // ── Helper: inputs del STORED PROCEDURE pInsertarCliente ───────────────────
 function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999') {
@@ -633,6 +633,49 @@ router.delete('/:co_cli', async (req, res) => {
         return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 7. GET /api/v1/clientes/:co_cli/documentos — Documentos pendientes por cobrar
+// ────────────────────────────────────────────────────────────────────────────
+router.get('/:co_cli/documentos', async (req, res) => {
+    try {
+        const { co_cli } = req.params;
+        const requestedSede = req.query.sede || req.query.sede_id;
+
+        const data = await aggregateRead(req.sqlAuth, async (pool, srv) => {
+            if (requestedSede && requestedSede !== 'Todas' && srv.id !== requestedSede && srv.name !== requestedSede) {
+                return [];
+            }
+
+            const r = await pool.request()
+                .input('co_cli', sql.Char(16), padProfit(co_cli, 16))
+                .query(`
+                    SELECT RTRIM(co_tipo_doc) AS co_tipo_doc, 
+                           RTRIM(nro_doc) AS nro_doc, 
+                           fec_emis, fec_venc, 
+                           total_neto, saldo, monto_imp,
+                           RTRIM(co_mone) AS co_mone,
+                           CASE WHEN tasa <= 1.000001 THEN 
+                                ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
+                           ELSE tasa END AS tasa,
+                           RTRIM(n_control) AS n_control,
+                           rowguid
+                    FROM saDocumentoVenta
+                    WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))
+                      AND saldo > 0 
+                      AND anulado = 0
+                `);
+            return r.recordset.map(d => ({ ...d, co_cli, sede_id: srv.id, sede_nombre: srv.name }));
+        });
+
+        // Ordenar por fecha de emisión
+        data.sort((a, b) => new Date(a.fec_emis).getTime() - new Date(b.fec_emis).getTime());
+
+        res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al consultar documentos pendientes del cliente.', error: error.message });
     }
 });
 

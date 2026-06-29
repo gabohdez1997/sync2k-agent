@@ -743,4 +743,36 @@ router.get('/bcv', async (req, res) => {
     }
 });
 
+// ── Cajas ───────────────────────────────────────────────────────────────────
+router.get('/cajas', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(cod_caja) AS cod_caja, RTRIM(descrip) AS descrip, RTRIM(co_mone) AS co_mone FROM saCaja`,
+        'cod_caja', 'descrip'
+    )
+);
+
+// ── Cuentas Bancarias ───────────────────────────────────────────────────────
+router.get('/cuentas_bancarias', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(cod_cta) AS cod_cta, RTRIM(num_cta) AS descrip, RTRIM(co_mone) AS co_mone, RTRIM(num_cta) AS num_cta FROM saCuentaBancaria`,
+        'cod_cta', 'cod_cta'
+    )
+);
+
+// ── Bancos ──────────────────────────────────────────────────────────────────
+router.get('/bancos', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(co_ban) AS co_ban, RTRIM(des_ban) AS ban_des FROM saBanco`,
+        'co_ban', 'ban_des'
+    )
+);
+
+// ── Tarjetas de Crédito / Débito ────────────────────────────────────────────
+router.get('/tarjetas_credito', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(co_tar) AS co_tar, RTRIM(des_tar) AS tar_des FROM saTarjetaCredito`,
+        'co_tar', 'tar_des'
+    )
+);
+
 module.exports = router;
