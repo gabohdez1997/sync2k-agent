@@ -627,10 +627,10 @@ router.post('/', async (req, res) => {
             rDoc.input('sdFec_Emis', sql.SmallDateTime, tsDate);
             rDoc.input('sdFec_Venc', sql.SmallDateTime, tsDate);
             rDoc.input('bAnulado', sql.Bit, 0);
-            rDoc.input('bAut', sql.Bit, 0);
+            rDoc.input('bAut', sql.Bit, 1);
             rDoc.input('bContrib', sql.Bit, data.contrib ?? 1);
-            rDoc.input('sDoc_Orig', sql.Char(6), null);
-            rDoc.input('sNro_Orig', sql.VarChar(20), null);
+            rDoc.input('sDoc_Orig', sql.Char(6), 'FACT');
+            rDoc.input('sNro_Orig', sql.VarChar(20), padProfit(docNum, 20));
             rDoc.input('sNro_Che', sql.VarChar(20), null);
             rDoc.input('deMonto_Imp', sql.Decimal(18, 2), totalImpBs);
             rDoc.input('deSaldo', sql.Decimal(18, 2), totalNetoBs);
