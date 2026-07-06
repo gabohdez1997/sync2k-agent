@@ -48,7 +48,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('deIva', sql.Decimal(18, 5), 0);
     r.input('sRif', sql.VarChar(18), data.rif || '');
     r.input('bContrib', sql.Bit, data.contribuyente === false ? 0 : 1);
-    r.input('sDis_cen', sql.VarChar(sql.MAX), '');
+    r.input('sDis_cen', sql.VarChar(sql.MAX), data.dis_cen || '<InformacionContable><Carpeta01><CuentaContable>1.1.05.001</CuentaContable></Carpeta01></InformacionContable>');
     r.input('sNit', sql.VarChar(18), '');
     r.input('sEmail', sql.VarChar(60), data.email || '');
     r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || '01', 20));
@@ -128,7 +128,9 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999') {
     r.input('sRif', sql.VarChar(18), data.rif ?? row.rif ?? '');
     // bContrib: convertir el booleano correctamente (true→1, false→0)
     r.input('bContrib', sql.Bit, data.contribuyente === true || data.contribuyente === 'true' ? 1 : 0);
-    r.input('sDis_cen', sql.VarChar(sql.MAX), '');
+    const existingDisCen = row.dis_cen ? String(row.dis_cen).trim() : '';
+    const finalDisCen = existingDisCen ? existingDisCen : '<InformacionContable><Carpeta01><CuentaContable>1.1.05.001</CuentaContable></Carpeta01></InformacionContable>';
+    r.input('sDis_cen', sql.VarChar(sql.MAX), finalDisCen);
     r.input('sNit', sql.VarChar(18), '');
     r.input('sEmail', sql.VarChar(60), data.email || '');
     r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || row.co_cta_ingr_egr || '01', 20));
@@ -507,7 +509,8 @@ router.put('/:co_cli', async (req, res) => {
                         RTRIM(telefonos)        AS telefonos,
                         RTRIM(rif)              AS rif,
                         contrib,
-                        contribu_e
+                        contribu_e,
+                        CAST(dis_cen AS VARCHAR(MAX)) AS dis_cen
                  FROM saCliente WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))`
             );
             if (!check.recordset.length) throw new Error('El cliente no existe en esta sede.');
