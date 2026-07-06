@@ -20,12 +20,12 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
             SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma,
                    RTRIM(a.des_alma) AS des_alma,
                    (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
-                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) AS stock
+                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0))) AS stock
             FROM saStockAlmacen s LEFT JOIN saAlmacen a ON s.co_alma = a.co_alma
             WHERE LTRIM(RTRIM(s.co_art)) IN (${ids}) ${authCondition}
             GROUP BY s.co_art, s.co_alma, a.des_alma
             HAVING (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
-                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) > 0
+                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0))) > 0
         `),
         pool.request().query(`
             WITH UP AS (
@@ -179,7 +179,7 @@ router.get('/', async (req, res) => {
                         ${authStockFilter}
                         GROUP BY st.co_art
                         HAVING (SUM(ISNULL(CASE WHEN RTRIM(tipo)='ACT' THEN stock ELSE 0 END, 0)) - 
-                                SUM(ISNULL(CASE WHEN RTRIM(tipo) IN ('COM','DES') THEN stock ELSE 0 END, 0))) > 0
+                                SUM(ISNULL(CASE WHEN RTRIM(tipo)='COM' THEN stock ELSE 0 END, 0))) > 0
                     )
                 )`;
 
@@ -381,7 +381,7 @@ router.get('/search', async (req, res) => {
 
         let whereClause = 'WHERE a.anulado = 0 ';
         if (!in_stock_all) {
-            whereClause += ` AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art AND st.stock > 0 ${authStockFilter})) `;
+            whereClause += ` AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art ${authStockFilter} GROUP BY st.co_art HAVING SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='ACT' THEN st.stock ELSE 0 END, 0)) - SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='COM' THEN st.stock ELSE 0 END, 0)) > 0)) `;
         }
 
         if (normalFilters.length > 0) {
@@ -660,13 +660,13 @@ router.get('/:co_art', async (req, res) => {
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `SELECT RTRIM(s.co_alma) AS co_alma, RTRIM(alm.des_alma) AS des_alma,
                                 (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
-                                 SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) AS stock
+                                 SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0))) AS stock
                           FROM saStockAlmacen s
                           LEFT JOIN saAlmacen alm ON s.co_alma = alm.co_alma
                           WHERE LTRIM(RTRIM(s.co_art)) = LTRIM(RTRIM(@co_art))
                           GROUP BY s.co_alma, alm.des_alma
                           HAVING (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
-                                  SUM(ISNULL(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END, 0))) > 0`
+                                  SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0))) > 0`
                     ),
                     pool.request().input('co_art', sql.VarChar, co_art).query(
                         `WITH UP AS (

@@ -1110,7 +1110,7 @@ router.get('/articulos-precios', async (req, res) => {
                 ISNULL(
                     (
                         SELECT SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END) -
-                               SUM(CASE WHEN RTRIM(s.tipo) IN ('COM','DES') THEN s.stock ELSE 0 END)
+                               SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END)
                         FROM saStockAlmacen s
                         WHERE s.co_art = a.co_art
                     ),
