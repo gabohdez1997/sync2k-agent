@@ -167,7 +167,8 @@ router.get('/cxc', async (req, res) => {
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
                     const rowMone = (row.co_mone || "").trim().toUpperCase();
-                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
+                    const docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
@@ -442,7 +443,8 @@ router.get('/cxp', async (req, res) => {
                     // Facturas, ajustes de pagar y retenciones/otros débitos son negativos (deben restarse de los haberes / crédito)
                     const isNegative = ['FACT', 'AJPA', 'IVANP', 'N/DB', 'NDEB', 'IVAP', 'GIRO'].includes(docType);
 
-                    const bcvTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
+                    const docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const bcvTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
                     const conversionRate = bcvTasa;
 
                     const saldoUsd = parseFloat((isNegative ? -saldo / conversionRate : saldo / conversionRate).toFixed(2));
@@ -721,7 +723,8 @@ router.get('/cuenta-detallada', async (req, res) => {
 
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
-                    const rowTasa = parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0;
+                    const docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
