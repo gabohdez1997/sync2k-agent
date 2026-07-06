@@ -381,7 +381,10 @@ router.post('/', async (req, res) => {
             totalImpBs   += impBs;
         });
 
-        const totalNetoBs = totalBrutoBs + totalImpBs;
+        const igtfMontoDivisa = Number(data.igtf_monto_divisa || 0);
+        const igtfBs = igtfMontoDivisa > 0 ? Math.round((igtfMontoDivisa * 0.03 * tasaDoc) * 100) / 100 : 0;
+
+        const totalNetoBs = totalBrutoBs + totalImpBs + igtfBs;
 
         // 4. Determinar Sucursal (co_sucu_in, co_sucu_mo) según requerimiento de IVA
         // Si el totalImpBs === 0 (pedido exento o sin IVA), co_sucu_in y co_sucu_mo es la sucursal no-default.
@@ -442,7 +445,7 @@ router.post('/', async (req, res) => {
             rH.input('deMonto_Imp',       sql.Decimal(18, 2),   totalImpBs);
             rH.input('deMonto_Imp2',      sql.Decimal(18, 2),   0);
             rH.input('deMonto_Imp3',      sql.Decimal(18, 2),   0);
-            rH.input('deOtros1',          sql.Decimal(18, 2),   0);
+            rH.input('deOtros1',          sql.Decimal(18, 2),   igtfBs);
             rH.input('deOtros2',          sql.Decimal(18, 2),   0);
             rH.input('deOtros3',          sql.Decimal(18, 2),   0);
             rH.input('deTotal_Neto',      sql.Decimal(18, 2),   totalNetoBs);

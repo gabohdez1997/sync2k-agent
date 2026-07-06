@@ -1161,7 +1161,7 @@ router.put('/:co_art', async (req, res) => {
                         const originalDesde = activePriceRes.recordset[0].desde;
                         const originalAlma = activePriceRes.recordset[0].co_alma_calculado;
 
-                        await pool.request()
+                        const updateRes = await pool.request()
                             .input('co_art', sql.Char(30), data.co_art || coArtOri)
                             .input('co_precio', sql.Char(6), precioId)
                             .input('margen', sql.Decimal(18, 5), numMargen)
@@ -1189,7 +1189,7 @@ router.put('/:co_art', async (req, res) => {
                                 WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) 
                                   AND LTRIM(RTRIM(co_precio)) = @co_precio
                                   AND desde = @originalDesde
-                                  AND co_alma_calculado = @originalAlma;
+                                  AND (co_alma_calculado = @originalAlma OR (co_alma_calculado IS NULL AND @originalAlma IS NULL));
 
                                 IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
                                 BEGIN
@@ -1203,6 +1203,60 @@ router.put('/:co_art', async (req, res) => {
                                     VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
                                 END
                             `);
+
+                        if (updateRes.rowsAffected[0] === 0) {
+                            console.log(`⚠️ [AGENT] UPDATE estricto no afectó filas. Intentando UPDATE general por co_art y co_precio...`);
+                            const fallbackUpdateRes = await pool.request()
+                                .input('co_art', sql.Char(30), data.co_art || coArtOri)
+                                .input('co_precio', sql.Char(6), precioId)
+                                .input('monto', sql.Decimal(18, 5), numPrecio)
+                                .input('sucu', sql.Char(6), defaultAlmacen)
+                                .input('user', sql.Char(6), auditUser)
+                                .input('mone', sql.Char(6), usdCode)
+                                .query(`
+                                    UPDATE saArtPrecio SET
+                                        monto = @monto,
+                                        precioOm = 1,
+                                        desde = GETDATE(),
+                                        hasta = NULL,
+                                        co_mone = @mone,
+                                        co_sucu_mo = @sucu,
+                                        co_us_mo = @user,
+                                        fe_us_mo = GETDATE()
+                                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) 
+                                      AND LTRIM(RTRIM(co_precio)) = @co_precio;
+                                `);
+
+                            if (fallbackUpdateRes.rowsAffected[0] === 0) {
+                                console.log(`🚀 [AGENT] Ningún UPDATE afectó filas. Creando precio (INSERT)...`);
+                                await pool.request()
+                                    .input('co_art', sql.Char(30), data.co_art || coArtOri)
+                                    .input('co_precio', sql.Char(6), precioId)
+                                    .input('margen', sql.Decimal(18, 5), numMargen)
+                                    .input('monto', sql.Decimal(18, 5), numPrecio)
+                                    .input('sucu', sql.Char(6), defaultAlmacen)
+                                    .input('user', sql.Char(6), auditUser)
+                                    .input('mone', sql.Char(6), usdCode)
+                                    .query(`
+                                        INSERT INTO saArtPrecio (
+                                            co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, 
+                                            co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
+                                            montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
+                                        )
+                                        VALUES (
+                                            @co_art, @co_precio, @mone, GETDATE(), NULL, 0, @monto, 1, 
+                                            @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
+                                            0.0, 0.0, 0.0, 0.0, 0.0
+                                        );
+                                        
+                                        IF NOT EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
+                                        BEGIN
+                                            INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                                            VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
+                                        END
+                                    `);
+                            }
+                        }
                     }
                 }
             }

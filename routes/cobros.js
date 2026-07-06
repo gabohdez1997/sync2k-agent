@@ -115,7 +115,6 @@ router.get('/facturas/pendientes', async (req, res) => {
                 }
 
                 const whereSQL = whereClauses.join(" AND ");
-
                 const result = await request.query(`
                     SELECT TOP 100 
                            RTRIM(d.co_tipo_doc) AS co_tipo_doc, 
@@ -124,19 +123,21 @@ router.get('/facturas/pendientes', async (req, res) => {
                            d.total_neto, d.saldo, d.monto_imp,
                            RTRIM(d.co_mone) AS co_mone,
                            CASE WHEN d.tasa <= 1.000001 THEN 
-                                ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), d.fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
+                                 ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), d.fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
                            ELSE d.tasa END AS tasa,
                            RTRIM(d.n_control) AS n_control,
                            d.rowguid,
                            RTRIM(d.co_cli) AS co_cli,
                            RTRIM(c.cli_des) AS cli_des,
                            RTRIM(c.rif) AS rif,
-                           c.contribu_e, c.porc_esp, c.co_ven
+                           c.contribu_e, c.porc_esp, c.co_ven,
+                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1
                     FROM saDocumentoVenta d
                     INNER JOIN saCliente c ON d.co_cli = c.co_cli
+                    LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
                     WHERE ${whereSQL}
                     ORDER BY d.fec_emis DESC
-                `);
+                `);;
 
                 return result.recordset.map(r => ({ 
                     ...r, 
@@ -201,8 +202,11 @@ router.get('/:cob_num', async (req, res) => {
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT r.reng_num, RTRIM(r.co_tipo_doc) AS co_tipo_doc, RTRIM(r.nro_doc) AS nro_doc,
                                r.mont_cob, r.monto_retencion_iva, r.monto_retencion,
-                               r.rowguid, r.rowguid_reng_ori
+                               r.rowguid, r.rowguid_reng_ori,
+                               ISNULL(d.otros1, 0) AS otros1
                         FROM saCobroDocReng r
+                        LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                                    AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                         ORDER BY r.reng_num
                     `),
@@ -283,10 +287,11 @@ router.post('/', async (req, res) => {
 
         const defVen   = resVen.recordset[0]?.co_ven || '01';
         const defSucu  = resSucu.recordset[0]?.co_sucur || '01';
-        const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || '01';
+        const defCtaIE = '01';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
         const tsDate    = new Date();
+        tsDate.setHours(0, 0, 0, 0);
 
         const branchCodes = srv.profit_branch_codes || [];
         const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: defSucu };
@@ -305,6 +310,7 @@ router.post('/', async (req, res) => {
                     SELECT TOP 1 co_serie
                     FROM saConsecutivo
                     WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'COBRO'
+                      AND co_serie IS NOT NULL
                 )
             `);
             let corrRow = resCorr.recordset[0];
@@ -325,7 +331,7 @@ router.post('/', async (req, res) => {
             rH.input('deTasa',        sql.Decimal(21, 8), Number(data.tasa || 1));
             rH.input('sdFecha',       sql.SmallDateTime,  tsDate);
             rH.input('bAnulado',      sql.Bit,            0);
-            rH.input('deMonto',       sql.Decimal(18, 2), Number(data.monto));
+            rH.input('deMonto',       sql.Decimal(18, 2), 0.00);
             rH.input('sDis_cen',      sql.VarChar(sql.MAX), null);
             rH.input('sDescrip',      sql.VarChar(60),    (data.descrip || 'COBRO DE CLIENTE').substring(0, 60));
             rH.input('sCo_Us_In',     sql.Char(6),        padProfit(auditUser, 6));
@@ -345,10 +351,10 @@ router.post('/', async (req, res) => {
             const parentLines = data.renglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = data.renglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const sortedRenglones = [...parentLines, ...childLines];
-
+            let nextRengNum = 1;
             for (let i = 0; i < sortedRenglones.length; i++) {
                 const line = sortedRenglones[i];
-                const rengNum = i + 1;
+                const rengNum = nextRengNum++;
                 const docGuid = sql.UniqueIdentifier;
                 
                 // Determinar rowguid_reng_ori para notas de crédito/retenciones asociadas
@@ -358,8 +364,65 @@ router.post('/', async (req, res) => {
                     parentGuid = rengDocGuidMap.get(lookupKey);
                 }
 
+                // 3.0. Consultar saDocumentoVenta para obtener tasa, saldo y moneda original de la factura
+                let docSaldo = 0;
+                let docTasa = 1;
+                let docMone = 'BS';
+                let docCoCli = data.co_cli;
+                let docCoVen = data.co_ven || defVen;
+
+                if (parentTypes.includes(line.co_tipo_doc.trim().toUpperCase())) {
+                    const docInfo = await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
+                        .input('nro_doc',     sql.Char(20), padProfit(line.nro_doc, 20))
+                        .query(`
+                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, co_cli, co_ven
+                            FROM saDocumentoVenta
+                            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                        `);
+                    if (docInfo.recordset.length > 0) {
+                        docSaldo = Number(docInfo.recordset[0].saldo || 0);
+                        docTasa  = Number(docInfo.recordset[0].tasa || 1);
+                        docMone  = docInfo.recordset[0].co_mone || 'BS';
+                        docCoCli = docInfo.recordset[0].co_cli || docCoCli;
+                        docCoVen = docInfo.recordset[0].co_ven || docCoVen;
+                    }
+                }
+
+                let finalMontCob = Number(line.mont_cob);
+                let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
+                let adjustedMontoRetencion = Number(line.monto_retencion || 0);
+                let diffBs = 0;
+
+                // 1. Si la factura es en USD, primero calculamos la amortización en BS al tipo de cambio original (histórico)
+                if (docMone === 'USD' && docTasa > 0) {
+                    const rateCobro = Number(data.tasa || 1);
+                    const abonoUsd = finalMontCob / rateCobro;
+                    let clearedAbonoBs = Math.round((abonoUsd * docTasa) * 100) / 100;
+
+                    // Si hay diferencia de tasa, se registrará el diferencial (diffBs)
+                    if (Math.abs(rateCobro - docTasa) > 0.0001) {
+                        diffBs = finalMontCob - clearedAbonoBs;
+                    }
+                    finalMontCob = clearedAbonoBs;
+                }
+
+                // 2. Control de Saldo Máximo (Capping): El rebaje total no puede exceder el saldo actual del documento (evita saldo negativo)
+                let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                if (totalRebaje > docSaldo) {
+                    const excess = totalRebaje - docSaldo;
+                    finalMontCob = Math.max(0, finalMontCob - excess);
+                    
+                    // Si hubo recorte por excedente (ej. por redondeo), sumamos ese exceso al diferencial cambiario/redondeo (diffBs)
+                    diffBs = diffBs + excess;
+                }
+
+                try {
+                    require('fs').appendFileSync('scratch_cobro_log.txt', `\n[${new Date().toISOString()}] nro_doc=${line.nro_doc}, docMone=${docMone}, docTasa=${docTasa}, docSaldo=${docSaldo}, origMontCob=${line.mont_cob}, finalMontCob=${finalMontCob}, diffBs=${diffBs}, data.tasa=${data.tasa}`);
+                } catch(e) {}
+
                 const rR = new sql.Request(transaction);
-                const rowGuidValue = new sql.UniqueIdentifier; // Se autogenera, pero lo resolveremos en base de datos usando NEWID() y devolviendo el output o generándolo en Node
                 
                 const guidResult = await transaction.request().query('SELECT NEWID() AS guid');
                 const lineGuid = guidResult.recordset[0].guid;
@@ -370,9 +433,9 @@ router.post('/', async (req, res) => {
                     .input('cob_num',                   sql.Char(20),         padProfit(cobNum, 20))
                     .input('co_tipo_doc',               sql.Char(6),          padProfit(line.co_tipo_doc, 6))
                     .input('nro_doc',                   sql.Char(20),         padProfit(line.nro_doc, 20))
-                    .input('mont_cob',                  sql.Decimal(18, 2),   Number(line.mont_cob))
-                    .input('monto_retencion_iva',       sql.Decimal(18, 5),   Number(line.monto_retencion_iva || 0))
-                    .input('monto_retencion',           sql.Decimal(18, 2),   Number(line.monto_retencion || 0))
+                    .input('mont_cob',                  sql.Decimal(18, 2),   finalMontCob)
+                    .input('monto_retencion_iva',       sql.Decimal(18, 5),   adjustedMontoRetencionIva)
+                    .input('monto_retencion',           sql.Decimal(18, 2),   adjustedMontoRetencion)
                     .input('rowguid_reng_ori',          sql.UniqueIdentifier, parentGuid)
                     .input('co_sucu_in',                sql.Char(6),          padProfit(sucuCode, 6))
                     .input('co_us_in',                  sql.Char(6),          padProfit(auditUser, 6))
@@ -393,9 +456,8 @@ router.post('/', async (req, res) => {
                         )
                     `);
 
-                // 3.1 Rebajar el saldo del documento en saDocumentoVenta
-                // En un cobro, los montos aplicados (abono + retenciones) reducen el saldo del documento por cobrar
-                const totalRebaje = Number(line.mont_cob) + Number(line.monto_retencion_iva || 0) + Number(line.monto_retencion || 0);
+                // 3.1 Rebajar el saldo del documento en saDocumentoVenta usando el monto original ajustado
+                totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                 await transaction.request()
                     .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                     .input('nro_doc',     sql.Char(20), padProfit(line.nro_doc, 20))
@@ -415,6 +477,97 @@ router.post('/', async (req, res) => {
                     nro_doc: line.nro_doc,
                     rowguid: lineGuid
                 });
+
+                // 3.2 Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario
+                if (Math.abs(diffBs) > 0.01) {
+                    const isDebit = diffBs > 0;
+                    const diffDocType = isDebit ? 'N/DB' : 'N/CR';
+                    const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
+
+                    // Obtener correlativo
+                    const resCorrDiff = await transaction.request().query(`
+                        UPDATE saSerie
+                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
+                        OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
+                        WHERE co_serie = (
+                            SELECT TOP 1 co_serie
+                            FROM saConsecutivo
+                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = '${consecName}'
+                              AND co_serie IS NOT NULL
+                        )
+                    `);
+                    let corrDiff = resCorrDiff.recordset[0];
+                    if (!corrDiff || !corrDiff.prox_n) {
+                        throw new Error(`No se pudo obtener el correlativo para la Nota de ${isDebit ? 'Débito' : 'Crédito'} de diferencial cambiario.`);
+                    }
+                    const proxDiff = Number(corrDiff.prox_n || 0);
+                    const diffDocNum = proxDiff.toString().padStart(10, '0');
+
+                    // Insertar N/DB o N/CR en saDocumentoVenta
+                    await transaction.request()
+                        .input('co_tipo_doc',      sql.Char(6),        padProfit(diffDocType, 6))
+                        .input('nro_doc',          sql.Char(20),       padProfit(diffDocNum, 20))
+                        .input('co_cli',           sql.Char(16),       padProfit(docCoCli, 16))
+                        .input('co_ven',           sql.Char(6),        padProfit(docCoVen, 6))
+                        .input('co_mone',          sql.Char(6),        padProfit('BS', 6))
+                        .input('tasa',             sql.Decimal(21, 8), 1.00)
+                        .input('observa',          sql.VarChar(120),   (`Diferencial Cambiario COBRO N° ${cobNum} ${line.nro_doc.trim()}`).substring(0, 120))
+                        .input('doc_orig',         sql.Char(6),        padProfit('COBRO', 6))
+                        .input('tipo_origen',      sql.Int,            2)
+                        .input('nro_orig',         sql.VarChar(20),    cobNum)
+                        .input('total_bruto',      sql.Decimal(18, 2), Math.abs(diffBs))
+                        .input('total_neto',       sql.Decimal(18, 2), Math.abs(diffBs))
+                        .input('saldo',            sql.Decimal(18, 2), 0.00)
+                        .input('co_us_in',         sql.Char(6),        padProfit(auditUser, 6))
+                        .input('co_sucu_in',       sql.Char(6),        padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saDocumentoVenta (
+                                co_tipo_doc, nro_doc, co_cli, co_ven, co_mone, tasa, observa,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, contrib,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                comis1, comis2, comis3, comis4, comis5, comis6, adicional, ven_ter,
+                                otros1, otros2, otros3, n_control, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
+                            ) VALUES (
+                                @co_tipo_doc, @nro_doc, @co_cli, @co_ven, @co_mone, @tasa, @observa,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, @nro_doc, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0.00, 0.00
+                            )
+                        `);
+
+                    // Insertar renglón en saCobroDocReng
+                    const diffRengNum = nextRengNum++;
+                    const diffRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
+                    const diffRengGuid = diffRengGuidResult.recordset[0].guid;
+
+                    await transaction.request()
+                        .input('reng_num',                  sql.Int,              diffRengNum)
+                        .input('cob_num',                   sql.Char(20),         padProfit(cobNum, 20))
+                        .input('co_tipo_doc',               sql.Char(6),          padProfit(diffDocType, 6))
+                        .input('nro_doc',                   sql.Char(20),         padProfit(diffDocNum, 20))
+                        .input('mont_cob',                  sql.Decimal(18, 2),   Math.abs(diffBs))
+                        .input('co_sucu_in',                sql.Char(6),          padProfit(sucuCode, 6))
+                        .input('co_us_in',                  sql.Char(6),          padProfit(auditUser, 6))
+                        .input('rowguid',                   sql.UniqueIdentifier, diffRengGuid)
+                        .query(`
+                            INSERT INTO saCobroDocReng (
+                                reng_num, cob_num, co_tipo_doc, nro_doc, mont_cob,
+                                dpcobro_porc_desc, dpcobro_monto, monto_retencion_iva, monto_retencion,
+                                co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo, rowguid
+                            ) VALUES (
+                                @reng_num, @cob_num, @co_tipo_doc, @nro_doc, @mont_cob,
+                                0.00, 0.00, 0.00, 0.00,
+                                @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
+                            )
+                        `);
+                }
             }
 
             // 4. Insertar Formas de Pago (saCobroTPReng) y crear movimientos en Caja/Banco
@@ -425,6 +578,19 @@ router.post('/', async (req, res) => {
                 let movNumB = null;
 
                 if (tp.forma_pag === 'EF' || tp.forma_pag === 'TJ' || tp.forma_pag === 'CT') {
+                    // Obtener la moneda de la caja
+                    let isUSDcaja = false;
+                    const resCajaInfo = await transaction.request()
+                        .input('codCaja', sql.Char(6), padProfit(tp.cod_caja, 6))
+                        .query('SELECT RTRIM(co_mone) AS co_mone FROM saCaja WHERE cod_caja = @codCaja');
+                    if (resCajaInfo.recordset[0] && resCajaInfo.recordset[0].co_mone !== 'BS' && resCajaInfo.recordset[0].co_mone !== 'VES') {
+                        isUSDcaja = true;
+                    }
+
+                    const rate = Number(data.tasa || 1);
+                    const rawMonto = Number(tp.mont_doc);
+                    const finalMontoCaja = isUSDcaja ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
+
                     // Generar correlativo de movimiento de Caja (MOVC_NUM)
                     const resCorrCaja = await transaction.request().query(`
                         UPDATE saSerie
@@ -434,6 +600,7 @@ router.post('/', async (req, res) => {
                             SELECT TOP 1 co_serie
                             FROM saConsecutivo
                             WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVC_NUM'
+                              AND co_serie IS NOT NULL
                         )
                     `);
                     let corrCaja = resCorrCaja.recordset[0];
@@ -448,14 +615,14 @@ router.post('/', async (req, res) => {
                     rMovC.input('sdFecha',           sql.SmallDateTime,  tsDate);
                     rMovC.input('sDescrip',          sql.VarChar(60),    (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 60));
                     rMovC.input('sCod_Caja',         sql.Char(6),        padProfit(tp.cod_caja, 6));
-                    rMovC.input('deTasa',            sql.Decimal(21, 8), Number(data.tasa || 1));
+                    rMovC.input('deTasa',            sql.Decimal(21, 8), isUSDcaja ? rate : 1);
                     rMovC.input('sTipo_Mov',         sql.Char(2),        'I');
                     rMovC.input('sForma_Pag',        sql.Char(2),        tp.forma_pag);
                     rMovC.input('sNum_Pago',         sql.VarChar(20),    tp.num_doc ? tp.num_doc.substring(0, 20) : null);
                     rMovC.input('sCo_Ban',           sql.Char(6),        tp.co_ban ? padProfit(tp.co_ban, 6) : null);
                     rMovC.input('sCo_Tar',           sql.Char(6),        tp.co_tar ? padProfit(tp.co_tar, 6) : null);
                     rMovC.input('sCo_Cta_Ingr_Egr',  sql.Char(20),       padProfit(defCtaIE, 20));
-                    rMovC.input('deMonto',           sql.Decimal(18, 2), Number(tp.mont_doc));
+                    rMovC.input('deMonto',           sql.Decimal(18, 2), finalMontoCaja);
                     rMovC.input('bSaldo_Ini',        sql.Bit,            0);
                     rMovC.input('sOrigen',           sql.Char(3),        'COB');
                     rMovC.input('sDoc_Num',          sql.VarChar(20),    cobNum.substring(0, 20));
@@ -473,6 +640,19 @@ router.post('/', async (req, res) => {
                     await rMovC.execute('pInsertarMovimientoCaja');
 
                 } else if (tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP') {
+                    // Obtener la moneda de la cuenta bancaria
+                    let isUSDcuenta = false;
+                    const resCtaInfo = await transaction.request()
+                        .input('codCta', sql.Char(6), padProfit(tp.cod_cta, 6))
+                        .query('SELECT RTRIM(co_mone) AS co_mone FROM saCuentaBancaria WHERE cod_cta = @codCta');
+                    if (resCtaInfo.recordset[0] && resCtaInfo.recordset[0].co_mone !== 'BS' && resCtaInfo.recordset[0].co_mone !== 'VES') {
+                        isUSDcuenta = true;
+                    }
+
+                    const rate = Number(data.tasa || 1);
+                    const rawMonto = Number(tp.mont_doc);
+                    const finalMontoBanco = isUSDcuenta ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
+
                     // Generar correlativo de movimiento de Banco (MOVB_NUM)
                     const resCorrBanco = await transaction.request().query(`
                         UPDATE saSerie
@@ -482,6 +662,7 @@ router.post('/', async (req, res) => {
                             SELECT TOP 1 co_serie
                             FROM saConsecutivo
                             WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVB_NUM'
+                              AND co_serie IS NOT NULL
                         )
                     `);
                     let corrBanco = resCorrBanco.recordset[0];
@@ -501,10 +682,10 @@ router.post('/', async (req, res) => {
                     rMovB.input('sDescrip',          sql.VarChar(160),   (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 160));
                     rMovB.input('sCod_Cta',          sql.Char(6),        padProfit(tp.cod_cta, 6));
                     rMovB.input('sdFecha',           sql.SmallDateTime,  tsDate);
-                    rMovB.input('deTasa',            sql.Decimal(21, 8), Number(data.tasa || 1));
+                    rMovB.input('deTasa',            sql.Decimal(21, 8), isUSDcuenta ? rate : 1);
                     rMovB.input('sTipo_Op',          sql.Char(2),        tipoOp);
                     rMovB.input('sDoc_Num',          sql.VarChar(20),    (tp.num_doc || '').substring(0, 20));
-                    rMovB.input('deMonto',           sql.Decimal(18, 2), Number(tp.mont_doc));
+                    rMovB.input('deMonto',           sql.Decimal(18, 2), finalMontoBanco);
                     rMovB.input('sCo_Cta_Ingr_Egr',  sql.Char(20),       padProfit(defCtaIE, 20));
                     rMovB.input('sOrigen',           sql.Char(3),        'COB');
                     rMovB.input('sCob_Pag',          sql.Char(20),       padProfit(cobNum, 20));

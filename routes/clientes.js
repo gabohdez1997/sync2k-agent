@@ -652,20 +652,22 @@ router.get('/:co_cli/documentos', async (req, res) => {
             const r = await pool.request()
                 .input('co_cli', sql.Char(16), padProfit(co_cli, 16))
                 .query(`
-                    SELECT RTRIM(co_tipo_doc) AS co_tipo_doc, 
-                           RTRIM(nro_doc) AS nro_doc, 
-                           fec_emis, fec_venc, 
-                           total_neto, saldo, monto_imp,
-                           RTRIM(co_mone) AS co_mone,
-                           CASE WHEN tasa <= 1.000001 THEN 
-                                ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
-                           ELSE tasa END AS tasa,
-                           RTRIM(n_control) AS n_control,
-                           rowguid
-                    FROM saDocumentoVenta
-                    WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))
-                      AND saldo > 0 
-                      AND anulado = 0
+                    SELECT RTRIM(d.co_tipo_doc) AS co_tipo_doc, 
+                           RTRIM(d.nro_doc) AS nro_doc, 
+                           d.fec_emis, d.fec_venc, 
+                           d.total_neto, d.saldo, d.monto_imp,
+                           RTRIM(d.co_mone) AS co_mone,
+                           CASE WHEN d.tasa <= 1.000001 THEN 
+                                ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), d.fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
+                           ELSE d.tasa END AS tasa,
+                           RTRIM(d.n_control) AS n_control,
+                           d.rowguid,
+                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1
+                    FROM saDocumentoVenta d
+                    LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
+                    WHERE LTRIM(RTRIM(d.co_cli)) = LTRIM(RTRIM(@co_cli))
+                      AND d.saldo > 0 
+                      AND d.anulado = 0
                 `);
             return r.recordset.map(d => ({ ...d, co_cli, sede_id: srv.id, sede_nombre: srv.name }));
         });
