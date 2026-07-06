@@ -132,6 +132,26 @@ router.get('/cxc', async (req, res) => {
                         RTRIM(d.co_ven) AS co_ven, 
                         RTRIM(d.co_mone) AS co_mone, 
                         d.tasa AS doc_tasa,
+                        COALESCE(
+                            (
+                                SELECT TOP 1 orig.tasa 
+                                FROM saDocumentoVenta orig 
+                                WHERE orig.nro_doc = d.nro_orig 
+                                  AND orig.co_tipo_doc = d.doc_orig 
+                                  AND orig.co_cli = d.co_cli
+                            ),
+                            (
+                                SELECT TOP 1 fact.tasa 
+                                FROM saDocumentoVenta fact 
+                                WHERE fact.co_tipo_doc = 'FACT' 
+                                  AND fact.co_cli = d.co_cli
+                                  AND fact.nro_doc = (
+                                      SELECT TOP 1 r.num_doc 
+                                      FROM saDevolucionClienteReng r 
+                                      WHERE r.doc_num = d.nro_orig
+                                  )
+                            )
+                        ) AS tasa_doc_orig,
                         RTRIM(d.nro_orig) AS nro_orig,
                         RTRIM(d.doc_orig) AS doc_orig,
                         (
@@ -167,12 +187,18 @@ router.get('/cxc', async (req, res) => {
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
                     const rowMone = (row.co_mone || "").trim().toUpperCase();
-                    const docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
+                    let docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const tasaDocOrig = parseFloat(row.tasa_doc_orig) || 0.0;
+                    
+                    if (['N/CR', 'NCR'].includes(docType) && tasaDocOrig > 1.0) {
+                        docTasaVal = tasaDocOrig;
+                    }
+                    
                     const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
-                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
                     const isNegative = ['FACT', 'AJPA', 'IVANP', 'N/DB', 'NDEB', 'IVAP', 'GIRO'].includes(docType);
 
                     // El saldo y total siempre se almacenan en BS en saDocumentoVenta (moneda base bolívares en Profit)
@@ -394,6 +420,26 @@ router.get('/cxp', async (req, res) => {
                         d.anulado, 
                         RTRIM(d.co_mone) AS co_mone, 
                         d.tasa AS doc_tasa,
+                        COALESCE(
+                            (
+                                SELECT TOP 1 orig.tasa 
+                                FROM saDocumentoCompra orig 
+                                WHERE orig.nro_doc = d.nro_orig 
+                                  AND orig.co_tipo_doc = d.doc_orig 
+                                  AND orig.co_prov = d.co_prov
+                            ),
+                            (
+                                SELECT TOP 1 fact.tasa 
+                                FROM saDocumentoCompra fact 
+                                WHERE fact.co_tipo_doc = 'FACT' 
+                                  AND fact.co_prov = d.co_prov
+                                  AND fact.nro_doc = (
+                                      SELECT TOP 1 r.num_doc 
+                                      FROM saDevolucionProveedorReng r 
+                                      WHERE r.doc_num = d.nro_orig
+                                  )
+                            )
+                        ) AS tasa_doc_orig,
                         RTRIM(d.nro_orig) AS nro_orig,
                         RTRIM(d.doc_orig) AS doc_orig,
                         RTRIM(d.campo8) AS campo8,
@@ -443,7 +489,13 @@ router.get('/cxp', async (req, res) => {
                     // Facturas, ajustes de pagar y retenciones/otros débitos son negativos (deben restarse de los haberes / crédito)
                     const isNegative = ['FACT', 'AJPA', 'IVANP', 'N/DB', 'NDEB', 'IVAP', 'GIRO'].includes(docType);
 
-                    const docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    let docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const tasaDocOrig = parseFloat(row.tasa_doc_orig) || 0.0;
+                    
+                    if (['N/CR', 'NCR'].includes(docType) && tasaDocOrig > 1.0) {
+                        docTasaVal = tasaDocOrig;
+                    }
+                    
                     const bcvTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
                     const conversionRate = bcvTasa;
 
@@ -626,6 +678,7 @@ router.get('/cuenta-detallada', async (req, res) => {
                         d.co_ven, 
                         d.co_mone, 
                         d.doc_tasa,
+                        d.tasa_doc_orig,
                         d.nro_orig,
                         d.doc_orig,
                         d.doc_tipo_pagado,
@@ -647,6 +700,26 @@ router.get('/cuenta-detallada', async (req, res) => {
                             RTRIM(d.co_ven) AS co_ven, 
                             RTRIM(d.co_mone) AS co_mone, 
                             d.tasa AS doc_tasa,
+                            COALESCE(
+                                (
+                                    SELECT TOP 1 orig.tasa 
+                                    FROM saDocumentoVenta orig 
+                                    WHERE orig.nro_doc = d.nro_orig 
+                                      AND orig.co_tipo_doc = d.doc_orig 
+                                      AND orig.co_cli = d.co_cli
+                                ),
+                                (
+                                    SELECT TOP 1 fact.tasa 
+                                    FROM saDocumentoVenta fact 
+                                    WHERE fact.co_tipo_doc = 'FACT' 
+                                      AND fact.co_cli = d.co_cli
+                                      AND fact.nro_doc = (
+                                          SELECT TOP 1 r.num_doc 
+                                          FROM saDevolucionClienteReng r 
+                                          WHERE r.doc_num = d.nro_orig
+                                      )
+                                )
+                            ) AS tasa_doc_orig,
                             RTRIM(d.nro_orig) AS nro_orig,
                             RTRIM(d.doc_orig) AS doc_orig,
                             RTRIM(d.co_tipo_doc) AS doc_tipo_pagado,
@@ -693,6 +766,7 @@ router.get('/cuenta-detallada', async (req, res) => {
                             RTRIM(cob.co_ven) AS co_ven, 
                             RTRIM(cob.co_mone) AS co_mone, 
                             cob.tasa AS doc_tasa,
+                            NULL AS tasa_doc_orig,
                             RTRIM(reng.nro_doc) AS nro_orig,
                             RTRIM(reng.co_tipo_doc) AS doc_orig,
                             RTRIM(reng.co_tipo_doc) AS doc_tipo_pagado,
@@ -723,12 +797,18 @@ router.get('/cuenta-detallada', async (req, res) => {
 
                 const resData = await r.query(querySQL);
                 return resData.recordset.map(row => {
-                    const docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
+                    let docTasaVal = parseFloat(row.doc_tasa) || 0.0;
+                    const tasaDocOrig = parseFloat(row.tasa_doc_orig) || 0.0;
+                    
+                    if (['N/CR', 'NCR'].includes(docType) && tasaDocOrig > 1.0) {
+                        docTasaVal = tasaDocOrig;
+                    }
+                    
                     const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
-                    const docType = (row.co_tipo_doc || "").trim().toUpperCase();
                     const docTipoPagado = (row.doc_tipo_pagado || "").trim().toUpperCase();
 
                     let isNegative = false;
