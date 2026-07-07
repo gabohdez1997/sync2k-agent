@@ -474,11 +474,20 @@ router.post('/', async (req, res) => {
 
                 // 3.2 Generar documentos de retención de IVA e ISLR en saDocumentoVenta para evitar inconsistencias y permitir la anulación
                 if (adjustedMontoRetencionIva > 0) {
-                    const ivanRes = await transaction.request()
-                        .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
-                        .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
-                        .execute('pConsecutivoProximo');
-                    const ivanNum = ivanRes.recordset[0]?.ProximoConsecutivo?.trim();
+                    let ivanNum = null;
+                    try {
+                        const ivanRes = await transaction.request()
+                            .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
+                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
+                            .execute('pConsecutivoProximo');
+                        ivanNum = ivanRes.recordset[0]?.ProximoConsecutivo?.trim();
+                    } catch (err) {
+                        const ivanResGlobal = await transaction.request()
+                            .input('sCo_Sucur', sql.Char(6), '')
+                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
+                            .execute('pConsecutivoProximo');
+                        ivanNum = ivanResGlobal.recordset[0]?.ProximoConsecutivo?.trim();
+                    }
 
                     if (!ivanNum) {
                         throw new Error('No se pudo obtener el próximo consecutivo para el documento IVAN.');
@@ -507,26 +516,41 @@ router.post('/', async (req, res) => {
                         .query(`
                             INSERT INTO saDocumentoVenta (
                                 co_tipo_doc, nro_doc, co_cli, co_ven, co_mone, tasa, observa,
-                                doc_orig, tipo_origen, nro_orig, total_bruto, total_neto, saldo,
-                                co_us_in, co_sucu_in, co_us_mo, co_sucu_mo, fec_reg, fec_emis, fec_venc,
-                                anulado, aut, contrib, tasa_comp, tasa_c, monto_imp, monto_imp2, monto_imp3,
-                                otros1, otros2, otros3, comision, num_comprobante, tipo_imp
+                                fec_reg, fec_emis, fec_venc, anulado, aut, contrib,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                comis1, comis2, comis3, comis4, comis5, comis6, adicional, ven_ter,
+                                otros1, otros2, otros3, n_control, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca, num_comprobante, tipo_imp
                             ) VALUES (
                                 @co_tipo_doc, @nro_doc, @co_cli, @co_ven, @co_mone, @tasa, @observa,
-                                @doc_orig, @tipo_origen, @nro_orig, @total_bruto, @total_neto, @saldo,
-                                @co_us_in, @co_sucu_in, @co_us_in, @co_sucu_in, GETDATE(), GETDATE(), GETDATE(),
-                                0, 1, 0, 1.00, 1.00, 0.00, 0.00, 0.00,
-                                0.00, 0.00, 0.00, 0.00, @num_comprobante, 7
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, '', @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0, 0, @num_comprobante, 7
                             )
                         `);
                 }
 
                 if (adjustedMontoRetencion > 0) {
-                    const islrRes = await transaction.request()
-                        .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
-                        .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_ISLR', 16))
-                        .execute('pConsecutivoProximo');
-                    const islrNum = islrRes.recordset[0]?.ProximoConsecutivo?.trim();
+                    let islrNum = null;
+                    try {
+                        const islrRes = await transaction.request()
+                            .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
+                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_ISLR', 16))
+                            .execute('pConsecutivoProximo');
+                        islrNum = islrRes.recordset[0]?.ProximoConsecutivo?.trim();
+                    } catch (err) {
+                        const islrResGlobal = await transaction.request()
+                            .input('sCo_Sucur', sql.Char(6), '')
+                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_ISLR', 16))
+                            .execute('pConsecutivoProximo');
+                        islrNum = islrResGlobal.recordset[0]?.ProximoConsecutivo?.trim();
+                    }
 
                     if (!islrNum) {
                         throw new Error('No se pudo obtener el próximo consecutivo para el documento ISLR.');
@@ -551,16 +575,22 @@ router.post('/', async (req, res) => {
                         .query(`
                             INSERT INTO saDocumentoVenta (
                                 co_tipo_doc, nro_doc, co_cli, co_ven, co_mone, tasa, observa,
-                                doc_orig, tipo_origen, nro_orig, total_bruto, total_neto, saldo,
-                                co_us_in, co_sucu_in, co_us_mo, co_sucu_mo, fec_reg, fec_emis, fec_venc,
-                                anulado, aut, contrib, tasa_comp, tasa_c, monto_imp, monto_imp2, monto_imp3,
-                                otros1, otros2, otros3, comision
+                                fec_reg, fec_emis, fec_venc, anulado, aut, contrib,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                comis1, comis2, comis3, comis4, comis5, comis6, adicional, ven_ter,
+                                otros1, otros2, otros3, n_control, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
                             ) VALUES (
                                 @co_tipo_doc, @nro_doc, @co_cli, @co_ven, @co_mone, @tasa, @observa,
-                                @doc_orig, @tipo_origen, @nro_orig, @total_bruto, @total_neto, @saldo,
-                                @co_us_in, @co_sucu_in, @co_us_in, @co_sucu_in, GETDATE(), GETDATE(), GETDATE(),
-                                0, 1, 0, 1.00, 1.00, 0.00, 0.00, 0.00,
-                                0.00, 0.00, 0.00, 0.00
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, '', @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0, 0
                             )
                         `);
                 }
