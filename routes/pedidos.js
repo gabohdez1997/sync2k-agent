@@ -77,9 +77,10 @@ router.get('/', async (req, res) => {
                                RTRIM(c.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                                c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, RTRIM(c.status) AS status, c.anulado,
                                RTRIM(c.co_mone) AS co_mone, c.tasa, c.total_neto,
-                               RTRIM(c.co_ven) AS co_ven
+                               RTRIM(c.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des
                         FROM saPedidoVenta c
                         LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
+                        LEFT JOIN saVendedor v ON c.co_ven = v.co_ven
                         WHERE ${whereSQL}
                         ORDER BY c.fec_emis DESC, c.doc_num DESC
                     `),
@@ -834,6 +835,95 @@ router.post('/:doc_num/anular', async (req, res) => {
         return writeResponse(res, outcome);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al anular pedido.', error: error.message });
+    }
+});
+
+// --- PROCESAR / LIBERAR PEDIDO PARCIAL ---
+router.post('/:doc_num/procesar', async (req, res) => {
+    try {
+        const { doc_num } = req.params;
+        const { sede } = req.query;
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            const resH = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
+                `SELECT validador, rowguid, RTRIM(status) AS status, anulado
+                 FROM saPedidoVenta
+                 WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+            );
+            if (!resH.recordset.length) throw new Error('Pedido no existe.');
+
+            const { status, anulado } = resH.recordset[0];
+            const currentStatus = String(status || '').trim();
+            const isAnulada = !!anulado;
+            if (isAnulada) {
+                throw new Error(`El pedido ${doc_num} está anulado y no se puede procesar.`);
+            }
+            if (currentStatus !== '1') {
+                throw new Error(`Solo se pueden liberar/procesar pedidos parcialmente procesados (status=1). Estado actual: ${currentStatus}.`);
+            }
+
+            const resL = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
+                `SELECT reng_num, co_art, co_alma, co_uni, pendiente, rowguid FROM saPedidoVentaReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
+            );
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+
+                // 1. Cambiar estado a Procesado (status = '2')
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saPedidoVenta
+                        SET status = '2',
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                    `);
+
+                // 2. Renglones: poner pendiente a 0
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saPedidoVentaReng
+                        SET pendiente = 0,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                    `);
+
+                // 3. Devolver stock comprometido restante (restar stock tipo 'COM' por la cantidad pendiente)
+                console.log(`🧹 [AGENT] Liberando stock comprometido de ${resL.recordset.length} renglones para pedido ${doc_num}...`);
+                for (const line of resL.recordset) {
+                    const pendingQty = Number(line.pendiente || 0);
+                    if (pendingQty > 0) {
+                        const rStock = new sql.Request(transaction);
+                        rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                        rStock.input('sCo_Art',               sql.Char(30), line.co_art);
+                        rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                        rStock.input('deCantidad',            sql.Decimal(18, 5), pendingQty);
+                        rStock.input('sTipoStock',            sql.Char(4),  'COM');
+                        rStock.input('bSumarStock',           sql.Bit,      0); // Restar (liberar comprometido)
+                        rStock.input('bPermiteStockNegativo', sql.Bit,      1);
+                        await rStock.execute('pStockActualizar');
+                    }
+                }
+
+                await transaction.commit();
+                return { success: true, doc_num: doc_num };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al liberar pedido parcialmente procesado.', error: error.message });
     }
 });
 

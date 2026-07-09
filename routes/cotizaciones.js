@@ -64,7 +64,7 @@ router.get('/', async (req, res) => {
                            c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, 
                            c.anulado,
                            RTRIM(c.co_mone) AS co_mone, c.tasa, c.total_neto,
-                           RTRIM(c.co_ven) AS co_ven,
+                           RTRIM(c.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des,
                            CASE 
                                WHEN c.anulado = 1 THEN '3'
                                WHEN NOT EXISTS (SELECT 1 FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num) THEN '0'
@@ -74,6 +74,7 @@ router.get('/', async (req, res) => {
                            END AS status
                     FROM saCotizacionCliente c
                     LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
+                    LEFT JOIN saVendedor v ON c.co_ven = v.co_ven
                     WHERE ${whereSQL}
                     ORDER BY c.fec_emis DESC, c.doc_num DESC
                 `);

@@ -62,9 +62,10 @@ router.get('/', async (req, res) => {
                            RTRIM(f.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                            f.fec_emis, f.fec_venc, f.fec_reg, f.fe_us_in AS fec_us_in, f.fe_us_mo AS fec_us_mo, f.anulado,
                            RTRIM(f.co_mone) AS co_mone, f.tasa, f.total_neto, f.monto_imp,
-                           RTRIM(f.co_ven) AS co_ven, RTRIM(f.co_us_in) AS co_us_in
+                           RTRIM(f.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(f.co_us_in) AS co_us_in
                     FROM saFacturaVenta f
                     LEFT JOIN saCliente cl ON f.co_cli = cl.co_cli
+                    LEFT JOIN saVendedor v ON f.co_ven = v.co_ven
                     WHERE ${whereSQL}
                     ORDER BY f.fec_emis DESC, f.doc_num DESC
                 `);
@@ -669,7 +670,7 @@ router.post('/', async (req, res) => {
             rDoc.input('sImpfis', sql.VarChar(20), null);
             rDoc.input('sImpfisfac', sql.VarChar(15), null);
             rDoc.input('sImp_nro_z', sql.Char(15), null);
-            rDoc.input('deOtros1', sql.Decimal(18, 2), 0);
+            rDoc.input('deOtros1', sql.Decimal(18, 2), igtfBs);
             rDoc.input('deOtros2', sql.Decimal(18, 2), 0);
             rDoc.input('deOtros3', sql.Decimal(18, 2), 0);
             rDoc.input('sCampo1', sql.VarChar(60), null);
@@ -686,7 +687,22 @@ router.post('/', async (req, res) => {
             rDoc.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
             rDoc.input('sMaquina', sql.VarChar(60), 'SYNC2K');
 
-            await rDoc.execute('pInsertarDocumentoVenta');
+            const resDoc = await rDoc.execute('pInsertarDocumentoVenta');
+
+            // Insertar información de IGTF si corresponde
+            if (igtfBs > 0) {
+                const docGuid = resDoc.recordset[0]?.rowguid;
+                if (docGuid) {
+                    await transaction.request()
+                        .input('rowguid', sql.UniqueIdentifier, docGuid)
+                        .input('base_imponible', sql.Decimal(18, 2), Math.round((igtfMontoDivisa * tasaDoc) * 100) / 100)
+                        .input('porc_aplic', sql.Decimal(18, 2), 3.00)
+                        .query(`
+                            INSERT INTO saDocumentoVentaInfoIGTF (rowguid, base_imponible, porc_aplic)
+                            VALUES (@rowguid, @base_imponible, @porc_aplic)
+                        `);
+                }
+            }
 
             await transaction.commit();
             return { doc_num: docNum, success: true, message: 'Factura guardada exitosamente en base de datos.' };

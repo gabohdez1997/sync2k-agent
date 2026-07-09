@@ -268,6 +268,123 @@ router.get('/:cob_num', async (req, res) => {
     }
 });
 
+// --- ANULAR COBRO ---
+router.post('/:cob_num/anular', async (req, res) => {
+    try {
+        const { cob_num } = req.params;
+        const { sede } = req.query;
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            // Check if collection exists and is not already voided
+            const resCob = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT anulado, RTRIM(co_cli) AS co_cli, RTRIM(co_sucu_in) AS co_sucu_in
+                    FROM saCobro
+                    WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                `);
+            if (!resCob.recordset.length) throw new Error('Cobro no existe.');
+
+            const cob = resCob.recordset[0];
+            if (cob.anulado) {
+                throw new Error(`El cobro ${cob_num} ya está anulado.`);
+            }
+
+            // Fetch detail lines of paid documents
+            const resReng = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT RTRIM(co_tipo_doc) AS co_tipo_doc, RTRIM(nro_doc) AS nro_doc, mont_cob, monto_retencion_iva, monto_retencion
+                    FROM saCobroDocReng
+                    WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                `);
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+                const sucuCode = cob.co_sucu_in || '01';
+
+                // 1. Anular cabecera de Cobro
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saCobro
+                        SET anulado = 1,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 2. Anular documentos de retención o diferenciales creados por este cobro (IVAN, ISLR, N/CR, N/DB)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saDocumentoVenta
+                        SET anulado = 1,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE DOC_ORIG = 'COBRO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 3. Revertir saldo de los documentos cobrados
+                for (const line of resReng.recordset) {
+                    const totalRebaje = Number(line.mont_cob || 0);
+                    if (totalRebaje > 0) {
+                        await transaction.request()
+                            .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
+                            .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                            .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                            .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                            .query(`
+                                UPDATE saDocumentoVenta
+                                SET saldo = saldo + @rebaje,
+                                    fe_us_mo = GETDATE(),
+                                    co_us_mo = @auditUser
+                                WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                                  AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                            `);
+                    }
+                }
+
+                // 4. Anular movimientos de caja asociados
+                await transaction.request()
+                    .input('sNro_Cobro', sql.Char(20), padProfit(cob_num, 20))
+                    .input('sCo_Us_Mo', sql.Char(6), padProfit(auditUser, 6))
+                    .input('sCo_Sucu_Mo', sql.Char(6), padProfit(sucuCode, 6))
+                    .input('sRevisado', sql.Char(1), null)
+                    .input('sTrasnfe', sql.Char(1), null)
+                    .execute('pv_ActualizarMovCajaAsocCobroAnular');
+
+                // 5. Anular movimientos de banco asociados
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saMovimientoBanco
+                        SET anulado = 1,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'COB'
+                    `);
+
+                await transaction.commit();
+                return { success: true, cob_num: cob_num };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al anular cobro.', error: error.message });
+    }
+});
+
 // --- GUARDAR COBRO ---
 router.post('/', async (req, res) => {
     const data = req.body;
@@ -291,7 +408,6 @@ router.post('/', async (req, res) => {
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
         const tsDate = new Date();
-        tsDate.setHours(0, 0, 0, 0);
 
         const branchCodes = srv.profit_branch_codes || [];
         const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: defSucu };
@@ -433,7 +549,7 @@ router.post('/', async (req, res) => {
                     .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
                     .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                     .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
-                    .input('mont_cob', sql.Decimal(18, 2), finalMontCob)
+                    .input('mont_cob', sql.Decimal(18, 2), totalRebaje)
                     .input('monto_retencion_iva', sql.Decimal(18, 5), adjustedMontoRetencionIva)
                     .input('monto_retencion', sql.Decimal(18, 2), adjustedMontoRetencion)
                     .input('rowguid_reng_ori', sql.UniqueIdentifier, parentGuid)
@@ -534,6 +650,33 @@ router.post('/', async (req, res) => {
                                 0, 0, @num_comprobante, 7
                             )
                         `);
+
+                    // Insertar renglón de IVAN en saCobroDocReng para registrar la retención
+                    const ivanRengNum = nextRengNum++;
+                    const ivanRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
+                    const ivanRengGuid = ivanRengGuidResult.recordset[0].guid;
+
+                    await transaction.request()
+                        .input('reng_num', sql.Int, ivanRengNum)
+                        .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
+                        .input('co_tipo_doc', sql.Char(6), padProfit('IVAN', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ivanNum, 20))
+                        .input('mont_cob', sql.Decimal(18, 2), adjustedMontoRetencionIva)
+                        .input('rowguid_reng_ori', sql.UniqueIdentifier, lineGuid)
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('rowguid', sql.UniqueIdentifier, ivanRengGuid)
+                        .query(`
+                            INSERT INTO saCobroDocReng (
+                                reng_num, cob_num, co_tipo_doc, nro_doc, mont_cob,
+                                dpcobro_porc_desc, dpcobro_monto, monto_retencion_iva, monto_retencion,
+                                rowguid_reng_ori, co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo, rowguid
+                            ) VALUES (
+                                @reng_num, @cob_num, @co_tipo_doc, @nro_doc, @mont_cob,
+                                0.00, 0.00, 0.00, 0.00,
+                                @rowguid_reng_ori, @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
+                            )
+                        `);
                 }
 
                 if (adjustedMontoRetencion > 0) {
@@ -591,6 +734,33 @@ router.post('/', async (req, res) => {
                                 0, 0, 0, '', @co_us_in, @co_sucu_in, GETDATE(),
                                 @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
                                 0, 0
+                            )
+                        `);
+
+                    // Insertar renglón de ISLR en saCobroDocReng para registrar la retención
+                    const islrRengNum = nextRengNum++;
+                    const islrRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
+                    const islrRengGuid = islrRengGuidResult.recordset[0].guid;
+
+                    await transaction.request()
+                        .input('reng_num', sql.Int, islrRengNum)
+                        .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
+                        .input('co_tipo_doc', sql.Char(6), padProfit('ISLR', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(islrNum, 20))
+                        .input('mont_cob', sql.Decimal(18, 2), adjustedMontoRetencion)
+                        .input('rowguid_reng_ori', sql.UniqueIdentifier, lineGuid)
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('rowguid', sql.UniqueIdentifier, islrRengGuid)
+                        .query(`
+                            INSERT INTO saCobroDocReng (
+                                reng_num, cob_num, co_tipo_doc, nro_doc, mont_cob,
+                                dpcobro_porc_desc, dpcobro_monto, monto_retencion_iva, monto_retencion,
+                                rowguid_reng_ori, co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo, rowguid
+                            ) VALUES (
+                                @reng_num, @cob_num, @co_tipo_doc, @nro_doc, @mont_cob,
+                                0.00, 0.00, 0.00, 0.00,
+                                @rowguid_reng_ori, @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
                             )
                         `);
                 }
