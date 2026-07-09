@@ -904,9 +904,25 @@ router.post('/', async (req, res) => {
                 }
             }
 
+            // Usar la caja '02' (Bolívares) por defecto para el renglón dummy de cobro neto a 0,00
+            const dummyCaja = '02';
+
+            const activeFormasPago = data.formas_pago && data.formas_pago.length > 0
+                ? data.formas_pago
+                : [{
+                    forma_pag: 'EF',
+                    cod_caja: dummyCaja,
+                    cod_cta: null,
+                    co_ban: null,
+                    co_tar: null,
+                    num_doc: null,
+                    mont_doc: 0,
+                    fecha_che: null
+                  }];
+
             // 4. Insertar Formas de Pago (saCobroTPReng) y crear movimientos en Caja/Banco
-            for (let i = 0; i < data.formas_pago.length; i++) {
-                const tp = data.formas_pago[i];
+            for (let i = 0; i < activeFormasPago.length; i++) {
+                const tp = activeFormasPago[i];
                 const rengNum = i + 1;
                 let movNumC = null;
                 let movNumB = null;
