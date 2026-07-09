@@ -347,8 +347,24 @@ router.post('/:cob_num/anular', async (req, res) => {
                                 WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
                                   AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
                             `);
+
+                        // Si es factura (FACT), revertir saldo también en saFacturaVenta
+                        if (line.co_tipo_doc.trim().toUpperCase() === 'FACT') {
+                            await transaction.request()
+                                .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                                .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                                .query(`
+                                    UPDATE saFacturaVenta
+                                    SET saldo = saldo + @rebaje,
+                                        fe_us_mo = GETDATE(),
+                                        co_us_mo = @auditUser
+                                    WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
+                                `);
+                        }
                     }
                 }
+
 
                 // 4. Anular movimientos de caja asociados
                 await transaction.request()
@@ -587,6 +603,22 @@ router.post('/', async (req, res) => {
                         WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
                           AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
                     `);
+
+                // Si el tipo de documento es FACT (Factura), también debemos rebajar el saldo en saFacturaVenta
+                if (line.co_tipo_doc.trim().toUpperCase() === 'FACT') {
+                    await transaction.request()
+                        .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                        .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                        .input('user', sql.Char(6), padProfit(auditUser, 6))
+                        .query(`
+                            UPDATE saFacturaVenta
+                            SET saldo = saldo - @rebaje,
+                                fe_us_mo = GETDATE(),
+                                co_us_mo = @user
+                            WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
+                        `);
+                }
+
 
                 // 3.2 Generar documentos de retención de IVA e ISLR en saDocumentoVenta para evitar inconsistencias y permitir la anulación
                 if (adjustedMontoRetencionIva > 0) {
