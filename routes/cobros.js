@@ -503,7 +503,9 @@ router.post('/', async (req, res) => {
                 let docCoCli = data.co_cli;
                 let docCoVen = data.co_ven || defVen;
 
-                if (parentTypes.includes(line.co_tipo_doc.trim().toUpperCase())) {
+                const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR'];
+                if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                         .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
@@ -522,7 +524,8 @@ router.post('/', async (req, res) => {
                     }
                 }
 
-                let finalMontCob = Number(line.mont_cob);
+                let finalMontCob = Math.abs(Number(line.mont_cob));
+
                 let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
