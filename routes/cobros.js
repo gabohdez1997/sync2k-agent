@@ -459,7 +459,11 @@ router.post('/', async (req, res) => {
             rH.input('sRecibo', sql.Char(15), null);
             rH.input('sCo_cli', sql.Char(16), padProfit(data.co_cli, 16));
             rH.input('sCo_ven', sql.Char(6), padProfit(data.co_ven || defVen, 6));
-            rH.input('sCo_Mone', sql.Char(6), padProfit(data.co_mone || 'US$', 6));
+            let collectionMone = data.co_mone || 'USD';
+            if (collectionMone.trim().toUpperCase() === 'US$') {
+                collectionMone = 'USD';
+            }
+            rH.input('sCo_Mone', sql.Char(6), padProfit(collectionMone, 6));
             rH.input('deTasa', sql.Decimal(21, 8), Number(data.tasa || 1));
             rH.input('sdFecha', sql.SmallDateTime, tsDate);
             rH.input('bAnulado', sql.Bit, 0);
@@ -530,7 +534,8 @@ router.post('/', async (req, res) => {
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
 
-                // 1. Si la factura es en USD, primero calculamos la amortización en BS al tipo de cambio original (histórico)
+                // 1. No recalcular los montos a la tasa histórica para evitar diferencias de redondeo y notas de débito/crédito adicionales
+                /*
                 if (docMone === 'USD' && docTasa > 0) {
                     const rateCobro = Number(data.tasa || 1);
                     const abonoUsd = finalMontCob / rateCobro;
@@ -542,6 +547,7 @@ router.post('/', async (req, res) => {
                     }
                     finalMontCob = clearedAbonoBs;
                 }
+                */
 
                 // 2. Control de Saldo Máximo (Capping): El rebaje total no puede exceder el saldo actual del documento (evita saldo negativo)
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
@@ -919,53 +925,55 @@ router.post('/', async (req, res) => {
                     const rawMonto = Number(tp.mont_doc);
                     const finalMontoCaja = isUSDcaja ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
 
-                    // Generar correlativo de movimiento de Caja (MOVC_NUM)
-                    const resCorrCaja = await transaction.request().query(`
-                        UPDATE saSerie
-                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                        OUTPUT INSERTED.prox_n
-                        WHERE co_serie = (
-                            SELECT TOP 1 co_serie
-                            FROM saConsecutivo
-                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVC_NUM'
-                              AND co_serie IS NOT NULL
-                        )
-                    `);
-                    let corrCaja = resCorrCaja.recordset[0];
-                    if (!corrCaja || !corrCaja.prox_n) {
-                        throw new Error("No se pudo obtener el correlativo de movimiento de caja.");
+                    if (finalMontoCaja > 0) {
+                        // Generar correlativo de movimiento de Caja (MOVC_NUM)
+                        const resCorrCaja = await transaction.request().query(`
+                            UPDATE saSerie
+                            SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
+                            OUTPUT INSERTED.prox_n
+                            WHERE co_serie = (
+                                SELECT TOP 1 co_serie
+                                FROM saConsecutivo
+                                WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVC_NUM'
+                                  AND co_serie IS NOT NULL
+                            )
+                        `);
+                        let corrCaja = resCorrCaja.recordset[0];
+                        if (!corrCaja || !corrCaja.prox_n) {
+                            throw new Error("No se pudo obtener el correlativo de movimiento de caja.");
+                        }
+                        movNumC = Number(corrCaja.prox_n).toString().padStart(10, '0');
+
+                        // Crear Movimiento de Caja
+                        const rMovC = new sql.Request(transaction);
+                        rMovC.input('sMov_Num', sql.Char(20), padProfit(movNumC, 20));
+                        rMovC.input('sdFecha', sql.SmallDateTime, tsDate);
+                        rMovC.input('sDescrip', sql.VarChar(60), (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 60));
+                        rMovC.input('sCod_Caja', sql.Char(6), padProfit(tp.cod_caja, 6));
+                        rMovC.input('deTasa', sql.Decimal(21, 8), isUSDcaja ? rate : 1);
+                        rMovC.input('sTipo_Mov', sql.Char(2), 'I');
+                        rMovC.input('sForma_Pag', sql.Char(2), tp.forma_pag);
+                        rMovC.input('sNum_Pago', sql.VarChar(20), tp.num_doc ? tp.num_doc.substring(0, 20) : null);
+                        rMovC.input('sCo_Ban', sql.Char(6), tp.co_ban ? padProfit(tp.co_ban, 6) : null);
+                        rMovC.input('sCo_Tar', sql.Char(6), tp.co_tar ? padProfit(tp.co_tar, 6) : null);
+                        rMovC.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
+                        rMovC.input('deMonto', sql.Decimal(18, 2), finalMontoCaja);
+                        rMovC.input('bSaldo_Ini', sql.Bit, 0);
+                        rMovC.input('sOrigen', sql.Char(3), 'COB');
+                        rMovC.input('sDoc_Num', sql.VarChar(20), cobNum.substring(0, 20));
+                        rMovC.input('sDep_Num', sql.VarChar(20), null);
+                        rMovC.input('bAnulado', sql.Bit, 0);
+                        rMovC.input('bDepositado', sql.Bit, 0);
+                        rMovC.input('bConciliado', sql.Bit, 0);
+                        rMovC.input('bTransferido', sql.Bit, 0);
+                        rMovC.input('sdFecha_Che', sql.SmallDateTime, tsDate);
+                        rMovC.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
+                        rMovC.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
+                        rMovC.input('sRevisado', sql.Char(1), null);
+                        rMovC.input('sTrasnfe', sql.Char(1), null);
+
+                        await rMovC.execute('pInsertarMovimientoCaja');
                     }
-                    movNumC = Number(corrCaja.prox_n).toString().padStart(10, '0');
-
-                    // Crear Movimiento de Caja
-                    const rMovC = new sql.Request(transaction);
-                    rMovC.input('sMov_Num', sql.Char(20), padProfit(movNumC, 20));
-                    rMovC.input('sdFecha', sql.SmallDateTime, tsDate);
-                    rMovC.input('sDescrip', sql.VarChar(60), (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 60));
-                    rMovC.input('sCod_Caja', sql.Char(6), padProfit(tp.cod_caja, 6));
-                    rMovC.input('deTasa', sql.Decimal(21, 8), isUSDcaja ? rate : 1);
-                    rMovC.input('sTipo_Mov', sql.Char(2), 'I');
-                    rMovC.input('sForma_Pag', sql.Char(2), tp.forma_pag);
-                    rMovC.input('sNum_Pago', sql.VarChar(20), tp.num_doc ? tp.num_doc.substring(0, 20) : null);
-                    rMovC.input('sCo_Ban', sql.Char(6), tp.co_ban ? padProfit(tp.co_ban, 6) : null);
-                    rMovC.input('sCo_Tar', sql.Char(6), tp.co_tar ? padProfit(tp.co_tar, 6) : null);
-                    rMovC.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
-                    rMovC.input('deMonto', sql.Decimal(18, 2), finalMontoCaja);
-                    rMovC.input('bSaldo_Ini', sql.Bit, 0);
-                    rMovC.input('sOrigen', sql.Char(3), 'COB');
-                    rMovC.input('sDoc_Num', sql.VarChar(20), cobNum.substring(0, 20));
-                    rMovC.input('sDep_Num', sql.VarChar(20), null);
-                    rMovC.input('bAnulado', sql.Bit, 0);
-                    rMovC.input('bDepositado', sql.Bit, 0);
-                    rMovC.input('bConciliado', sql.Bit, 0);
-                    rMovC.input('bTransferido', sql.Bit, 0);
-                    rMovC.input('sdFecha_Che', sql.SmallDateTime, tsDate);
-                    rMovC.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
-                    rMovC.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
-                    rMovC.input('sRevisado', sql.Char(1), null);
-                    rMovC.input('sTrasnfe', sql.Char(1), null);
-
-                    await rMovC.execute('pInsertarMovimientoCaja');
 
                 } else if (tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP') {
                     // Obtener la moneda de la cuenta bancaria
@@ -981,57 +989,59 @@ router.post('/', async (req, res) => {
                     const rawMonto = Number(tp.mont_doc);
                     const finalMontoBanco = isUSDcuenta ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
 
-                    // Generar correlativo de movimiento de Banco (MOVB_NUM)
-                    const resCorrBanco = await transaction.request().query(`
-                        UPDATE saSerie
-                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                        OUTPUT INSERTED.prox_n
-                        WHERE co_serie = (
-                            SELECT TOP 1 co_serie
-                            FROM saConsecutivo
-                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVB_NUM'
-                              AND co_serie IS NOT NULL
-                        )
-                    `);
-                    let corrBanco = resCorrBanco.recordset[0];
-                    if (!corrBanco || !corrBanco.prox_n) {
-                        throw new Error("No se pudo obtener el correlativo de movimiento de banco.");
+                    if (finalMontoBanco > 0) {
+                        // Generar correlativo de movimiento de Banco (MOVB_NUM)
+                        const resCorrBanco = await transaction.request().query(`
+                            UPDATE saSerie
+                            SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
+                            OUTPUT INSERTED.prox_n
+                            WHERE co_serie = (
+                                SELECT TOP 1 co_serie
+                                FROM saConsecutivo
+                                WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVB_NUM'
+                                  AND co_serie IS NOT NULL
+                            )
+                        `);
+                        let corrBanco = resCorrBanco.recordset[0];
+                        if (!corrBanco || !corrBanco.prox_n) {
+                            throw new Error("No se pudo obtener el correlativo de movimiento de banco.");
+                        }
+                        movNumB = Number(corrBanco.prox_n).toString().padStart(10, '0');
+
+                        // Tipo de operación para el banco
+                        let tipoOp = 'TR'; // Transferencia
+                        if (tp.forma_pag === 'DP') tipoOp = 'DP'; // Depósito
+                        if (tp.forma_pag === 'CH') tipoOp = 'CH'; // Cheque
+
+                        // Crear Movimiento de Banco
+                        const rMovB = new sql.Request(transaction);
+                        rMovB.input('sMov_Num', sql.Char(20), padProfit(movNumB, 20));
+                        rMovB.input('sDescrip', sql.VarChar(160), (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 160));
+                        rMovB.input('sCod_Cta', sql.Char(6), padProfit(tp.cod_cta, 6));
+                        rMovB.input('sdFecha', sql.SmallDateTime, tsDate);
+                        rMovB.input('deTasa', sql.Decimal(21, 8), isUSDcuenta ? rate : 1);
+                        rMovB.input('sTipo_Op', sql.Char(2), tipoOp);
+                        rMovB.input('sDoc_Num', sql.VarChar(20), (tp.num_doc || '').substring(0, 20));
+                        rMovB.input('deMonto', sql.Decimal(18, 2), finalMontoBanco);
+                        rMovB.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
+                        rMovB.input('sOrigen', sql.Char(3), 'COB');
+                        rMovB.input('sCob_Pag', sql.Char(20), padProfit(cobNum, 20));
+                        rMovB.input('deIDB', sql.Decimal(18, 2), 0.00);
+                        rMovB.input('sDep_Num', sql.Char(20), null);
+                        rMovB.input('bAnulado', sql.Bit, 0);
+                        rMovB.input('bSaldo_Ini', sql.Bit, 0);
+                        rMovB.input('bConciliado', sql.Bit, 0);
+                        rMovB.input('bOri_Dep', sql.Bit, 0);
+                        rMovB.input('iDep_Con', sql.Int, 0);
+                        rMovB.input('sCod_IngBen', sql.Char(6), null);
+                        rMovB.input('sdFecha_Che', sql.SmallDateTime, tsDate);
+                        rMovB.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
+                        rMovB.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
+                        rMovB.input('sRevisado', sql.Char(1), null);
+                        rMovB.input('sTrasnfe', sql.Char(1), null);
+
+                        await rMovB.execute('pInsertarMovimientoBanco');
                     }
-                    movNumB = Number(corrBanco.prox_n).toString().padStart(10, '0');
-
-                    // Tipo de operación para el banco
-                    let tipoOp = 'TR'; // Transferencia
-                    if (tp.forma_pag === 'DP') tipoOp = 'DP'; // Depósito
-                    if (tp.forma_pag === 'CH') tipoOp = 'CH'; // Cheque
-
-                    // Crear Movimiento de Banco
-                    const rMovB = new sql.Request(transaction);
-                    rMovB.input('sMov_Num', sql.Char(20), padProfit(movNumB, 20));
-                    rMovB.input('sDescrip', sql.VarChar(160), (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 160));
-                    rMovB.input('sCod_Cta', sql.Char(6), padProfit(tp.cod_cta, 6));
-                    rMovB.input('sdFecha', sql.SmallDateTime, tsDate);
-                    rMovB.input('deTasa', sql.Decimal(21, 8), isUSDcuenta ? rate : 1);
-                    rMovB.input('sTipo_Op', sql.Char(2), tipoOp);
-                    rMovB.input('sDoc_Num', sql.VarChar(20), (tp.num_doc || '').substring(0, 20));
-                    rMovB.input('deMonto', sql.Decimal(18, 2), finalMontoBanco);
-                    rMovB.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
-                    rMovB.input('sOrigen', sql.Char(3), 'COB');
-                    rMovB.input('sCob_Pag', sql.Char(20), padProfit(cobNum, 20));
-                    rMovB.input('deIDB', sql.Decimal(18, 2), 0.00);
-                    rMovB.input('sDep_Num', sql.Char(20), null);
-                    rMovB.input('bAnulado', sql.Bit, 0);
-                    rMovB.input('bSaldo_Ini', sql.Bit, 0);
-                    rMovB.input('bConciliado', sql.Bit, 0);
-                    rMovB.input('bOri_Dep', sql.Bit, 0);
-                    rMovB.input('iDep_Con', sql.Int, 0);
-                    rMovB.input('sCod_IngBen', sql.Char(6), null);
-                    rMovB.input('sdFecha_Che', sql.SmallDateTime, tsDate);
-                    rMovB.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
-                    rMovB.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
-                    rMovB.input('sRevisado', sql.Char(1), null);
-                    rMovB.input('sTrasnfe', sql.Char(1), null);
-
-                    await rMovB.execute('pInsertarMovimientoBanco');
                 }
 
                 // Insertar renglón de forma de pago del cobro
