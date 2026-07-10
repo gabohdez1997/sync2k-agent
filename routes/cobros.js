@@ -467,7 +467,15 @@ router.post('/', async (req, res) => {
             rH.input('deTasa', sql.Decimal(21, 8), Number(data.tasa || 1));
             rH.input('sdFecha', sql.SmallDateTime, tsDate);
             rH.input('bAnulado', sql.Bit, 0);
-            rH.input('deMonto', sql.Decimal(18, 2), 0.00);
+
+            let totalAbonoBs = 0;
+            if (data.renglones && Array.isArray(data.renglones)) {
+                data.renglones.forEach((line) => {
+                    totalAbonoBs += Number(line.mont_cob || 0);
+                });
+            }
+            const finalMontoHeader = collectionMone === 'USD' ? Math.round((totalAbonoBs / Number(data.tasa || 1)) * 100) / 100 : totalAbonoBs;
+            rH.input('deMonto', sql.Decimal(18, 2), finalMontoHeader);
             rH.input('sDis_cen', sql.VarChar(sql.MAX), null);
             rH.input('sDescrip', sql.VarChar(60), (data.descrip || 'COBRO DE CLIENTE').substring(0, 60));
             rH.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
