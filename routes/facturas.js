@@ -375,8 +375,8 @@ router.post('/', async (req, res) => {
             const pImp = Number(item.porc_imp || 0);
             
             const prcBs = prcUSD * tasaDoc;
-            const subBs = qty * prcBs;
-            const impBs = (subBs * pImp) / 100;
+            const subBs = Math.round((qty * prcBs) * 100) / 100;
+            const impBs = Math.round(((subBs * pImp) / 100) * 100) / 100;
             
             totalBrutoBs += subBs;
             totalImpBs   += impBs;
@@ -385,7 +385,7 @@ router.post('/', async (req, res) => {
         const igtfMontoDivisa = Number(data.igtf_monto_divisa || 0);
         const igtfBs = igtfMontoDivisa > 0 ? Math.round((igtfMontoDivisa * 0.03 * tasaDoc) * 100) / 100 : 0;
 
-        const totalNetoBs = totalBrutoBs + totalImpBs + igtfBs;
+        const totalNetoBs = Math.round((totalBrutoBs + totalImpBs + igtfBs) * 100) / 100;
 
         // 4. Determinar Sucursal (co_sucu_in, co_sucu_mo) según requerimiento de IVA
         // Si el totalImpBs === 0 (pedido exento o sin IVA), co_sucu_in y co_sucu_mo es la sucursal no-default.
@@ -480,8 +480,8 @@ router.post('/', async (req, res) => {
                 const coPrecio = String(item.co_precio || '01').trim().substring(0, 6);
 
                 const prcBs = prcUSD * tasaDoc;
-                const subBs = qty * prcBs;
-                const impBs = (subBs * pImp) / 100;
+                const subBs = Math.round((qty * prcBs) * 100) / 100;
+                const impBs = Math.round(((subBs * pImp) / 100) * 100) / 100;
                 
                 const finalUni = String(item.co_uni || 'UNI').trim();
 

@@ -409,15 +409,15 @@ router.post('/', async (req, res) => {
                     // Convertir a BS para la cabecera
                     const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
                     
-                    const sub = qty * prcBs;
-                    const imp = (sub * pImp) / 100;
+                    const sub = Math.round((qty * prcBs) * 100) / 100;
+                    const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
                     
                     totalBruto += sub;
                     totalImp   += imp;
                 });
             }
 
-            const totalNeto = totalBruto + totalImp;
+            const totalNeto = Math.round((totalBruto + totalImp) * 100) / 100;
 
             // En Profit, los documentos suelen guardarse con la moneda 'US$' si se transan en dólares, 
             // e internamente se mantiene la tasa para conversiones contables en BS.
@@ -488,8 +488,8 @@ router.post('/', async (req, res) => {
 
                 const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
                 const prcUSD = isUSD ? prcIn : (prcIn / tasaDoc);
-                const sub = qty * prcBs;
-                const imp = (sub * pImp) / 100;
+                const sub = Math.round((qty * prcBs) * 100) / 100;
+                const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
 
                 const rL = new sql.Request(transaction);
                 rL.input('iReng_Num',          sql.Int,              i + 1);
