@@ -383,6 +383,98 @@ router.post('/', async (req, res) => {
                 console.log(`âœ¨ [AGENT] Nuevo número generado: ${docNum}`);
             }
 
+            // --- VALIDAR DISPONIBILIDAD DE STOCK ---
+            if (data.renglones && Array.isArray(data.renglones) && data.renglones.length > 0) {
+                const requestedStock = {};
+                for (const item of data.renglones) {
+                    const coArt = String(item.co_art || '').trim().toUpperCase();
+                    const coAlma = String(item.co_alma || defAlma).trim().toUpperCase();
+                    const qty = Number(item.cantidad || 0);
+                    if (!coArt || qty <= 0) continue;
+                    
+                    const key = `${coArt}|${coAlma}`;
+                    if (!requestedStock[key]) {
+                        requestedStock[key] = {
+                            co_art: coArt,
+                            co_alma: coAlma,
+                            art_des: item.art_des || coArt,
+                            qty: 0
+                        };
+                    }
+                    requestedStock[key].qty += qty;
+                }
+
+                const uniqueArticulos = [...new Set(Object.values(requestedStock).map(r => r.co_art))];
+                if (uniqueArticulos.length > 0) {
+                    const requestStockCheck = new sql.Request(transaction);
+                    const artParams = [];
+                    uniqueArticulos.forEach((art, idx) => {
+                        const paramName = `art_${idx}`;
+                        requestStockCheck.input(paramName, sql.Char(30), padProfit(art, 30));
+                        artParams.push(`@${paramName}`);
+                    });
+
+                    const resStockCheck = await requestStockCheck.query(`
+                        SELECT 
+                            RTRIM(a.co_art) AS co_art,
+                            RTRIM(a.tipo) AS tipo_art,
+                            RTRIM(a.co_lin) AS co_lin,
+                            RTRIM(s.co_alma) AS co_alma,
+                            ISNULL(SUM(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END), 0) -
+                            ISNULL(SUM(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END), 0) AS stock_disponible
+                        FROM saArticulo a
+                        LEFT JOIN saStockAlmacen s ON a.co_art = s.co_art
+                        WHERE a.co_art IN (${artParams.join(', ')})
+                        GROUP BY a.co_art, a.tipo, a.co_lin, s.co_alma
+                    `);
+
+                    const dbStockMap = {};
+                    const articleInfo = {};
+
+                    resStockCheck.recordset.forEach(row => {
+                        const art = String(row.co_art || '').trim().toUpperCase();
+                        const alma = String(row.co_alma || '').trim().toUpperCase();
+                        const stockDisp = Number(row.stock_disponible || 0);
+
+                        articleInfo[art] = {
+                            tipo_art: String(row.tipo_art || '').trim().toUpperCase(),
+                            co_lin: String(row.co_lin || '').trim().toUpperCase()
+                        };
+
+                        if (alma) {
+                            dbStockMap[`${art}|${alma}`] = stockDisp;
+                        }
+                    });
+
+                    const errors = [];
+                    for (const key of Object.keys(requestedStock)) {
+                        const req = requestedStock[key];
+                        const art = req.co_art;
+                        const alma = req.co_alma;
+                        const requestedQty = req.qty;
+
+                        const info = articleInfo[art];
+                        if (!info) {
+                            errors.push(`El artículo "${req.art_des}" (${art}) no existe en el catálogo.`);
+                            continue;
+                        }
+
+                        if (info.tipo_art === 'S' || info.tipo_art === '2' || info.co_lin === '09') {
+                            continue;
+                        }
+
+                        const availableStock = dbStockMap[`${art}|${alma}`] || 0;
+                        if (availableStock < requestedQty) {
+                            errors.push(`El artículo "${req.art_des}" (${art}) en el almacén "${alma}" no tiene suficiente stock disponible. Disponible: ${availableStock.toFixed(2)}, solicitado: ${requestedQty.toFixed(2)}.`);
+                        }
+                    }
+
+                    if (errors.length > 0) {
+                        throw new Error(`Validación de Stock Fallida:\n` + errors.join('\n'));
+                    }
+                }
+            }
+
             let isUSD = data.showUSD === true; 
             if (data.showUSD === undefined) {
                 isUSD = String(data.co_mone || existingHeader?.co_mone || '').includes('US');
