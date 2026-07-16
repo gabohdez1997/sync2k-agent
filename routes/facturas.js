@@ -62,7 +62,7 @@ router.get('/', async (req, res) => {
                            RTRIM(f.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                            f.fec_emis, f.fec_venc, f.fec_reg, f.fe_us_in AS fec_us_in, f.fe_us_mo AS fec_us_mo, f.anulado,
                            RTRIM(f.co_mone) AS co_mone, f.tasa, f.total_neto, f.monto_imp,
-                           RTRIM(f.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(f.co_us_in) AS co_us_in
+                           RTRIM(f.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(f.co_us_in) AS co_us_in, RTRIM(f.co_sucu_in) AS co_sucu_in
                     FROM saFacturaVenta f
                     LEFT JOIN saCliente cl ON f.co_cli = cl.co_cli
                     LEFT JOIN saVendedor v ON f.co_ven = v.co_ven
@@ -114,7 +114,7 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
                                RTRIM(cl.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 
                                cl.contribu_e, cl.porc_esp,
-                               RTRIM(f.co_us_in) AS co_us_in
+                               RTRIM(f.co_us_in) AS co_us_in, RTRIM(f.co_sucu_in) AS co_sucu_in
                         FROM saFacturaVenta f
                         LEFT JOIN saCliente      cl ON f.co_cli  = cl.co_cli
                         LEFT JOIN saVendedor     v  ON f.co_ven  = v.co_ven
@@ -387,15 +387,18 @@ router.post('/', async (req, res) => {
 
         const totalNetoBs = Math.round((totalBrutoBs + totalImpBs + igtfBs) * 100) / 100;
 
-        // 4. Determinar Sucursal (co_sucu_in, co_sucu_mo) según requerimiento de IVA
-        // Si el totalImpBs === 0 (pedido exento o sin IVA), co_sucu_in y co_sucu_mo es la sucursal no-default.
-        // Si totalImpBs > 0 (tiene IVA), co_sucu_in y co_sucu_mo es la sucursal default.
+        // 4. Determinar Sucursal (co_sucu_in, co_sucu_mo) según requerimiento de IVA o sucursal forzada (force_sucu)
         const branchCodes = srv.profit_branch_codes || [];
         const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: defSucu };
         const nonDefaultCodeObj = branchCodes.find(b => b.is_default === false) || defaultCodeObj;
 
-        const sucuCode = totalImpBs === 0 ? nonDefaultCodeObj.code : defaultCodeObj.code;
-        console.log(`🏢 [AGENT] Resolviendo sucursal. IVA = ${totalImpBs}. Sucu asignada = ${sucuCode} (Default = ${defaultCodeObj.code}, Non-Default = ${nonDefaultCodeObj.code})`);
+        let sucuCode;
+        if (data.force_sucu) {
+            sucuCode = data.force_sucu;
+        } else {
+            sucuCode = totalImpBs === 0 ? nonDefaultCodeObj.code : defaultCodeObj.code;
+        }
+        console.log(`🏢 [AGENT] Resolviendo sucursal. IVA = ${totalImpBs}, force_sucu = ${data.force_sucu || 'N/A'}. Sucu asignada = ${sucuCode} (Default = ${defaultCodeObj.code}, Non-Default = ${nonDefaultCodeObj.code})`);
 
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
