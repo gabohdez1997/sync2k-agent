@@ -592,10 +592,7 @@ router.post('/', async (req, res) => {
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
 
-                // 1. Diferencial Cambiario para facturas de días anteriores (fec_emis < fecha actual)
-                const todayStr = new Date().toISOString().split('T')[0];
-                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
-                const rateCobro = Number(data.tasa || 1);
+                let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
 
                 if (isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     // Llevar saldo en Bs a USD según la tasa del documento
@@ -607,13 +604,14 @@ router.post('/', async (req, res) => {
 
                     // La factura original se amortiza exactamente por su saldo en Bs original (dejándola en Bs 0,00)
                     finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
+                    totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                 } else {
                     // Control de Saldo Máximo (Capping): El rebaje total no puede exceder el saldo actual del documento
-                    let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     if (totalRebaje > docSaldo) {
                         const excess = totalRebaje - docSaldo;
                         finalMontCob = Math.max(0, finalMontCob - excess);
                         diffBs = diffBs + excess;
+                        totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     }
                 }
 
@@ -1480,9 +1478,7 @@ router.put('/:cob_num', async (req, res) => {
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
 
-                // Diferencial Cambiario para facturas de días anteriores en edición (fec_emis < fecha actual)
-                const todayStr = new Date().toISOString().split('T')[0];
-                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
+                let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
 
                 if (isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     const saldoUsd = docSaldo / docTasa;
@@ -1491,12 +1487,13 @@ router.put('/:cob_num', async (req, res) => {
 
                     // La factura original se amortiza exactamente por su saldo en Bs original
                     finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
+                    totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                 } else {
-                    let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     if (totalRebaje > docSaldo) {
                         const excess = totalRebaje - docSaldo;
                         finalMontCob = Math.max(0, finalMontCob - excess);
                         diffBs = diffBs + excess;
+                        totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     }
                 }
 
