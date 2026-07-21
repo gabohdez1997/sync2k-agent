@@ -593,6 +593,9 @@ router.post('/', async (req, res) => {
                 let diffBs = 0;
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                const todayStr = new Date().toISOString().split('T')[0];
+                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
+                const rateCobro = Number(data.tasa || 1);
 
                 if (isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     // Llevar saldo en Bs a USD según la tasa del documento
@@ -1479,6 +1482,8 @@ router.put('/:cob_num', async (req, res) => {
                 let diffBs = 0;
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                const todayStr = new Date().toISOString().split('T')[0];
+                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
 
                 if (isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     const saldoUsd = docSaldo / docTasa;
