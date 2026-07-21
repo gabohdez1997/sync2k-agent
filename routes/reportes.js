@@ -1244,4 +1244,92 @@ router.get('/articulos-precios', async (req, res) => {
     }
 });
 
+// --- REPORT CANTIDAD REAL VENDIDA POR ARTICULO ---
+router.get('/articulos-ventas', async (req, res) => {
+    try {
+        const { sede, search, co_lin, co_cat, fecha_desde, fecha_hasta } = req.query;
+        const servers = getServers();
+        const targets = sede ? servers.filter(s => s.id === sede) : servers;
+
+        if (targets.length === 0) {
+            return res.status(200).json({ success: true, data: [] });
+        }
+
+        const srv = targets[0];
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const r = pool.request();
+
+        // Rango de fechas por defecto: mes en curso
+        const today = new Date();
+        const defaultDesde = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().split('T')[0];
+        const defaultHasta = today.toISOString().split('T')[0];
+
+        const fDesde = fecha_desde || defaultDesde;
+        const fHasta = fecha_hasta || defaultHasta;
+
+        r.input('fecha_desde', sql.SmallDateTime, fDesde);
+        r.input('fecha_hasta', sql.SmallDateTime, fHasta);
+
+        let whereClauses = [];
+        if (search) {
+            r.input('search', sql.VarChar, `%${search}%`);
+            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search)");
+        }
+        if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
+            r.input('co_lin', sql.VarChar, co_lin);
+            whereClauses.push("a.co_lin = @co_lin");
+        }
+        if (co_cat && co_cat !== 'all' && co_cat !== 'null') {
+            r.input('co_cat', sql.VarChar, co_cat);
+            whereClauses.push("a.co_cat = @co_cat");
+        }
+
+        const whereSQL = whereClauses.length > 0 ? whereClauses.join(" AND ") : "1=1";
+
+        const querySQL = `
+            SELECT 
+                RTRIM(a.co_art) AS co_art, 
+                RTRIM(a.art_des) AS art_des,
+                RTRIM(a.co_lin) AS co_lin,
+                RTRIM(a.co_cat) AS co_cat,
+                a.anulado,
+                ISNULL(sales.qty, 0) AS cant_facturada,
+                ISNULL(devs.qty, 0) AS cant_devuelta,
+                (ISNULL(sales.qty, 0) - ISNULL(devs.qty, 0)) AS cant_real_vendida
+            FROM saArticulo a
+            LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+            LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+            OUTER APPLY (
+                SELECT SUM(r.total_art) AS qty
+                FROM saFacturaVentaReng r
+                INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                WHERE r.co_art = a.co_art
+                  AND f.anulado = 0
+                  AND f.fec_emis >= @fecha_desde
+                  AND f.fec_emis <= @fecha_hasta
+            ) sales
+            OUTER APPLY (
+                SELECT SUM(d.total_art) AS qty
+                FROM saDevolucionClienteReng d
+                INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
+                WHERE d.co_art = a.co_art
+                  AND c.anulado = 0
+                  AND c.fec_emis >= @fecha_desde
+                  AND c.fec_emis <= @fecha_hasta
+            ) devs
+            WHERE ${whereSQL} AND (sales.qty > 0 OR devs.qty > 0)
+            ORDER BY a.co_art ASC
+        `;
+
+        const resData = await r.query(querySQL);
+        return res.status(200).json({
+            success: true,
+            data: resData.recordset
+        });
+    } catch (error) {
+        console.error('[REPORTES/ARTICULOS-VENTAS ERROR]:', error.message);
+        res.status(500).json({ success: false, message: 'Error al consultar Cantidad Real Vendida por Artículo.', error: error.message });
+    }
+});
+
 module.exports = router;
