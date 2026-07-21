@@ -1273,7 +1273,7 @@ router.get('/articulos-ventas', async (req, res) => {
         let whereClauses = [];
         if (search) {
             r.input('search', sql.VarChar, `%${search}%`);
-            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search)");
+            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR a.modelo LIKE @search OR a.ref LIKE @search)");
         }
         if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
             r.input('co_lin', sql.VarChar, co_lin);
@@ -1290,8 +1290,8 @@ router.get('/articulos-ventas', async (req, res) => {
             SELECT 
                 RTRIM(a.co_art) AS co_art, 
                 RTRIM(a.art_des) AS art_des,
-                RTRIM(a.co_lin) AS co_lin,
-                RTRIM(a.co_cat) AS co_cat,
+                RTRIM(ISNULL(a.modelo, '')) AS modelo,
+                RTRIM(ISNULL(a.ref, '')) AS referencia,
                 a.anulado,
                 ISNULL(sales.qty, 0) AS cant_facturada,
                 ISNULL(devs.qty, 0) AS cant_devuelta,
