@@ -40,7 +40,7 @@ router.post('/', async (req, res) => {
 
             // 2. Obtener el próximo consecutivo para AJUS_NUM
             let ajueNum = null;
-            for (const consecName of ['AJUS_NUM', 'AJUS', 'AJU', 'AJUSTE']) {
+            for (const consecName of ['AJUS_NUM', 'AJUS', 'AJU', 'AJUSTE', 'AJUSTES', 'AJU_ENT', 'AJU_SAL']) {
                 try {
                     const consecRes = await transaction.request()
                         .input('sCo_Consecutivo', sql.Char(16), padProfit(consecName, 16))
@@ -63,7 +63,7 @@ router.post('/', async (req, res) => {
                         WHERE co_serie = (
                             SELECT TOP 1 co_serie
                             FROM saConsecutivo
-                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) IN ('AJUS_NUM', 'AJUS', 'AJUSTE')
+                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) IN ('AJUS_NUM', 'AJUS', 'AJUSTE', 'AJUSTES', 'AJU_ENT', 'AJU_SAL')
                                OR UPPER(LTRIM(RTRIM(co_consecutivo))) LIKE '%AJU%'
                         )
                     `);
@@ -90,12 +90,12 @@ router.post('/', async (req, res) => {
             if (!ajueNum) {
                 try {
                     const resMax = await transaction.request().query(`
-                        SELECT ISNULL(MAX(CASE WHEN ISNUMERIC(ajue_num) = 1 THEN CAST(ajue_num AS INT) ELSE 0 END), 0) + 1 as max_num
+                        SELECT ISNULL(MAX(CASE WHEN ISNUMERIC(LTRIM(RTRIM(ajue_num))) = 1 THEN CAST(LTRIM(RTRIM(ajue_num)) AS BIGINT) ELSE 0 END), 0) + 1 as max_num
                         FROM saAjuste
                     `);
                     if (resMax.recordset && resMax.recordset[0]?.max_num) {
-                        const proxN = Number(resMax.recordset[0].max_num || 1);
-                        ajueNum = proxN.toString().padStart(8, '0');
+                        const proxN = String(resMax.recordset[0].max_num);
+                        ajueNum = proxN.padStart(8, '0');
                     }
                 } catch (eMax) {
                     console.error('[AJUSTES] Falló fallback MAX(ajue_num):', eMax.message);
