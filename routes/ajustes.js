@@ -30,6 +30,25 @@ router.post('/', async (req, res) => {
 
     try {
         const pool = await getPool(data.branch_id, req.sqlAuth);
+
+        // 0. Verificar si todos los artículos existen en la tabla saArticulo de esta sede
+        for (const reng of data.renglones) {
+            const coArtTrim = String(reng.co_art || '').trim();
+            if (!coArtTrim) continue;
+
+            const artCheckRes = await pool.request()
+                .input('co_art_val', sql.Char(30), padProfit(coArtTrim, 30))
+                .query('SELECT TOP 1 co_art, RTRIM(art_des) as art_des FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_val))');
+
+            if (!artCheckRes.recordset || artCheckRes.recordset.length === 0) {
+                const artName = reng.art_des ? ` (${String(reng.art_des).trim()})` : '';
+                return res.status(400).json({
+                    success: false,
+                    message: `El artículo "${coArtTrim}"${artName} no existe en el catálogo de inventario de esta sede.`
+                });
+            }
+        }
+
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
@@ -106,8 +125,8 @@ router.post('/', async (req, res) => {
                 throw new Error('No se pudo generar el consecutivo para el ajuste de inventario en Profit Plus.');
             }
 
-            const sucuCode = data.co_sucu_in || '01';
-            const auditUser = (data.co_us_in || 'PROFIT').substring(0, 6);
+            const sucuCode = String(data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01').trim();
+            const auditUser = String(data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT').trim().substring(0, 6);
             const today = new Date();
             const motivoText = (data.motivo || (isSalida ? 'Traslado Salida entre Sedes' : 'Traslado Entrada entre Sedes')).substring(0, 80);
 
