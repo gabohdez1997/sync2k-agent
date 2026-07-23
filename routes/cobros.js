@@ -521,7 +521,24 @@ router.post('/', async (req, res) => {
                     totalAbonoBs += Number(line.mont_cob || 0);
                 });
             }
-            const finalMontoHeader = collectionMone === 'USD' ? Math.round((totalAbonoBs / Number(data.tasa || 1)) * 100) / 100 : totalAbonoBs;
+
+            let totalFormasPagoBs = 0;
+            if (data.formas_pago && Array.isArray(data.formas_pago)) {
+                data.formas_pago.forEach((fp) => {
+                    totalFormasPagoBs += Math.abs(Number(fp.mont_doc || fp.monto || 0));
+                });
+            }
+
+            let finalMontoHeader = 0;
+            if (data.formas_pago && data.formas_pago.length > 0) {
+                finalMontoHeader = collectionMone === 'USD' 
+                    ? Math.round((totalFormasPagoBs / Number(data.tasa || 1)) * 100) / 100 
+                    : totalFormasPagoBs;
+            } else {
+                finalMontoHeader = Math.max(0, collectionMone === 'USD' 
+                    ? Math.round((totalAbonoBs / Number(data.tasa || 1)) * 100) / 100 
+                    : totalAbonoBs);
+            }
             rH.input('deMonto', sql.Decimal(18, 2), finalMontoHeader);
             rH.input('sDis_cen', sql.VarChar(sql.MAX), null);
             rH.input('sDescrip', sql.VarChar(60), (data.descrip || 'COBRO DE CLIENTE').substring(0, 60));
@@ -1407,7 +1424,24 @@ router.put('/:cob_num', async (req, res) => {
                     totalAbonoBs += Number(line.mont_cob || 0);
                 });
             }
-            const finalMontoHeader = collectionMone === 'USD' ? Math.round((totalAbonoBs / rateCobro) * 100) / 100 : totalAbonoBs;
+
+            let totalFormasPagoBs = 0;
+            if (data.formas_pago && Array.isArray(data.formas_pago)) {
+                data.formas_pago.forEach((fp) => {
+                    totalFormasPagoBs += Math.abs(Number(fp.mont_doc || fp.monto || 0));
+                });
+            }
+
+            let finalMontoHeader = 0;
+            if (data.formas_pago && data.formas_pago.length > 0) {
+                finalMontoHeader = collectionMone === 'USD' 
+                    ? Math.round((totalFormasPagoBs / rateCobro) * 100) / 100 
+                    : totalFormasPagoBs;
+            } else {
+                finalMontoHeader = Math.max(0, collectionMone === 'USD' 
+                    ? Math.round((totalAbonoBs / rateCobro) * 100) / 100 
+                    : totalAbonoBs);
+            }
 
             await transaction.request()
                 .input('cob_num', sql.Char(20), cobNum)

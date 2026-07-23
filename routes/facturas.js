@@ -62,8 +62,10 @@ router.get('/', async (req, res) => {
                            RTRIM(f.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                            f.fec_emis, f.fec_venc, f.fec_reg, f.fe_us_in AS fec_us_in, f.fe_us_mo AS fec_us_mo, f.anulado,
                            RTRIM(f.co_mone) AS co_mone, f.tasa, f.total_neto, f.monto_imp,
+                           ISNULL(d.saldo, 0) AS saldo,
                            RTRIM(f.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(f.co_us_in) AS co_us_in, RTRIM(f.co_sucu_in) AS co_sucu_in
                     FROM saFacturaVenta f
+                    LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(d.nro_doc)) AND LTRIM(RTRIM(d.co_tipo_doc)) = 'FACT'
                     LEFT JOIN saCliente cl ON f.co_cli = cl.co_cli
                     LEFT JOIN saVendedor v ON f.co_ven = v.co_ven
                     WHERE ${whereSQL}
