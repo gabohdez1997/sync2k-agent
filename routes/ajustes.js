@@ -126,12 +126,21 @@ router.post('/', async (req, res) => {
                 if (qty <= 0) continue;
 
                 // Obtener unidad principal del artículo si no viene especificada
-                let coUni = reng.co_uni ? padProfit(reng.co_uni, 6) : padProfit('UNI', 6);
-                const artUniRes = await transaction.request()
-                    .input('co_art_check', sql.Char(30), coArt)
-                    .query('SELECT TOP 1 co_uni FROM saArticulo WHERE co_art = @co_art_check');
-                if (artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
-                    coUni = padProfit(artUniRes.recordset[0].co_uni, 6);
+                let coUni = reng.co_uni ? padProfit(reng.co_uni, 6) : null;
+                if (!coUni) {
+                    try {
+                        const artUniRes = await transaction.request()
+                            .input('co_art_check', sql.Char(30), coArt)
+                            .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE co_art = @co_art_check ORDER BY uni_principal DESC');
+                        if (artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
+                            coUni = padProfit(artUniRes.recordset[0].co_uni, 6);
+                        }
+                    } catch (e) {
+                        console.warn('[AJUSTES] Falló consulta en saArtUnidad:', e.message);
+                    }
+                }
+                if (!coUni) {
+                    coUni = padProfit('UND', 6);
                 }
 
                 const rengGuidRes = await transaction.request().query('SELECT NEWID() AS guid');
