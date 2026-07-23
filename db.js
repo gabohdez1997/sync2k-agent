@@ -189,6 +189,7 @@ async function getExchangeRate(pool) {
 module.exports = { 
   sql, 
   getPool, 
+  pgPool,
   initServers,
   getMasterPool, 
   getServers, 

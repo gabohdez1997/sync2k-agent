@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers } = require('../db');
+const { sql, getPool, pgPool, getServers } = require('../db');
 
 function padProfit(str, length) {
     if (!str) return ' '.repeat(length);
@@ -171,27 +171,60 @@ router.post('/', async (req, res) => {
             coMoneUSD = String(data.co_mone).trim();
         }
 
-        let rawSucu = data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01';
+        // RESOLVER SUCURSAL Y USUARIO DE AUDITORÍA
+        let sucuCode = null;
+
+        let rawSucu = data.co_sucu_in || data.co_sucu_mo || data.sucu_code;
         if (Array.isArray(rawSucu)) rawSucu = rawSucu[0];
-        let sucuCode = String(rawSucu).split(',')[0].trim().substring(0, 6) || '01';
+        if (rawSucu && typeof rawSucu === 'string' && rawSucu.trim()) {
+            sucuCode = rawSucu.trim().split(',')[0].trim();
+        }
 
-        let rawUser = data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT';
-        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
+        // Consultar sucursal por defecto de la sede en PostgreSQL (profit_branch_codes)
+        if (!sucuCode && data.branch_id && pgPool) {
+            try {
+                const { rows } = await pgPool.query('SELECT profit_branch_codes FROM branches WHERE id = $1', [data.branch_id]);
+                if (rows.length > 0 && rows[0].profit_branch_codes) {
+                    let codes = rows[0].profit_branch_codes;
+                    if (typeof codes === 'string') {
+                        try { codes = JSON.parse(codes); } catch(e) { codes = [codes]; }
+                    }
+                    if (Array.isArray(codes) && codes.length > 0 && codes[0]) {
+                        sucuCode = String(codes[0]).trim();
+                    }
+                }
+            } catch (ePg) {
+                console.warn('[AJUSTES] Falló consulta de profit_branch_codes en PG:', ePg.message);
+            }
+        }
 
-        // Validar que usuario y sucursal existan en la BD de Profit Plus
+        // Validar y resolver sucursal en saSucursal de MS-SQL
         try {
-            const sucuCheck = await pool.request()
-                .input('suc', sql.Char(6), padProfit(sucuCode, 6))
-                .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
-            if (!sucuCheck.recordset || sucuCheck.recordset.length === 0) {
+            if (sucuCode) {
+                const sucuCheck = await pool.request()
+                    .input('suc', sql.Char(6), padProfit(sucuCode, 6))
+                    .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
+                if (sucuCheck.recordset && sucuCheck.recordset.length > 0) {
+                    sucuCode = sucuCheck.recordset[0].co_sucur.trim();
+                } else {
+                    sucuCode = null;
+                }
+            }
+
+            if (!sucuCode) {
                 const defSuc = await pool.request().query('SELECT TOP 1 co_sucur FROM saSucursal ORDER BY fe_us_in ASC');
-                if (defSuc.recordset && defSuc.recordset[0]?.co_sucur) {
+                if (defSuc.recordset && defSuc.recordset.length > 0 && defSuc.recordset[0].co_sucur) {
                     sucuCode = defSuc.recordset[0].co_sucur.trim();
                 }
             }
         } catch (eAuditCheck) {
             console.warn('[AJUSTES] Falló verificación de sucursal en Profit:', eAuditCheck.message);
         }
+
+        if (!sucuCode) sucuCode = '01';
+
+        let rawUser = data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT';
+        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
 
         const today = new Date();
         const motivoText = (data.motivo || (isSalida ? 'Traslado Salida entre Sedes' : 'Traslado Entrada entre Sedes')).substring(0, 80);
@@ -498,25 +531,60 @@ router.put('/:ajue_num', async (req, res) => {
 
         const oldRenglones = oldRengRes.recordset || [];
 
-        let rawSucu = data.co_sucu_mo || data.co_sucu_in || data.sucu_code || '01';
+        // RESOLVER SUCURSAL Y USUARIO DE AUDITORÍA
+        let sucuCode = null;
+
+        let rawSucu = data.co_sucu_mo || data.co_sucu_in || data.sucu_code;
         if (Array.isArray(rawSucu)) rawSucu = rawSucu[0];
-        let sucuCode = String(rawSucu).split(',')[0].trim().substring(0, 6) || '01';
+        if (rawSucu && typeof rawSucu === 'string' && rawSucu.trim()) {
+            sucuCode = rawSucu.trim().split(',')[0].trim();
+        }
 
-        let rawUser = data.co_us_mo || data.co_us_in || data.profit_user || 'PROFIT';
-        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
+        // Consultar sucursal por defecto de la sede en PostgreSQL (profit_branch_codes)
+        if (!sucuCode && data.branch_id && pgPool) {
+            try {
+                const { rows } = await pgPool.query('SELECT profit_branch_codes FROM branches WHERE id = $1', [data.branch_id]);
+                if (rows.length > 0 && rows[0].profit_branch_codes) {
+                    let codes = rows[0].profit_branch_codes;
+                    if (typeof codes === 'string') {
+                        try { codes = JSON.parse(codes); } catch(e) { codes = [codes]; }
+                    }
+                    if (Array.isArray(codes) && codes.length > 0 && codes[0]) {
+                        sucuCode = String(codes[0]).trim();
+                    }
+                }
+            } catch (ePg) {
+                console.warn('[AJUSTES] Falló consulta de profit_branch_codes en PG:', ePg.message);
+            }
+        }
 
-        // Validar que sucursal exista en la BD de Profit Plus
+        // Validar y resolver sucursal en saSucursal de MS-SQL
         try {
-            const sucuCheck = await pool.request()
-                .input('suc', sql.Char(6), padProfit(sucuCode, 6))
-                .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
-            if (!sucuCheck.recordset || sucuCheck.recordset.length === 0) {
+            if (sucuCode) {
+                const sucuCheck = await pool.request()
+                    .input('suc', sql.Char(6), padProfit(sucuCode, 6))
+                    .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
+                if (sucuCheck.recordset && sucuCheck.recordset.length > 0) {
+                    sucuCode = sucuCheck.recordset[0].co_sucur.trim();
+                } else {
+                    sucuCode = null;
+                }
+            }
+
+            if (!sucuCode) {
                 const defSuc = await pool.request().query('SELECT TOP 1 co_sucur FROM saSucursal ORDER BY fe_us_in ASC');
-                if (defSuc.recordset && defSuc.recordset[0]?.co_sucur) {
+                if (defSuc.recordset && defSuc.recordset.length > 0 && defSuc.recordset[0].co_sucur) {
                     sucuCode = defSuc.recordset[0].co_sucur.trim();
                 }
             }
-        } catch (eAuditCheck) {}
+        } catch (eAuditCheck) {
+            console.warn('[AJUSTES] Falló verificación de sucursal en Profit:', eAuditCheck.message);
+        }
+
+        if (!sucuCode) sucuCode = '01';
+
+        let rawUser = data.co_us_mo || data.co_us_in || data.profit_user || 'PROFIT';
+        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
 
         // Pre-consultar y validar unidades de medida contra saArtUnidad para evitar FK_saAjusteReng_saArtUnidad
         for (const reng of data.renglones) {
