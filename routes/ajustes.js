@@ -193,8 +193,8 @@ router.post('/', async (req, res) => {
 
                         IF @@ROWCOUNT = 0
                         BEGIN
-                            INSERT INTO saStockAlmacen (co_art, co_alma, tipo, stock, rowguid)
-                            VALUES (@co_art_stk, @co_alma_stk, 'ACT', CASE WHEN @qty_stk < 0 THEN 0 ELSE @qty_stk END, NEWID());
+                            INSERT INTO saStockAlmacen (co_art, co_alma, tipo, stock)
+                            VALUES (@co_art_stk, @co_alma_stk, 'ACT', CASE WHEN @qty_stk < 0 THEN 0 ELSE @qty_stk END);
                         END
                     `);
 
