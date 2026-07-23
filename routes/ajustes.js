@@ -61,8 +61,11 @@ router.post('/', async (req, res) => {
                     .input('sCo_Consecutivo', sql.Char(16), padProfit(consecName, 16))
                     .execute('pConsecutivoProximo');
                 if (consecRes.recordset && consecRes.recordset[0]?.ProximoConsecutivo) {
-                    ajueNum = consecRes.recordset[0].ProximoConsecutivo.trim();
-                    if (ajueNum) break;
+                    const rawVal = consecRes.recordset[0].ProximoConsecutivo.trim();
+                    if (rawVal) {
+                        ajueNum = /^\d+$/.test(rawVal) ? rawVal.padStart(10, '0') : rawVal;
+                        break;
+                    }
                 }
             } catch (e) {
                 // Continuar con el siguiente candidato fuera de transacción
@@ -85,7 +88,7 @@ router.post('/', async (req, res) => {
                 const corrRow = resCorr.recordset[0] || null;
                 if (corrRow && corrRow.prox_n) {
                     const proxN = Number(corrRow.prox_n || 0);
-                    ajueNum = proxN.toString().padStart(8, '0');
+                    ajueNum = proxN.toString().padStart(10, '0');
                 } else {
                     const resDirect = await pool.request().query(`
                         UPDATE saSerie
@@ -94,7 +97,7 @@ router.post('/', async (req, res) => {
                         WHERE LTRIM(RTRIM(co_serie)) = '001'
                     `);
                     if (resDirect.recordset && resDirect.recordset.length > 0) {
-                        ajueNum = Number(resDirect.recordset[0].prox_n).toString().padStart(8, '0');
+                        ajueNum = Number(resDirect.recordset[0].prox_n).toString().padStart(10, '0');
                     }
                 }
             } catch (eSerie) {
@@ -110,11 +113,15 @@ router.post('/', async (req, res) => {
                 `);
                 if (resMax.recordset && resMax.recordset[0]?.max_num) {
                     const proxN = String(resMax.recordset[0].max_num);
-                    ajueNum = proxN.padStart(8, '0');
+                    ajueNum = proxN.padStart(10, '0');
                 }
             } catch (eMax) {
                 console.error('[AJUSTES] Falló fallback MAX(ajue_num):', eMax.message);
             }
+        }
+
+        if (ajueNum && /^\d+$/.test(ajueNum)) {
+            ajueNum = ajueNum.padStart(10, '0');
         }
 
         if (!ajueNum) {
