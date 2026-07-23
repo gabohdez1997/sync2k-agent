@@ -52,7 +52,7 @@ router.post('/', async (req, res) => {
         const isSalida = String(data.tipo || '').toUpperCase() === 'SAL' || String(data.co_tipo || '').trim() === '02';
         const coTipo = isSalida ? '02' : '01';
 
-        // 1. Obtener el próximo consecutivo para AJUS_NUM (fuera de la transacción para no abortar si falla un Sp)
+        // 1. Obtener el próximo consecutivo para AJUS_NUM (fuera de la transacción)
         let ajueNum = null;
         for (const consecName of ['AJUS_NUM', 'AJUS', 'AJU', 'AJUSTE', 'AJUSTES', 'AJU_ENT', 'AJU_SAL']) {
             try {
@@ -170,8 +170,34 @@ router.post('/', async (req, res) => {
             coMoneUSD = String(data.co_mone).trim();
         }
 
-        const sucuCode = String(data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01').trim();
-        const auditUser = String(data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT').trim().substring(0, 6);
+        let sucuCode = String(data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01').trim();
+        let auditUser = String(data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT').trim().substring(0, 6);
+
+        // Validar que usuario y sucursal existan en la BD de Profit Plus
+        try {
+            const userCheck = await pool.request()
+                .input('usr', sql.Char(6), padProfit(auditUser, 6))
+                .query('SELECT TOP 1 co_us FROM saUsuario WHERE LTRIM(RTRIM(co_us)) = LTRIM(RTRIM(@usr))');
+            if (!userCheck.recordset || userCheck.recordset.length === 0) {
+                const defUsr = await pool.request().query('SELECT TOP 1 co_us FROM saUsuario ORDER BY fe_us_in ASC');
+                if (defUsr.recordset && defUsr.recordset[0]?.co_us) {
+                    auditUser = defUsr.recordset[0].co_us.trim();
+                }
+            }
+
+            const sucuCheck = await pool.request()
+                .input('suc', sql.Char(6), padProfit(sucuCode, 6))
+                .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
+            if (!sucuCheck.recordset || sucuCheck.recordset.length === 0) {
+                const defSuc = await pool.request().query('SELECT TOP 1 co_sucur FROM saSucursal ORDER BY fe_us_in ASC');
+                if (defSuc.recordset && defSuc.recordset[0]?.co_sucur) {
+                    sucuCode = defSuc.recordset[0].co_sucur.trim();
+                }
+            }
+        } catch (eAuditCheck) {
+            console.warn('[AJUSTES] Falló verificación de usuario/sucursal en Profit:', eAuditCheck.message);
+        }
+
         const today = new Date();
         const motivoText = (data.motivo || (isSalida ? 'Traslado Salida entre Sedes' : 'Traslado Entrada entre Sedes')).substring(0, 80);
 
@@ -301,15 +327,15 @@ router.post('/', async (req, res) => {
             });
 
         } catch (err) {
-            await transaction.rollback();
-            console.error('❌ [AJUSTES ERROR TRANSACTION]:', err.message);
+            console.error('❌ [AJUSTES DETALLE ERROR REAL]:', err);
+            try { await transaction.rollback(); } catch (rbErr) {}
             throw err;
         }
     } catch (error) {
-        console.error('❌ [AJUSTES ERROR CRÍTICO]:', error.message);
+        console.error('❌ [AJUSTES ERROR CRÍTICO]:', error.message || error);
         return res.status(500).json({
             success: false,
-            message: 'Error al registrar el ajuste de inventario en Profit Plus.',
+            message: error.message || 'Error al registrar el ajuste de inventario en Profit Plus.',
             error: error.message
         });
     }
@@ -351,6 +377,19 @@ router.post('/:ajue_num/anular', async (req, res) => {
 
         const renglones = rengRes.recordset || [];
 
+        let auditUser = String(req.body.co_us_in || req.body.profit_user || 'PROFIT').trim().substring(0, 6);
+        try {
+            const userCheck = await pool.request()
+                .input('usr', sql.Char(6), padProfit(auditUser, 6))
+                .query('SELECT TOP 1 co_us FROM saUsuario WHERE LTRIM(RTRIM(co_us)) = LTRIM(RTRIM(@usr))');
+            if (!userCheck.recordset || userCheck.recordset.length === 0) {
+                const defUsr = await pool.request().query('SELECT TOP 1 co_us FROM saUsuario ORDER BY fe_us_in ASC');
+                if (defUsr.recordset && defUsr.recordset[0]?.co_us) {
+                    auditUser = defUsr.recordset[0].co_us.trim();
+                }
+            }
+        } catch (eUsr) {}
+
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
@@ -372,7 +411,6 @@ router.post('/:ajue_num/anular', async (req, res) => {
                     `);
             }
 
-            const auditUser = String(req.body.co_us_in || req.body.profit_user || 'PROFIT').trim().substring(0, 6);
             await transaction.request()
                 .input('ajue_num', sql.Char(20), padProfit(ajue_num, 20))
                 .input('co_us_mo', sql.Char(6), padProfit(auditUser, 6))
@@ -390,16 +428,16 @@ router.post('/:ajue_num/anular', async (req, res) => {
             });
 
         } catch (err) {
-            await transaction.rollback();
-            console.error('❌ [AJUSTES VOID ERROR]:', err.message);
+            console.error('❌ [AJUSTES VOID ERROR REAL]:', err);
+            try { await transaction.rollback(); } catch (rbErr) {}
             throw err;
         }
 
     } catch (error) {
-        console.error('❌ [AJUSTES VOID CRITICAL]:', error.message);
+        console.error('❌ [AJUSTES VOID CRITICAL]:', error.message || error);
         return res.status(500).json({
             success: false,
-            message: `Error al anular el ajuste de inventario ${ajue_num}.`,
+            message: error.message || `Error al anular el ajuste de inventario ${ajue_num}.`,
             error: error.message
         });
     }
@@ -462,6 +500,32 @@ router.put('/:ajue_num', async (req, res) => {
 
         const oldRenglones = oldRengRes.recordset || [];
 
+        let sucuCode = String(data.co_sucu_mo || data.co_sucu_in || '01').trim();
+        let auditUser = String(data.co_us_mo || data.co_us_in || 'PROFIT').trim().substring(0, 6);
+
+        // Validar que usuario y sucursal existan en la BD de Profit Plus
+        try {
+            const userCheck = await pool.request()
+                .input('usr', sql.Char(6), padProfit(auditUser, 6))
+                .query('SELECT TOP 1 co_us FROM saUsuario WHERE LTRIM(RTRIM(co_us)) = LTRIM(RTRIM(@usr))');
+            if (!userCheck.recordset || userCheck.recordset.length === 0) {
+                const defUsr = await pool.request().query('SELECT TOP 1 co_us FROM saUsuario ORDER BY fe_us_in ASC');
+                if (defUsr.recordset && defUsr.recordset[0]?.co_us) {
+                    auditUser = defUsr.recordset[0].co_us.trim();
+                }
+            }
+
+            const sucuCheck = await pool.request()
+                .input('suc', sql.Char(6), padProfit(sucuCode, 6))
+                .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
+            if (!sucuCheck.recordset || sucuCheck.recordset.length === 0) {
+                const defSuc = await pool.request().query('SELECT TOP 1 co_sucur FROM saSucursal ORDER BY fe_us_in ASC');
+                if (defSuc.recordset && defSuc.recordset[0]?.co_sucur) {
+                    sucuCode = defSuc.recordset[0].co_sucur.trim();
+                }
+            }
+        } catch (eAuditCheck) {}
+
         // Pre-consultar unidades de medida si faltan (fuera de la transacción)
         for (const reng of data.renglones) {
             if (!reng.co_uni) {
@@ -479,15 +543,18 @@ router.put('/:ajue_num', async (req, res) => {
             if (!reng.co_uni) reng.co_uni = 'UND';
         }
 
+        const isSalida = String(data.tipo || '').toUpperCase() === 'SAL' || String(data.co_tipo || '').trim() === '02';
+        const coTipo = isSalida ? '02' : '01';
+
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
         try {
             // Revertir el stock de los renglones viejos
             for (const oldReng of oldRenglones) {
-                const isSalida = String(oldReng.co_tipo || '').trim() === '02';
+                const isOldSalida = String(oldReng.co_tipo || '').trim() === '02';
                 const qty = Math.abs(Number(oldReng.total_art || 0));
-                const revertFactor = isSalida ? qty : -qty;
+                const revertFactor = isOldSalida ? qty : -qty;
 
                 await transaction.request()
                     .input('co_art_stk', sql.Char(30), padProfit(oldReng.co_art, 30))
@@ -504,11 +571,6 @@ router.put('/:ajue_num', async (req, res) => {
             await transaction.request()
                 .input('ajue_num', sql.Char(20), padProfit(ajue_num, 20))
                 .query('DELETE FROM saAjusteReng WHERE LTRIM(RTRIM(ajue_num)) = LTRIM(RTRIM(@ajue_num))');
-
-            const sucuCode = String(data.co_sucu_mo || data.co_sucu_in || '01').trim();
-            const auditUser = String(data.co_us_mo || data.co_us_in || 'PROFIT').trim().substring(0, 6);
-            const isSalida = String(data.tipo || '').toUpperCase() === 'SAL' || String(data.co_tipo || '').trim() === '02';
-            const coTipo = isSalida ? '02' : '01';
 
             let rengNum = 1;
             for (const reng of data.renglones) {
@@ -597,15 +659,15 @@ router.put('/:ajue_num', async (req, res) => {
             });
 
         } catch (err) {
-            await transaction.rollback();
-            console.error('❌ [AJUSTES EDIT ERROR TRANSACTION]:', err.message);
+            console.error('❌ [AJUSTES EDIT ERROR REAL]:', err);
+            try { await transaction.rollback(); } catch (rbErr) {}
             throw err;
         }
     } catch (error) {
-        console.error('❌ [AJUSTES EDIT CRITICAL]:', error.message);
+        console.error('❌ [AJUSTES EDIT CRITICAL]:', error.message || error);
         return res.status(500).json({
             success: false,
-            message: `Error al modificar el ajuste de inventario ${ajue_num}.`,
+            message: error.message || `Error al modificar el ajuste de inventario ${ajue_num}.`,
             error: error.message
         });
     }
