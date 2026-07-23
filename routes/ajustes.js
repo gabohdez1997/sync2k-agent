@@ -48,18 +48,37 @@ router.post('/', async (req, res) => {
                     ajueNum = consecRes.recordset[0].ProximoConsecutivo.trim();
                 }
             } catch (e) {
-                console.warn('[AJUSTES] Falló pConsecutivoProximo para AJUS_NUM, usando consulta directa:', e.message);
+                console.warn('[AJUSTES] Falló pConsecutivoProximo para AJUS_NUM, intentando vía saSerie:', e.message);
             }
 
             if (!ajueNum) {
-                const resC = await transaction.request().query("SELECT proximo FROM saConsecutivo WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'AJUS_NUM'");
-                if (resC.recordset.length > 0) {
-                    const row = resC.recordset[0];
-                    const numDig = 8;
-                    ajueNum = String(row.proximo).padStart(numDig, '0');
-                    await transaction.request().query("UPDATE saConsecutivo SET proximo = proximo + 1 WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'AJUS_NUM'");
+                const resCorr = await transaction.request().query(`
+                    UPDATE saSerie
+                    SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
+                    OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
+                    WHERE co_serie = (
+                        SELECT TOP 1 co_serie
+                        FROM saConsecutivo
+                        WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) IN ('AJUS_NUM', 'AJUS', 'AJUSTE')
+                           OR UPPER(LTRIM(RTRIM(co_consecutivo))) LIKE '%AJU%'
+                    )
+                `);
+                const corrRow = resCorr.recordset[0] || null;
+                if (corrRow && corrRow.prox_n) {
+                    const proxN = Number(corrRow.prox_n || 0);
+                    ajueNum = proxN.toString().padStart(8, '0');
                 } else {
-                    throw new Error('No se encontró la configuración de consecutivo AJUS_NUM en Profit Plus.');
+                    const resDirect = await transaction.request().query(`
+                        UPDATE saSerie
+                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
+                        OUTPUT INSERTED.prox_n
+                        WHERE LTRIM(RTRIM(co_serie)) = '001'
+                    `);
+                    if (resDirect.recordset && resDirect.recordset.length > 0) {
+                        ajueNum = Number(resDirect.recordset[0].prox_n).toString().padStart(8, '0');
+                    } else {
+                        throw new Error('No se pudo generar el consecutivo para el ajuste de inventario en Profit Plus.');
+                    }
                 }
             }
 
