@@ -189,8 +189,16 @@ router.post('/', async (req, res) => {
                     if (typeof codes === 'string') {
                         try { codes = JSON.parse(codes); } catch(e) { codes = [codes]; }
                     }
-                    if (Array.isArray(codes) && codes.length > 0 && codes[0]) {
-                        sucuCode = String(codes[0]).trim();
+                    if (Array.isArray(codes) && codes.length > 0) {
+                        const defObj = codes.find(c => c && typeof c === 'object' && (c.is_default || c.isDefault));
+                        if (defObj && defObj.code) {
+                            sucuCode = String(defObj.code).trim();
+                        } else {
+                            const first = codes[0];
+                            sucuCode = String(typeof first === 'object' ? (first.code || first.co_sucu || '01') : first).trim();
+                        }
+                    } else if (typeof codes === 'string') {
+                        sucuCode = codes.trim();
                     }
                 }
             } catch (ePg) {
@@ -312,6 +320,7 @@ router.post('/', async (req, res) => {
                     .input('co_art', sql.Char(30), coArt)
                     .input('co_alma', sql.Char(6), coAlma)
                     .input('co_uni', sql.Char(6), coUni)
+                    .input('sco_uni', sql.Char(6), coUni)
                     .input('total_art', sql.Decimal(18, 5), qty)
                     .input('stotal_art', sql.Decimal(18, 5), qty)
                     .input('cost_unit', sql.Decimal(18, 5), costUnit)
@@ -326,12 +335,12 @@ router.post('/', async (req, res) => {
                     .input('rowguid', sql.UniqueIdentifier, rengGuid)
                     .query(`
                         INSERT INTO saAjusteReng (
-                            ajue_num, reng_num, co_tipo, co_art, co_alma, co_uni,
+                            ajue_num, reng_num, co_tipo, co_art, co_alma, co_uni, sco_uni,
                             total_art, stotal_art, cost_unit, lote_asignado,
                             costo_adi1, costo_adi2, costo_adi3,
                             co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo, rowguid
                         ) VALUES (
-                            @ajue_num, @reng_num, @co_tipo, @co_art, @co_alma, @co_uni,
+                            @ajue_num, @reng_num, @co_tipo, @co_art, @co_alma, @co_uni, @sco_uni,
                             @total_art, @stotal_art, @cost_unit, @lote_asignado,
                             @costo_adi1, @costo_adi2, @costo_adi3,
                             @co_us_in, @co_sucu_in, GETDATE(), @co_us_mo, @co_sucu_mo, GETDATE(), @rowguid
@@ -549,8 +558,16 @@ router.put('/:ajue_num', async (req, res) => {
                     if (typeof codes === 'string') {
                         try { codes = JSON.parse(codes); } catch(e) { codes = [codes]; }
                     }
-                    if (Array.isArray(codes) && codes.length > 0 && codes[0]) {
-                        sucuCode = String(codes[0]).trim();
+                    if (Array.isArray(codes) && codes.length > 0) {
+                        const defObj = codes.find(c => c && typeof c === 'object' && (c.is_default || c.isDefault));
+                        if (defObj && defObj.code) {
+                            sucuCode = String(defObj.code).trim();
+                        } else {
+                            const first = codes[0];
+                            sucuCode = String(typeof first === 'object' ? (first.code || first.co_sucu || '01') : first).trim();
+                        }
+                    } else if (typeof codes === 'string') {
+                        sucuCode = codes.trim();
                     }
                 }
             } catch (ePg) {
@@ -666,6 +683,7 @@ router.put('/:ajue_num', async (req, res) => {
                     .input('co_art', sql.Char(30), coArt)
                     .input('co_alma', sql.Char(6), coAlma)
                     .input('co_uni', sql.Char(6), coUni)
+                    .input('sco_uni', sql.Char(6), coUni)
                     .input('total_art', sql.Decimal(18, 5), qty)
                     .input('stotal_art', sql.Decimal(18, 5), qty)
                     .input('cost_unit', sql.Decimal(18, 5), costUnit)
@@ -680,12 +698,12 @@ router.put('/:ajue_num', async (req, res) => {
                     .input('rowguid', sql.UniqueIdentifier, rengGuid)
                     .query(`
                         INSERT INTO saAjusteReng (
-                            ajue_num, reng_num, co_tipo, co_art, co_alma, co_uni,
+                            ajue_num, reng_num, co_tipo, co_art, co_alma, co_uni, sco_uni,
                             total_art, stotal_art, cost_unit, lote_asignado,
                             costo_adi1, costo_adi2, costo_adi3,
                             co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo, rowguid
                         ) VALUES (
-                            @ajue_num, @reng_num, @co_tipo, @co_art, @co_alma, @co_uni,
+                            @ajue_num, @reng_num, @co_tipo, @co_art, @co_alma, @co_uni, @sco_uni,
                             @total_art, @stotal_art, @cost_unit, @lote_asignado,
                             @costo_adi1, @costo_adi2, @costo_adi3,
                             @co_us_in, @co_sucu_in, GETDATE(), @co_us_mo, @co_sucu_mo, GETDATE(), @rowguid
