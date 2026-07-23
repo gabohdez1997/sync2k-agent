@@ -52,10 +52,10 @@ router.post('/', async (req, res) => {
             }
 
             if (!ajueNum) {
-                const resC = await transaction.request().query("SELECT proximo, num_digitos FROM saConsecutivo WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'AJUS_NUM'");
+                const resC = await transaction.request().query("SELECT proximo FROM saConsecutivo WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'AJUS_NUM'");
                 if (resC.recordset.length > 0) {
                     const row = resC.recordset[0];
-                    const numDig = row.num_digitos || 8;
+                    const numDig = 8;
                     ajueNum = String(row.proximo).padStart(numDig, '0');
                     await transaction.request().query("UPDATE saConsecutivo SET proximo = proximo + 1 WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'AJUS_NUM'");
                 } else {
