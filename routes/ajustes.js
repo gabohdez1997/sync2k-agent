@@ -201,21 +201,34 @@ router.post('/', async (req, res) => {
         const today = new Date();
         const motivoText = (data.motivo || (isSalida ? 'Traslado Salida entre Sedes' : 'Traslado Entrada entre Sedes')).substring(0, 80);
 
-        // Pre-consultar unidades de medida si faltan (fuera de transacción)
+        // Pre-consultar y validar unidades de medida contra saArtUnidad para evitar FK_saAjusteReng_saArtUnidad
         for (const reng of data.renglones) {
-            if (!reng.co_uni) {
+            let validCoUni = null;
+            if (reng.co_uni) {
+                try {
+                    const checkUniRes = await pool.request()
+                        .input('co_art_chk', sql.Char(30), padProfit(reng.co_art, 30))
+                        .input('co_uni_chk', sql.Char(6), padProfit(reng.co_uni, 6))
+                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_chk)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni_chk))');
+                    if (checkUniRes.recordset && checkUniRes.recordset.length > 0) {
+                        validCoUni = checkUniRes.recordset[0].co_uni.trim();
+                    }
+                } catch (e) {}
+            }
+
+            if (!validCoUni) {
                 try {
                     const artUniRes = await pool.request()
                         .input('co_art_check', sql.Char(30), padProfit(reng.co_art, 30))
-                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE co_art = @co_art_check ORDER BY uni_principal DESC');
+                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_check)) ORDER BY uni_principal DESC');
                     if (artUniRes.recordset && artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
-                        reng.co_uni = artUniRes.recordset[0].co_uni.trim();
+                        validCoUni = artUniRes.recordset[0].co_uni.trim();
                     }
-                } catch (e) {
-                    // Fallback
-                }
+                } catch (e) {}
             }
-            if (!reng.co_uni) reng.co_uni = 'UND';
+
+            if (!validCoUni) validCoUni = 'UND';
+            reng.co_uni = validCoUni;
         }
 
         // 3. INICIAR LA TRANSACCIÓN SOLO PARA LAS INSERCIONES DE ESCRITURA
@@ -526,21 +539,34 @@ router.put('/:ajue_num', async (req, res) => {
             }
         } catch (eAuditCheck) {}
 
-        // Pre-consultar unidades de medida si faltan (fuera de la transacción)
+        // Pre-consultar y validar unidades de medida contra saArtUnidad para evitar FK_saAjusteReng_saArtUnidad
         for (const reng of data.renglones) {
-            if (!reng.co_uni) {
+            let validCoUni = null;
+            if (reng.co_uni) {
+                try {
+                    const checkUniRes = await pool.request()
+                        .input('co_art_chk', sql.Char(30), padProfit(reng.co_art, 30))
+                        .input('co_uni_chk', sql.Char(6), padProfit(reng.co_uni, 6))
+                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_chk)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni_chk))');
+                    if (checkUniRes.recordset && checkUniRes.recordset.length > 0) {
+                        validCoUni = checkUniRes.recordset[0].co_uni.trim();
+                    }
+                } catch (e) {}
+            }
+
+            if (!validCoUni) {
                 try {
                     const artUniRes = await pool.request()
                         .input('co_art_check', sql.Char(30), padProfit(reng.co_art, 30))
-                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE co_art = @co_art_check ORDER BY uni_principal DESC');
+                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_check)) ORDER BY uni_principal DESC');
                     if (artUniRes.recordset && artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
-                        reng.co_uni = artUniRes.recordset[0].co_uni.trim();
+                        validCoUni = artUniRes.recordset[0].co_uni.trim();
                     }
-                } catch (e) {
-                    // Fallback
-                }
+                } catch (e) {}
             }
-            if (!reng.co_uni) reng.co_uni = 'UND';
+
+            if (!validCoUni) validCoUni = 'UND';
+            reng.co_uni = validCoUni;
         }
 
         const isSalida = String(data.tipo || '').toUpperCase() === 'SAL' || String(data.co_tipo || '').trim() === '02';
