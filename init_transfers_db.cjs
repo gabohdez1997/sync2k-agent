@@ -32,8 +32,10 @@ async function initTables() {
             co_alma_target VARCHAR(6) NOT NULL,
             total_art NUMERIC(18,5) NOT NULL DEFAULT 0,
             accepted_art NUMERIC(18,5) NOT NULL DEFAULT 0,
-            costo_unit NUMERIC(18,5) NOT NULL DEFAULT 0
+            costo_unit NUMERIC(18,5) NOT NULL DEFAULT 0,
+            co_uni VARCHAR(10) DEFAULT 'UND'
         );
+        ALTER TABLE stock_transfer_items ADD COLUMN IF NOT EXISTS co_uni VARCHAR(10) DEFAULT 'UND';
     `);
     console.log("✅ Tablas stock_transfers y stock_transfer_items listas en PostgreSQL local.");
     process.exit(0);
