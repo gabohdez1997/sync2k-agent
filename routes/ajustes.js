@@ -4,7 +4,8 @@ const { sql, getPool, getServers } = require('../db');
 
 function padProfit(str, length) {
     if (!str) return ' '.repeat(length);
-    return str.toString().trim().padEnd(length, ' ');
+    const s = String(str).trim().substring(0, length);
+    return s.padEnd(length, ' ');
 }
 
 /**
@@ -170,21 +171,15 @@ router.post('/', async (req, res) => {
             coMoneUSD = String(data.co_mone).trim();
         }
 
-        let sucuCode = String(data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01').trim();
-        let auditUser = String(data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT').trim().substring(0, 6);
+        let rawSucu = data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01';
+        if (Array.isArray(rawSucu)) rawSucu = rawSucu[0];
+        let sucuCode = String(rawSucu).split(',')[0].trim().substring(0, 6) || '01';
+
+        let rawUser = data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT';
+        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
 
         // Validar que usuario y sucursal existan en la BD de Profit Plus
         try {
-            const userCheck = await pool.request()
-                .input('usr', sql.Char(6), padProfit(auditUser, 6))
-                .query('SELECT TOP 1 co_us FROM saUsuario WHERE LTRIM(RTRIM(co_us)) = LTRIM(RTRIM(@usr))');
-            if (!userCheck.recordset || userCheck.recordset.length === 0) {
-                const defUsr = await pool.request().query('SELECT TOP 1 co_us FROM saUsuario ORDER BY fe_us_in ASC');
-                if (defUsr.recordset && defUsr.recordset[0]?.co_us) {
-                    auditUser = defUsr.recordset[0].co_us.trim();
-                }
-            }
-
             const sucuCheck = await pool.request()
                 .input('suc', sql.Char(6), padProfit(sucuCode, 6))
                 .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
@@ -195,7 +190,7 @@ router.post('/', async (req, res) => {
                 }
             }
         } catch (eAuditCheck) {
-            console.warn('[AJUSTES] Falló verificación de usuario/sucursal en Profit:', eAuditCheck.message);
+            console.warn('[AJUSTES] Falló verificación de sucursal en Profit:', eAuditCheck.message);
         }
 
         const today = new Date();
@@ -390,18 +385,8 @@ router.post('/:ajue_num/anular', async (req, res) => {
 
         const renglones = rengRes.recordset || [];
 
-        let auditUser = String(req.body.co_us_in || req.body.profit_user || 'PROFIT').trim().substring(0, 6);
-        try {
-            const userCheck = await pool.request()
-                .input('usr', sql.Char(6), padProfit(auditUser, 6))
-                .query('SELECT TOP 1 co_us FROM saUsuario WHERE LTRIM(RTRIM(co_us)) = LTRIM(RTRIM(@usr))');
-            if (!userCheck.recordset || userCheck.recordset.length === 0) {
-                const defUsr = await pool.request().query('SELECT TOP 1 co_us FROM saUsuario ORDER BY fe_us_in ASC');
-                if (defUsr.recordset && defUsr.recordset[0]?.co_us) {
-                    auditUser = defUsr.recordset[0].co_us.trim();
-                }
-            }
-        } catch (eUsr) {}
+        let rawUser = req.body.co_us_in || req.body.profit_user || 'PROFIT';
+        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
 
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
@@ -513,21 +498,15 @@ router.put('/:ajue_num', async (req, res) => {
 
         const oldRenglones = oldRengRes.recordset || [];
 
-        let sucuCode = String(data.co_sucu_mo || data.co_sucu_in || '01').trim();
-        let auditUser = String(data.co_us_mo || data.co_us_in || 'PROFIT').trim().substring(0, 6);
+        let rawSucu = data.co_sucu_mo || data.co_sucu_in || data.sucu_code || '01';
+        if (Array.isArray(rawSucu)) rawSucu = rawSucu[0];
+        let sucuCode = String(rawSucu).split(',')[0].trim().substring(0, 6) || '01';
 
-        // Validar que usuario y sucursal existan en la BD de Profit Plus
+        let rawUser = data.co_us_mo || data.co_us_in || data.profit_user || 'PROFIT';
+        let auditUser = String(rawUser).trim().substring(0, 6) || 'PROFIT';
+
+        // Validar que sucursal exista en la BD de Profit Plus
         try {
-            const userCheck = await pool.request()
-                .input('usr', sql.Char(6), padProfit(auditUser, 6))
-                .query('SELECT TOP 1 co_us FROM saUsuario WHERE LTRIM(RTRIM(co_us)) = LTRIM(RTRIM(@usr))');
-            if (!userCheck.recordset || userCheck.recordset.length === 0) {
-                const defUsr = await pool.request().query('SELECT TOP 1 co_us FROM saUsuario ORDER BY fe_us_in ASC');
-                if (defUsr.recordset && defUsr.recordset[0]?.co_us) {
-                    auditUser = defUsr.recordset[0].co_us.trim();
-                }
-            }
-
             const sucuCheck = await pool.request()
                 .input('suc', sql.Char(6), padProfit(sucuCode, 6))
                 .query('SELECT TOP 1 co_sucur FROM saSucursal WHERE LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@suc))');
