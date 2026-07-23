@@ -125,6 +125,53 @@ router.post('/', async (req, res) => {
                 throw new Error('No se pudo generar el consecutivo para el ajuste de inventario en Profit Plus.');
             }
 
+            // 2.b. Obtener Moneda USD y Tasa del Día
+            let coMoneUSD = 'USD';
+            let tasaDia = 1.00;
+            try {
+                const resMon = await transaction.request().query(`
+                    SELECT TOP 1 RTRIM(co_mone) AS co_mone 
+                    FROM saMoneda 
+                    WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'DOL', '$', 'US') 
+                       OR mone_des LIKE '%Dolar%'
+                `);
+                if (resMon.recordset && resMon.recordset[0]?.co_mone) {
+                    coMoneUSD = resMon.recordset[0].co_mone.trim();
+                }
+
+                const resTasa = await transaction.request()
+                    .input('co_mone_check', sql.Char(6), padProfit(coMoneUSD, 6))
+                    .query(`
+                        SELECT TOP 1 tasa_v 
+                        FROM saTasa 
+                        WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'DOL', '$', 'US') 
+                           OR LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@co_mone_check))
+                        ORDER BY fecha DESC
+                    `);
+                if (resTasa.recordset && resTasa.recordset[0]?.tasa_v && Number(resTasa.recordset[0].tasa_v) > 0) {
+                    tasaDia = Number(resTasa.recordset[0].tasa_v);
+                } else {
+                    const resMonTasa = await transaction.request().query(`
+                        SELECT TOP 1 tasa_v 
+                        FROM saMoneda 
+                        WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'DOL', '$', 'US') 
+                           OR mone_des LIKE '%Dolar%'
+                    `);
+                    if (resMonTasa.recordset && resMonTasa.recordset[0]?.tasa_v && Number(resMonTasa.recordset[0].tasa_v) > 0) {
+                        tasaDia = Number(resMonTasa.recordset[0].tasa_v);
+                    }
+                }
+            } catch (eTasa) {
+                console.warn('[AJUSTES] Error al consultar moneda/tasa USD:', eTasa.message);
+            }
+
+            if (data.tasa && Number(data.tasa) > 0) {
+                tasaDia = Number(data.tasa);
+            }
+            if (data.co_mone && String(data.co_mone).trim()) {
+                coMoneUSD = String(data.co_mone).trim();
+            }
+
             const sucuCode = String(data.co_sucu_in || data.co_sucu_mo || data.sucu_code || '01').trim();
             const auditUser = String(data.co_us_in || data.co_us_mo || data.profit_user || 'PROFIT').trim().substring(0, 6);
             const today = new Date();
@@ -138,8 +185,8 @@ router.post('/', async (req, res) => {
                 .input('ajue_num', sql.Char(20), padProfit(ajueNum, 20))
                 .input('fecha', sql.SmallDateTime, today)
                 .input('motivo', sql.VarChar(80), motivoText)
-                .input('co_mone', sql.Char(6), padProfit('BS', 6))
-                .input('tasa', sql.Decimal(18, 2), 1.00)
+                .input('co_mone', sql.Char(6), padProfit(coMoneUSD, 6))
+                .input('tasa', sql.Decimal(18, 5), tasaDia)
                 .input('seriales_s', sql.Int, 0)
                 .input('seriales_e', sql.Int, 0)
                 .input('anulado', sql.Bit, 0)
