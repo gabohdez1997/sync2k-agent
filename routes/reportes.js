@@ -1176,6 +1176,7 @@ router.get('/articulos-precios', async (req, res) => {
             SELECT 
                 RTRIM(a.co_art) AS co_art, 
                 RTRIM(a.art_des) AS art_des,
+                RTRIM(ISNULL(a.modelo, '')) AS modelo,
                 a.anulado,
                 ISNULL(p1.monto, 0) AS precio1, 
                 ISNULL(m1.monto_min, 0) AS margen1, 
