@@ -1333,4 +1333,83 @@ router.get('/articulos-ventas', async (req, res) => {
     }
 });
 
+router.get('/resumen-cobros', async (req, res) => {
+    try {
+        const { sede, fecha } = req.query;
+        const servers = getServers();
+        const targets = sede ? servers.filter(s => s.id === sede) : servers;
+
+        if (targets.length === 0) {
+            return res.status(200).json({ success: true, data: [], tasa_dia: 1 });
+        }
+
+        const srv = targets[0];
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const r = pool.request();
+
+        // Fecha única, por defecto hoy
+        const today = new Date().toISOString().split('T')[0];
+        const f = fecha || today;
+
+        r.input('fecha_inicio', sql.SmallDateTime, `${f} 00:00:00`);
+        r.input('fecha_fin', sql.SmallDateTime, `${f} 23:59:59`);
+
+        // Obtener la tasa de cambio de ese día o anterior
+        const rTasa = pool.request();
+        rTasa.input('fecha', sql.SmallDateTime, `${f} 23:59:59`);
+        const qTasa = await rTasa.query(`
+            SELECT TOP 1 tasa_v 
+            FROM saTasa 
+            WHERE fecha <= @fecha 
+            ORDER BY fecha DESC
+        `);
+        const tasaDia = (qTasa.recordset && qTasa.recordset.length > 0 && Number(qTasa.recordset[0].tasa_v) > 0) ? Number(qTasa.recordset[0].tasa_v) : 1;
+
+        const querySQL = `
+            SELECT 
+                RTRIM(co_us_in) AS usuario, 
+                RTRIM(forma_pag) AS forma_pag, 
+                CASE 
+                    WHEN RTRIM(forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(cod_cta, ''))
+                    WHEN RTRIM(forma_pag) = 'EF' THEN RTRIM(ISNULL(cod_caja, ''))
+                    WHEN RTRIM(forma_pag) = 'TJ' THEN RTRIM(ISNULL(co_tar, ''))
+                    ELSE ''
+                END AS detalle,
+                SUM(mont_doc) AS total_bs
+            FROM saCobroTPReng
+            WHERE fe_us_in >= @fecha_inicio AND fe_us_in <= @fecha_fin
+            GROUP BY 
+                RTRIM(co_us_in), 
+                RTRIM(forma_pag), 
+                CASE 
+                    WHEN RTRIM(forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(cod_cta, ''))
+                    WHEN RTRIM(forma_pag) = 'EF' THEN RTRIM(ISNULL(cod_caja, ''))
+                    WHEN RTRIM(forma_pag) = 'TJ' THEN RTRIM(ISNULL(co_tar, ''))
+                    ELSE ''
+                END
+            ORDER BY 
+                RTRIM(co_us_in), 
+                RTRIM(forma_pag), 
+                detalle
+        `;
+
+        const resData = await r.query(querySQL);
+        
+        // Agregar equivalente en USD
+        const rows = resData.recordset.map(row => ({
+            ...row,
+            total_usd: Number((row.total_bs / tasaDia).toFixed(2))
+        }));
+
+        return res.status(200).json({
+            success: true,
+            tasa_dia: tasaDia,
+            data: rows
+        });
+    } catch (error) {
+        console.error('[REPORTES/RESUMEN-COBROS ERROR]:', error.message);
+        res.status(500).json({ success: false, message: 'Error al consultar Resumen de Cobros.', error: error.message });
+    }
+});
+
 module.exports = router;
