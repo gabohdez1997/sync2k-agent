@@ -146,6 +146,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(c.cli_des) AS cli_des,
                            RTRIM(c.rif) AS rif,
                            c.contribu_e, c.porc_esp, c.co_ven,
+                           RTRIM(f.co_us_in) AS co_us_in,
                            ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1
                     FROM saDocumentoVenta d
                     INNER JOIN saCliente c ON d.co_cli = c.co_cli
