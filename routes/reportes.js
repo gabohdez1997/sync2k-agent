@@ -1346,13 +1346,13 @@ router.get('/resumen-cobros', async (req, res) => {
         const srv = targets[0];
         const pool = await getPool(srv.id, req.sqlAuth);
         const r = pool.request();
-
+        
         // Fecha única, por defecto hoy
         const today = new Date().toISOString().split('T')[0];
         const f = fecha || today;
 
-        r.input('fecha_inicio', sql.SmallDateTime, `${f} 00:00:00`);
-        r.input('fecha_fin', sql.SmallDateTime, `${f} 23:59:59`);
+        // Pasar como texto para evitar desajustes de zona horaria de Node/mssql
+        r.input('fecha', sql.VarChar, f);
 
         // Obtener la tasa de cambio de ese día o anterior
         const rTasa = pool.request();
@@ -1377,7 +1377,7 @@ router.get('/resumen-cobros', async (req, res) => {
                 END AS detalle,
                 SUM(mont_doc) AS total_bs
             FROM saCobroTPReng
-            WHERE fe_us_in >= @fecha_inicio AND fe_us_in <= @fecha_fin
+            WHERE CAST(fe_us_in AS DATE) = CAST(@fecha AS DATE)
             GROUP BY 
                 RTRIM(co_us_in), 
                 RTRIM(forma_pag), 
