@@ -152,7 +152,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                                SELECT SUM(r.reng_neto)
                                FROM saFacturaVentaReng r
                                WHERE LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
-                                 AND RTRIM(r.co_art) LIKE '09%'
+                                 AND LTRIM(RTRIM(r.co_art)) LIKE '09%'
                            ) ELSE 0 END, 0) AS base_islr_default
                     FROM saDocumentoVenta d
                     INNER JOIN saCliente c ON d.co_cli = c.co_cli

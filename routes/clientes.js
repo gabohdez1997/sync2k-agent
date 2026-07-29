@@ -665,7 +665,13 @@ router.get('/:co_cli/documentos', async (req, res) => {
                            ELSE d.tasa END AS tasa,
                            RTRIM(d.n_control) AS n_control,
                            d.rowguid,
-                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1
+                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1,
+                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN (
+                               SELECT SUM(r.reng_neto)
+                               FROM saFacturaVentaReng r
+                               WHERE LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                 AND LTRIM(RTRIM(r.co_art)) LIKE '09%'
+                           ) ELSE 0 END, 0) AS base_islr_default
                     FROM saDocumentoVenta d
                     LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
                     WHERE LTRIM(RTRIM(d.co_cli)) = LTRIM(RTRIM(@co_cli))
