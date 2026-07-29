@@ -147,7 +147,13 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(c.rif) AS rif,
                            c.contribu_e, c.porc_esp, c.co_ven,
                            RTRIM(f.co_us_in) AS co_us_in,
-                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1
+                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1,
+                           ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN (
+                               SELECT SUM(r.reng_neto)
+                               FROM saFacturaVentaReng r
+                               WHERE LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                 AND RTRIM(r.co_art) LIKE '09%'
+                           ) ELSE 0 END, 0) AS base_islr_default
                     FROM saDocumentoVenta d
                     INNER JOIN saCliente c ON d.co_cli = c.co_cli
                     LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
