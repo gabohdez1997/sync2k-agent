@@ -1266,7 +1266,10 @@ router.get('/articulos-ventas', async (req, res) => {
         const defaultHasta = today.toISOString().split('T')[0];
 
         const fDesde = fecha_desde || defaultDesde;
-        const fHasta = fecha_hasta || defaultHasta;
+        let fHasta = fecha_hasta || defaultHasta;
+        if (!fHasta.includes(':')) {
+            fHasta = `${fHasta} 23:59:59`;
+        }
 
         r.input('fecha_desde', sql.SmallDateTime, fDesde);
         r.input('fecha_hasta', sql.SmallDateTime, fHasta);
