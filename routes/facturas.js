@@ -247,7 +247,7 @@ router.post('/:doc_num/anular', async (req, res) => {
                     await rStockDes.execute('pStockActualizar');
 
                     // 3.c. Si venía de Pedido, volver a Comprometer (COM)
-                    if ((line.tipo_doc === 'PCLI' || line.tipo_doc === 'PEDI' || line.tipo_doc === 'PED') && line.rowguid_doc && line.num_doc) {
+                    if (['PCLI', 'PEDI', 'PED', 'PVEN'].includes(line.tipo_doc) && line.rowguid_doc && line.num_doc) {
                         console.log(`📈 [AGENT] Volviendo a comprometer stock (COM) de ${line.total_art} para el pedido ${line.num_doc}`);
                         const rStockCom = new sql.Request(transaction);
                         rStockCom.input('sCo_Alma',              sql.Char(6),  line.co_alma);
@@ -260,8 +260,8 @@ router.post('/:doc_num/anular', async (req, res) => {
                         await rStockCom.execute('pStockActualizar');
                     }
 
-                    // 4. Si la línea se originó de un Pedido de venta ('PCLI', 'PEDI' o 'PED'), revertimos su pendiente
-                    if ((line.tipo_doc === 'PCLI' || line.tipo_doc === 'PEDI' || line.tipo_doc === 'PED') && line.rowguid_doc && line.num_doc) {
+                    // 4. Si la línea se originó de un Pedido de venta, revertimos su pendiente
+                    if (['PCLI', 'PEDI', 'PED', 'PVEN'].includes(line.tipo_doc) && line.rowguid_doc && line.num_doc) {
                         console.log(`📈 [AGENT] Revirtiendo ${line.total_art} al pendiente del pedido ${line.num_doc}`);
                         const rRevert = new sql.Request(transaction);
                         rRevert.input('qty', sql.Decimal(18, 5), line.total_art);
@@ -552,7 +552,7 @@ router.post('/', async (req, res) => {
                     .query(`UPDATE saFacturaVentaReng SET prec_vta_om = @om WHERE doc_num = @doc AND reng_num = @reng`);
 
                 // 8. Descontar del Pedido de Origen
-                if ((tipoDocVal === 'PCLI' || tipoDocVal === 'PEDI' || tipoDocVal === 'PED') && rowguidDocVal && numDocVal) {
+                if (['PCLI', 'PEDI', 'PED', 'PVEN'].includes(tipoDocVal) && rowguidDocVal && numDocVal) {
                     console.log(`📉 [AGENT] Descontando ${qty} del pendiente en pedido de venta ${numDocVal}, renglón guid: ${rowguidDocVal}`);
                     const rOrder = new sql.Request(transaction);
                     rOrder.input('qty', sql.Decimal(18, 5), qty);
@@ -607,8 +607,36 @@ router.post('/', async (req, res) => {
                 await rStockDes.execute('pStockActualizar');
 
                 // 9.c. Restar de Stock Comprometido (COM) si viene de un Pedido
-                if ((tipoDocVal === 'PCLI' || tipoDocVal === 'PEDI' || tipoDocVal === 'PED') && rowguidDocVal && numDocVal) {
+                if (['PCLI', 'PEDI', 'PED', 'PVEN'].includes(tipoDocVal) && rowguidDocVal && numDocVal) {
                     console.log(`📉 [AGENT] Restando ${qty} de stock comprometido (COM) por pedido de venta ${numDocVal}`);
+
+                    // --- SELF-HEALING: Verificar que existe stock COM suficiente antes de restar ---
+                    const comCheck = await transaction.request()
+                        .input('co_art', sql.Char(30), padProfit(item.co_art, 30))
+                        .input('co_alma', sql.Char(6), padProfit(item.co_alma || defAlma, 6))
+                        .query(`
+                            SELECT ISNULL(stock, 0) AS stock_com
+                            FROM saStockAlmacen
+                            WHERE co_art = @co_art AND co_alma = @co_alma AND RTRIM(tipo) = 'COM'
+                        `);
+                    const currentCom = Number(comCheck.recordset[0]?.stock_com || 0);
+
+                    if (currentCom < qty) {
+                        console.warn(`⚠️ [AGENT][SELF-HEALING] Stock COM insuficiente para ${item.co_art.trim()} en almacén ${(item.co_alma || defAlma).trim()}: tiene ${currentCom}, necesita ${qty}. Ajustando automáticamente...`);
+                        // Sumar la diferencia faltante para que la resta posterior funcione correctamente
+                        const deficit = qty - currentCom;
+                        const rFixCom = new sql.Request(transaction);
+                        rFixCom.input('sCo_Alma',              sql.Char(6),  padProfit(item.co_alma || defAlma, 6));
+                        rFixCom.input('sCo_Art',               sql.Char(30), padProfit(item.co_art, 30));
+                        rFixCom.input('sCo_Uni',               sql.Char(6),  padProfit(finalUni, 6));
+                        rFixCom.input('deCantidad',            sql.Decimal(18, 5), deficit);
+                        rFixCom.input('sTipoStock',            sql.Char(4),  'COM');
+                        rFixCom.input('bSumarStock',           sql.Bit,      1); // Sumar para corregir
+                        rFixCom.input('bPermiteStockNegativo', sql.Bit,      1);
+                        await rFixCom.execute('pStockActualizar');
+                        console.log(`✅ [AGENT][SELF-HEALING] Stock COM corregido: +${deficit} para ${item.co_art.trim()}`);
+                    }
+
                     const rStockCom = new sql.Request(transaction);
                     rStockCom.input('sCo_Alma',              sql.Char(6),  padProfit(item.co_alma || defAlma, 6));
                     rStockCom.input('sCo_Art',               sql.Char(30), padProfit(item.co_art, 30));

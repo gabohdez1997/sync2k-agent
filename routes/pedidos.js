@@ -261,15 +261,31 @@ router.post('/', async (req, res) => {
 
                 console.log(`🗑️ [AGENT] Eliminando versión anterior para re-inserción...`);
                 for (const line of resL.recordset) {
-                    const rStock = new sql.Request(transaction);
-                    rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
-                    rStock.input('sCo_Art',               sql.Char(30), line.co_art);
-                    rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
-                    rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
-                    rStock.input('sTipoStock',            sql.Char(4),  'COM');
-                    rStock.input('bSumarStock',           sql.Bit,      0); // Restar
-                    rStock.input('bPermiteStockNegativo', sql.Bit,      1);
-                    await rStock.execute('pStockActualizar');
+                    // --- SELF-HEALING: Verificar COM antes de restar ---
+                    const comCheck = await transaction.request()
+                        .input('co_art', sql.Char(30), line.co_art)
+                        .input('co_alma', sql.Char(6), line.co_alma)
+                        .query(`
+                            SELECT ISNULL(stock, 0) AS stock_com
+                            FROM saStockAlmacen
+                            WHERE co_art = @co_art AND co_alma = @co_alma AND RTRIM(tipo) = 'COM'
+                        `);
+                    const currentCom = Number(comCheck.recordset[0]?.stock_com || 0);
+                    const qtyToSubtract = Math.min(Number(line.total_art || 0), Math.max(currentCom, 0));
+
+                    if (qtyToSubtract > 0) {
+                        const rStock = new sql.Request(transaction);
+                        rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                        rStock.input('sCo_Art',               sql.Char(30), line.co_art);
+                        rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                        rStock.input('deCantidad',            sql.Decimal(18, 5), qtyToSubtract);
+                        rStock.input('sTipoStock',            sql.Char(4),  'COM');
+                        rStock.input('bSumarStock',           sql.Bit,      0); // Restar
+                        rStock.input('bPermiteStockNegativo', sql.Bit,      1);
+                        await rStock.execute('pStockActualizar');
+                    } else {
+                        console.warn(`   ⚠️ [SELF-HEALING] Renglón ${line.reng_num} (${String(line.co_art).trim()}): stock COM actual=${currentCom}, saltando resta.`);
+                    }
 
                     // --- REVERSIÓN DE COTIZACIÓN ANTES DE ELIMINAR ---
                     if ((line.tipo_doc === 'COTI' || line.tipo_doc === 'CCLI') && line.rowguid_doc && line.num_doc) {
@@ -735,15 +751,31 @@ router.delete('/:doc_num', async (req, res) => {
 
                 console.log(`🧹 [AGENT] Devolviendo stock de ${resL.recordset.length} renglones...`);
                 for (const line of resL.recordset) {
-                    const rStock = new sql.Request(transaction);
-                    rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
-                    rStock.input('sCo_Art',               sql.Char(30), line.co_art);
-                    rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
-                    rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
-                    rStock.input('sTipoStock',            sql.Char(4),  'COM');
-                    rStock.input('bSumarStock',           sql.Bit,      0); // Restar
-                    rStock.input('bPermiteStockNegativo', sql.Bit,      1);
-                    await rStock.execute('pStockActualizar');
+                    // --- SELF-HEALING: Verificar COM antes de restar ---
+                    const comCheck = await transaction.request()
+                        .input('co_art', sql.Char(30), line.co_art)
+                        .input('co_alma', sql.Char(6), line.co_alma)
+                        .query(`
+                            SELECT ISNULL(stock, 0) AS stock_com
+                            FROM saStockAlmacen
+                            WHERE co_art = @co_art AND co_alma = @co_alma AND RTRIM(tipo) = 'COM'
+                        `);
+                    const currentCom = Number(comCheck.recordset[0]?.stock_com || 0);
+                    const qtyToSubtract = Math.min(Number(line.total_art || 0), Math.max(currentCom, 0));
+
+                    if (qtyToSubtract > 0) {
+                        const rStock = new sql.Request(transaction);
+                        rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                        rStock.input('sCo_Art',               sql.Char(30), line.co_art);
+                        rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                        rStock.input('deCantidad',            sql.Decimal(18, 5), qtyToSubtract);
+                        rStock.input('sTipoStock',            sql.Char(4),  'COM');
+                        rStock.input('bSumarStock',           sql.Bit,      0); // Restar
+                        rStock.input('bPermiteStockNegativo', sql.Bit,      1);
+                        await rStock.execute('pStockActualizar');
+                    } else {
+                        console.warn(`   ⚠️ [SELF-HEALING] Renglón ${line.reng_num} (${String(line.co_art).trim()}): stock COM actual=${currentCom}, saltando resta.`);
+                    }
 
                     // --- REVERSIÓN DE COTIZACIÓN ANTES DE ELIMINAR ---
                     if ((line.tipo_doc === 'COTI' || line.tipo_doc === 'CCLI') && line.rowguid_doc && line.num_doc) {
@@ -870,13 +902,43 @@ router.post('/:doc_num/anular', async (req, res) => {
                     `);
 
                 // 3. Devolver stock comprometido (restar stock tipo 'COM')
+                // IMPORTANTE: Usar `pendiente` en vez de `total_art` porque si el pedido fue
+                // parcialmente facturado, parte del stock COM ya fue restado por la factura.
+                // Solo debemos restar el COM que realmente queda comprometido.
                 console.log(`🧹 [AGENT] Restando stock comprometido de ${resL.recordset.length} renglones...`);
                 for (const line of resL.recordset) {
+                    const pendingQty = Number(line.total_art || 0);
+                    if (pendingQty <= 0) {
+                        console.log(`   ⏭️ Renglón ${line.reng_num} (${String(line.co_art).trim()}): pendiente=0, saltando resta de COM.`);
+                        continue;
+                    }
+
+                    // --- SELF-HEALING: Verificar COM antes de restar ---
+                    const comCheck = await transaction.request()
+                        .input('co_art', sql.Char(30), line.co_art)
+                        .input('co_alma', sql.Char(6), line.co_alma)
+                        .query(`
+                            SELECT ISNULL(stock, 0) AS stock_com
+                            FROM saStockAlmacen
+                            WHERE co_art = @co_art AND co_alma = @co_alma AND RTRIM(tipo) = 'COM'
+                        `);
+                    const currentCom = Number(comCheck.recordset[0]?.stock_com || 0);
+                    const qtyToSubtract = Math.min(pendingQty, Math.max(currentCom, 0));
+
+                    if (qtyToSubtract <= 0) {
+                        console.warn(`   ⚠️ [SELF-HEALING] Renglón ${line.reng_num} (${String(line.co_art).trim()}): stock COM actual=${currentCom}, nada que restar.`);
+                        continue;
+                    }
+
+                    if (qtyToSubtract < pendingQty) {
+                        console.warn(`   ⚠️ [SELF-HEALING] Renglón ${line.reng_num} (${String(line.co_art).trim()}): stock COM actual=${currentCom} < pendiente=${pendingQty}. Restando solo ${qtyToSubtract}.`);
+                    }
+
                     const rStock = new sql.Request(transaction);
                     rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
                     rStock.input('sCo_Art',               sql.Char(30), line.co_art);
                     rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
-                    rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+                    rStock.input('deCantidad',            sql.Decimal(18, 5), qtyToSubtract);
                     rStock.input('sTipoStock',            sql.Char(4),  'COM');
                     rStock.input('bSumarStock',           sql.Bit,      0); // Restar (liberar comprometido)
                     rStock.input('bPermiteStockNegativo', sql.Bit,      1);
