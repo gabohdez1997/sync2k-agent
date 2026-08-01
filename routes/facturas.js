@@ -173,21 +173,24 @@ router.post('/:doc_num/anular', async (req, res) => {
 
         const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
             const resH = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
-                `SELECT rowguid, anulado, RTRIM(co_us_in) AS co_us_in
+                `SELECT rowguid, anulado, RTRIM(co_us_in) AS co_us_in, RTRIM(ISNULL(status, '0')) AS status
                  FROM saFacturaVenta
                  WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
             );
             if (!resH.recordset.length) throw new Error('Factura no existe.');
 
-            const { anulado } = resH.recordset[0];
+            const { anulado, status } = resH.recordset[0];
             const isAnulada = !!anulado;
             if (isAnulada) {
                 throw new Error(`La factura ${doc_num} ya está anulada.`);
             }
+            if (status === '1' || status === '2') {
+                throw new Error(`No se puede anular la factura ${doc_num} porque se encuentra parcial o totalmente despachada. Debe anular el despacho primero.`);
+            }
 
             // Fetch invoice lines to update stock and origin documents
             const resL = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
-                `SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc 
+                `SELECT reng_num, co_art, co_alma, co_uni, total_art, pendiente, rowguid, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc 
                  FROM saFacturaVentaReng 
                  WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
             );
@@ -236,15 +239,37 @@ router.post('/:doc_num/anular', async (req, res) => {
                     await rStock.execute('pStockActualizar');
 
                     // 3.b. Restar de Stock por Despachar (DES)
-                    const rStockDes = new sql.Request(transaction);
-                    rStockDes.input('sCo_Alma',              sql.Char(6),  line.co_alma);
-                    rStockDes.input('sCo_Art',               sql.Char(30), line.co_art);
-                    rStockDes.input('sCo_Uni',               sql.Char(6),  line.co_uni);
-                    rStockDes.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
-                    rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
-                    rStockDes.input('bSumarStock',           sql.Bit,      0); // Restar stock
-                    rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
-                    await rStockDes.execute('pStockActualizar');
+                    const pendingQty = Number(line.pendiente || line.total_art || 0); // Si es estado 0, pendiente = total_art
+                    if (pendingQty > 0) {
+                        // --- SELF-HEALING: Verificar DES antes de restar ---
+                        const desCheck = await transaction.request()
+                            .input('co_art', sql.Char(30), line.co_art)
+                            .input('co_alma', sql.Char(6), line.co_alma)
+                            .query(`
+                                SELECT ISNULL(stock, 0) AS stock_des
+                                FROM saStockAlmacen
+                                WHERE co_art = @co_art AND co_alma = @co_alma AND RTRIM(tipo) = 'DES'
+                            `);
+                        const currentDes = Number(desCheck.recordset[0]?.stock_des || 0);
+                        const qtyToSubtract = Math.min(pendingQty, Math.max(currentDes, 0));
+
+                        if (qtyToSubtract > 0) {
+                            if (qtyToSubtract < pendingQty) {
+                                console.warn(`   ⚠️ [SELF-HEALING] Renglón ${line.reng_num} (${String(line.co_art).trim()}): stock DES actual=${currentDes} < pendiente=${pendingQty}. Restando solo ${qtyToSubtract}.`);
+                            }
+                            const rStockDes = new sql.Request(transaction);
+                            rStockDes.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                            rStockDes.input('sCo_Art',               sql.Char(30), line.co_art);
+                            rStockDes.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                            rStockDes.input('deCantidad',            sql.Decimal(18, 5), qtyToSubtract);
+                            rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                            rStockDes.input('bSumarStock',           sql.Bit,      0); // Restar stock
+                            rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                            await rStockDes.execute('pStockActualizar');
+                        } else {
+                            console.warn(`   ⚠️ [SELF-HEALING] Renglón ${line.reng_num} (${String(line.co_art).trim()}): stock DES actual=${currentDes}, saltando resta.`);
+                        }
+                    }
 
                     // 3.c. Si venía de Pedido, volver a Comprometer (COM)
                     if (['PCLI', 'PEDI', 'PED', 'PVEN'].includes(line.tipo_doc) && line.rowguid_doc && line.num_doc) {
