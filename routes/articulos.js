@@ -201,8 +201,8 @@ router.get('/', async (req, res) => {
                              RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                              RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
                              RTRIM(au.co_ubicacion) AS co_ubicacion,
-                             RTRIM(ISNULL(NULLIF(RTRIM(aun.co_uni), ''), a.co_uni)) AS co_uni, RTRIM(ISNULL(un.des_uni, a.co_uni)) AS unidad,
-                             RTRIM(a.tipo_imp) AS tipo_imp,
+                             RTRIM(aun.co_uni) AS co_uni, RTRIM(ISNULL(un.des_uni, aun.co_uni)) AS unidad,
+                             RTRIM(a.tipo_imp) AS tipo_imp, RTRIM(a.campo7) AS campo7,
                              CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                              ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}
                       ${fromClause}
@@ -222,7 +222,7 @@ router.get('/', async (req, res) => {
                 return (resData.recordset || []).map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) {
                 console.error(`[GET /] Error en sede ${srv.id}:`, e.message);
-                return [];
+                return [{ error_sql: e.message, query_fallido: true }];
             }
         }));
 
@@ -1479,5 +1479,78 @@ router.delete('/:co_art', async (req, res) => {
     }
 });
 
+
+// ────────────────────────────────────────────────────────────────────────────
+// 7. PUT /api/v1/articulos/:co_art/imagen — Actualizar imagen (campo7)
+// ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/{co_art}/imagen:
+ *   put:
+ *     summary: Actualizar la URL de la imagen del artículo (campo7)
+ *     tags: [Articulos]
+ *     parameters:
+ *       - in: path
+ *         name: co_art
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               imageUrl:
+ *                 type: string
+ *                 description: URL pública de la imagen en Supabase (o cualquier storage)
+ *     responses:
+ *       200:
+ *         description: Imagen actualizada exitosamente
+ */
+router.put('/:co_art/imagen', async (req, res) => {
+    try {
+        const { co_art } = req.params;
+        const { imageUrl } = req.body;
+
+        if (imageUrl === undefined) {
+            return res.status(400).json({ success: false, message: 'El parámetro "imageUrl" es obligatorio.' });
+        }
+
+        // Si no se especifica sede, el broadcast es automático a todas las sedes activas
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+            const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
+            
+            const r = new sql.Request(pool);
+            r.input('co_art', sql.Char(30), co_art.trim());
+            r.input('imageUrl', sql.VarChar(250), imageUrl); // campo7 es varchar(250) usualmente
+            r.input('auditUser', sql.Char(6), auditUser);
+
+            const result = await r.query(`
+                UPDATE saArticulo 
+                SET campo7 = @imageUrl, 
+                    fe_us_mo = GETDATE(),
+                    co_us_mo = @auditUser
+                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
+
+                SELECT RTRIM(campo7) AS saved_campo7 FROM saArticulo WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
+            `);
+
+            if (result.rowsAffected[0] === 0) {
+                throw new Error('El artículo no existe en esta sede.');
+            }
+
+            const savedValue = result.recordset ? result.recordset[0].saved_campo7 : null;
+            console.log(`[PUT /:co_art/imagen] Artículo ${co_art} actualizado. Valor guardado en DB: "${savedValue}"`);
+
+            return { co_art, success: true, saved_campo7: savedValue };
+        });
+
+        return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada o error en la operación.`);
+    } catch (error) {
+        console.error(`[PUT /:co_art/imagen] Error:`, error.message);
+        res.status(500).json({ success: false, message: 'Error al actualizar la imagen del artículo.', error: error.message });
+    }
+});
 
 module.exports = router;
