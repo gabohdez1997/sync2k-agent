@@ -440,6 +440,7 @@ router.get('/search', async (req, res) => {
                             RTRIM(au.co_ubicacion2) AS co_ubicacion2, RTRIM(u2.des_ubicacion) AS ubicacion2,
                             RTRIM(au.co_ubicacion3) AS co_ubicacion3, RTRIM(u3.des_ubicacion) AS ubicacion3,
                             RTRIM(aun.co_uni) AS co_uni, RTRIM(un.des_uni) AS unidad,
+                            RTRIM(a.campo7) AS campo7,
                             CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR sl.subl_des LIKE '%TIPO B%' OR l.lin_des LIKE '%SEGUNDA%' OR sl.subl_des LIKE '%SEGUNDA%' OR c.cat_des LIKE '%SEGUNDA%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                             ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}
                      FROM saArticulo a
