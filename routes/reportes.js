@@ -1299,12 +1299,17 @@ router.get('/articulos-ventas', async (req, res) => {
                 a.anulado,
                 ISNULL(sales.qty, 0) AS cant_facturada,
                 ISNULL(devs.qty, 0) AS cant_devuelta,
-                (ISNULL(sales.qty, 0) - ISNULL(devs.qty, 0)) AS cant_real_vendida
+                (ISNULL(sales.qty, 0) - ISNULL(devs.qty, 0)) AS cant_real_vendida,
+                ISNULL(sales.doc_count, 0) AS docs_facturados,
+                ISNULL(devs.doc_count, 0) AS docs_devueltos,
+                (ISNULL(sales.doc_count, 0) - ISNULL(devs.doc_count, 0)) AS docs_exitosos
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
             LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             OUTER APPLY (
-                SELECT SUM(r.total_art) AS qty
+                SELECT 
+                    SUM(r.total_art) AS qty,
+                    COUNT(DISTINCT f.doc_num) AS doc_count
                 FROM saFacturaVentaReng r
                 INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
                 WHERE r.co_art = a.co_art
@@ -1313,7 +1318,9 @@ router.get('/articulos-ventas', async (req, res) => {
                   AND f.fec_emis <= @fecha_hasta
             ) sales
             OUTER APPLY (
-                SELECT SUM(d.total_art) AS qty
+                SELECT 
+                    SUM(d.total_art) AS qty,
+                    COUNT(DISTINCT c.doc_num) AS doc_count
                 FROM saDevolucionClienteReng d
                 INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
                 WHERE d.co_art = a.co_art
