@@ -403,6 +403,10 @@ router.get('/article-history', async (req, res) => {
                 ISNULL(sales.doc_count, 0) AS docs_facturados,
                 ISNULL(devs.doc_count, 0) AS docs_devueltos,
                 (ISNULL(sales.doc_count, 0) - ISNULL(devs.doc_count, 0)) AS docs_exitosos,
+                ISNULL(recep.qty, 0) AS cant_recepcionada,
+                ISNULL(recep.doc_count, 0) AS docs_recepcion,
+                ISNULL(ajustes.qty_entrada, 0) AS cant_ajuste_entrada,
+                ISNULL(ajustes.qty_salida, 0) AS cant_ajuste_salida,
                 cs.stock_actual,
                 (cs.stock_actual - ISNULL(entradas_post.qty, 0) + ISNULL(salidas_post.qty, 0)) AS stock_inicial_calculado
             FROM Months m
@@ -429,6 +433,30 @@ router.get('/article-history', async (req, res) => {
                   AND c.fec_emis >= m.mes_inicio
                   AND c.fec_emis < DATEADD(month, 1, m.mes_inicio)
             ) devs
+            OUTER APPLY (
+                SELECT 
+                    SUM(nr_r.total_art) AS qty,
+                    COUNT(DISTINCT nr.doc_num) AS doc_count
+                FROM saNotaRecepcionCompraReng nr_r
+                INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
+                WHERE nr_r.co_art = @co_art
+                  AND nr.anulado = 0
+                  AND nr.fec_emis >= m.mes_inicio
+                  AND nr.fec_emis < DATEADD(month, 1, m.mes_inicio)
+            ) recep
+            OUTER APPLY (
+                SELECT 
+                    SUM(CASE WHEN r.co_tipo = '01' OR ta.tipo_trans = '0' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%' THEN r.total_art ELSE 0 END) AS qty_entrada,
+                    SUM(CASE WHEN r.co_tipo = '02' OR ta.tipo_trans = '1' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%' THEN r.total_art ELSE 0 END) AS qty_salida,
+                    COUNT(DISTINCT a.ajue_num) AS doc_count
+                FROM saAjusteReng r
+                INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num
+                LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo
+                WHERE r.co_art = @co_art
+                  AND a.anulado = 0
+                  AND a.fecha >= m.mes_inicio
+                  AND a.fecha < DATEADD(month, 1, m.mes_inicio)
+            ) ajustes
             OUTER APPLY (
                 -- Entradas de inventario desde mes_inicio hasta hoy
                 SELECT (
@@ -503,6 +531,10 @@ router.get('/article-history', async (req, res) => {
             docs_facturados: Number(row.docs_facturados) || 0,
             docs_devueltos: Number(row.docs_devueltos) || 0,
             docs_exitosos: Math.max(0, Number(row.docs_exitosos) || 0),
+            cant_recepcionada: Number(row.cant_recepcionada) || 0,
+            docs_recepcion: Number(row.docs_recepcion) || 0,
+            cant_ajuste_entrada: Number(row.cant_ajuste_entrada) || 0,
+            cant_ajuste_salida: Number(row.cant_ajuste_salida) || 0,
             stock_inicial: Math.max(0, Math.round(Number(row.stock_inicial_calculado) || 0))
         }));
 
