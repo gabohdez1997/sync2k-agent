@@ -105,6 +105,8 @@ router.get('/', async (req, res) => {
                 MAX(a.art_des) as des_art,
                 MAX(a.co_lin) as co_lin,
                 MAX(a.co_cat) as co_cat,
+                RTRIM(COALESCE(MAX(aun.co_uni), '01')) as co_uni,
+                RTRIM(COALESCE(MAX(aun.des_uni), MAX(aun.co_uni), 'UND')) as des_uni,
                 COALESCE(MAX(fact.cost_unit_om), MAX(rec.cost_unit_om), MAX(p2.monto) / 1.30, 0) as costo_actual,
                 SUM(CASE WHEN v.tipo_transaccion = 'STOCK' THEN v.stock_actual ELSE 0 END) as stock_almacen,
                 SUM(CASE WHEN v.tipo_transaccion = 'TRANSITO' THEN v.en_transito ELSE 0 END) as en_transito,
@@ -114,12 +116,18 @@ router.get('/', async (req, res) => {
                 STDEV(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE NULL END) as desviacion_ventas
             FROM saArticulo a
             LEFT JOIN v_compras_inventario v ON a.co_art = v.co_art
+            LEFT JOIN (
+                SELECT au.co_art, au.co_uni, u.des_uni,
+                       ROW_NUMBER() OVER(PARTITION BY au.co_art ORDER BY au.uni_principal DESC) as rn
+                FROM saArtUnidad au
+                LEFT JOIN saUnidad u ON LTRIM(RTRIM(au.co_uni)) = LTRIM(RTRIM(u.co_uni))
+            ) aun ON a.co_art = aun.co_art AND aun.rn = 1
             OUTER APPLY (
                 SELECT TOP 1 
                     CASE 
                         WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= n.fec_emis ORDER BY fecha DESC), 0)) 
-                        ELSE r.cost_unit_om 
-                    END AS cost_unit_om
+                    ELSE r.cost_unit_om 
+                END AS cost_unit_om
                 FROM saFacturaCompraReng r INNER JOIN saFacturaCompra n ON r.doc_num = n.doc_num
                 WHERE r.co_art = a.co_art AND n.anulado = 0
                 ORDER BY n.fec_emis DESC
@@ -128,8 +136,8 @@ router.get('/', async (req, res) => {
                 SELECT TOP 1 
                     CASE 
                         WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= n.fec_emis ORDER BY fecha DESC), 0)) 
-                        ELSE r.cost_unit_om 
-                    END AS cost_unit_om
+                    ELSE r.cost_unit_om 
+                END AS cost_unit_om
                 FROM saNotaRecepcionCompraReng r INNER JOIN saNotaRecepcionCompra n ON r.doc_num = n.doc_num
                 WHERE r.co_art = a.co_art AND n.anulado = 0
                 ORDER BY n.fec_emis DESC
@@ -153,13 +161,34 @@ router.get('/', async (req, res) => {
         const result = await request.query(query);
         let items = result.recordset;
 
-        // 1. Cálculos Base (VPD, TR, SDR, ROP, SS)
+        // Unidades configuradas dinámicamente o por reglas semánticas
+        const customUnitsParam = req.query.allow_decimals_units || '';
+        const customUnits = customUnitsParam ? customUnitsParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [];
+        const fractionalCodes = ['06', '07', '08', '10', '25'];
+        const fractionalKeywords = [
+            'MTS2', 'MTS', 'LTS', 'KG', 'ML',
+            'M2', 'M3', 'MT', 'LT', 'KGS', 'KILO', 'KILOS', 'KILOGRAMO', 'KILOGRAMOS',
+            'GR', 'GRS', 'GRAMO', 'GRAMOS', 'METRO', 'METROS', 'LITRO', 'LITROS',
+            'MILILITRO', 'MILILITROS', 'TON', 'TONELADA', 'CENTIMETRO', 'CM', 'MM', 'PULG', 'PULGADA', 'YARDA'
+        ];
+        function isFractionalUnit(co_uni, des_uni) {
+            const code = String(co_uni || '').trim().toUpperCase();
+            const desc = String(des_uni || '').trim().toUpperCase();
+            if (customUnits.some(a => a === code || a === desc || desc.includes(a) || code.includes(a))) {
+                return true;
+            }
+            return fractionalCodes.includes(code) || fractionalKeywords.includes(code) || fractionalKeywords.includes(desc);
+        }
+
+        // 1. Cálculos Base (VPD, TR, SDR, ROP, SS, Cant. Reponer)
         let totalSalesVal = 0;
         
         items = items.map(item => {
             const vpd = (item.ventas_netas > 0 ? item.ventas_netas : 0) / businessDays;
             // Si no hay datos historicos de TR, asumimos 15 días promedio
             const tr = item.tiempo_reposicion_promedio || 15; 
+            const isFrac = isFractionalUnit(item.co_uni, item.des_uni);
+            const demandaTR = vpd * tr;
             
             // Normalización de la Desviación Estándar de Demanda Diaria (evita distorsión por facturas al mayor esporádicas)
             let stdDev = item.desviacion_ventas || (vpd * 0.5);
@@ -171,13 +200,38 @@ router.get('/', async (req, res) => {
             }
 
             // Safety Stock (SS): factor Z (1.65 para 95% de confianza) * Desviación Diaria * sqrt(TR)
-            const ss = Math.round(1.65 * stdDev * Math.sqrt(tr));
+            let ss = 0;
+            if (vpd > 0) {
+                const rawSS = 1.65 * stdDev * Math.sqrt(tr);
+                ss = isFrac ? Number(rawSS.toFixed(2)) : Math.round(rawSS);
+            }
             
             // Reorder Point (ROP): (VPD * TR) + SS
-            const rop = Math.round((vpd * tr) + ss);
+            let rop = 0;
+            if (vpd > 0) {
+                const rawROP = demandaTR + ss;
+                if (isFrac) {
+                    rop = Number(rawROP.toFixed(2));
+                } else {
+                    // Para unidades discretas/enteras, el ROP mínimo es 1 unidad o el techo de la demanda en tiempo de reposición + SS
+                    rop = Math.max(1, Math.ceil(rawROP));
+                }
+            }
             
             // Stock Disponible Real (SDR) - solo inventario físico en almacén
             const sdr = (item.stock_almacen || 0);
+
+            // Cantidad sugerida a pedir
+            let cantSugerida = 0;
+            if (vpd > 0 || (item.ventas_netas || 0) > 0) {
+                if (sdr <= rop || sdr <= 0) {
+                    const diff = Math.max(rop + ss, rop) - sdr;
+                    cantSugerida = isFrac ? Math.max(0.01, Number(diff.toFixed(2))) : Math.max(1, Math.ceil(diff));
+                } else if (sdr < (rop + ss)) {
+                    const diff = (rop + ss) - sdr;
+                    cantSugerida = isFrac ? Number(diff.toFixed(2)) : Math.ceil(diff);
+                }
+            }
             
             // Valor de ventas para Pareto ABC
             const valorVentas = (item.ventas_netas > 0 ? item.ventas_netas : 0) * (item.costo_actual || 1);
@@ -188,11 +242,13 @@ router.get('/', async (req, res) => {
 
             return {
                 ...item,
+                is_frac: isFrac,
                 vpd,
                 tr,
                 ss,
                 rop,
                 sdr,
+                cant_sugerida: cantSugerida,
                 valor_ventas: valorVentas,
                 cv
             };
@@ -223,7 +279,7 @@ router.get('/', async (req, res) => {
         });
 
         // 3. Ordenar por URGENCIA de Compra
-        // Tier 1: SDR <= ROP (Ruptura inminente/actual - Rojo)
+        // Tier 1: SDR <= 0 y ventas > 0 (Quiebre total de stock) o SDR <= ROP
         // Tier 2: SDR <= ROP + SS (Cerca de ruptura - Amarillo)
         // Tier 3: SDR > ROP + SS (Sano / Sobre-stock - Verde)
         const classPriorityMap = {
@@ -233,9 +289,9 @@ router.get('/', async (req, res) => {
         };
 
         items.sort((a, b) => {
-            // Criterio 1: Nivel de Ruptura (1: Rojo, 2: Amarillo, 3: Verde)
-            const aTier = a.sdr <= a.rop ? 1 : (a.sdr <= a.rop + a.ss ? 2 : 3);
-            const bTier = b.sdr <= b.rop ? 1 : (b.sdr <= b.rop + b.ss ? 2 : 3);
+            // Criterio 1: Nivel de Ruptura (1: Rojo/Quiebre, 2: Amarillo, 3: Verde)
+            const aTier = (a.sdr <= a.rop || (a.sdr <= 0 && a.vpd > 0)) ? 1 : (a.sdr <= a.rop + a.ss ? 2 : 3);
+            const bTier = (b.sdr <= b.rop || (b.sdr <= 0 && b.vpd > 0)) ? 1 : (b.sdr <= b.rop + b.ss ? 2 : 3);
             if (aTier !== bTier) return aTier - bTier;
 
             // Criterio 2: Importancia de la clase (AX primero, CZ al final)
@@ -243,9 +299,9 @@ router.get('/', async (req, res) => {
             const bPrio = classPriorityMap[b.clase_conjunta] || 99;
             if (aPrio !== bPrio) return aPrio - bPrio;
 
-            // Criterio 3: Mayor déficit de capital (ROP - SDR) * costo
-            const aDeficit = (a.rop - a.sdr) * (a.costo_actual || 1);
-            const bDeficit = (b.rop - b.sdr) * (b.costo_actual || 1);
+            // Criterio 3: Mayor déficit de capital
+            const aDeficit = (a.cant_sugerida || 0) * (a.costo_actual || 1);
+            const bDeficit = (b.cant_sugerida || 0) * (b.costo_actual || 1);
             return bDeficit - aDeficit;
         });
 
@@ -260,11 +316,10 @@ router.get('/', async (req, res) => {
                 capitalInmovilizado += (item.sdr - (item.rop + item.ss)) * (item.costo_actual || 0);
             }
             
-            // Alerta si el SDR <= ROP
-            if (item.sdr <= item.rop) {
+            // Alerta si el SDR <= ROP o si SDR <= 0 con demanda
+            if (item.sdr <= item.rop || (item.sdr <= 0 && item.vpd > 0)) {
                 alertasSDR++;
-                const cantReponer = Math.max(0, (item.rop + item.ss) - item.sdr);
-                capitalRequerido += cantReponer * (item.costo_actual || 0);
+                capitalRequerido += (item.cant_sugerida || 0) * (item.costo_actual || 0);
             }
         });
 
@@ -283,6 +338,183 @@ router.get('/', async (req, res) => {
     } catch (error) {
         console.error(`[GET /analisis-compras]`, error);
         res.status(500).json({ success: false, message: 'Error en el análisis de compras.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/analisis-compras/article-history:
+ *   get:
+ *     summary: Obtiene el histórico mensual de ventas reales (Facturado - Devoluciones) de los últimos 12 meses para un artículo
+ *     tags: [Reportes]
+ *     parameters:
+ *       - in: query
+ *         name: co_art
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sede
+ *         schema: { type: string }
+ */
+router.get('/article-history', async (req, res) => {
+    try {
+        const co_art = (req.query.co_art || '').trim();
+        if (!co_art) {
+            return res.status(400).json({ success: false, message: 'El parámetro co_art es obligatorio.' });
+        }
+
+        let sede = req.query.sede || 'default';
+        const servers = getServers();
+        if (sede === 'default') {
+            if (servers && servers.length > 0) {
+                sede = servers[0].id;
+            } else {
+                return res.status(500).json({ success: false, message: 'No hay servidores SQL configurados.' });
+            }
+        }
+
+        const pool = await getPool(sede, req.sqlAuth);
+        const query = `
+            ;WITH Numbers AS (
+                SELECT 0 AS n
+                UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3
+                UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6
+                UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9
+                UNION ALL SELECT 10 UNION ALL SELECT 11
+            ),
+            Months AS (
+                SELECT 
+                    n,
+                    DATEADD(month, -n, DATEADD(day, 1 - DAY(GETDATE()), CAST(GETDATE() AS DATE))) AS mes_inicio
+                FROM Numbers
+            ),
+            CurrentStock AS (
+                SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                FROM saStockAlmacen
+                WHERE co_art = @co_art
+            )
+            SELECT 
+                YEAR(m.mes_inicio) AS anio,
+                MONTH(m.mes_inicio) AS mes,
+                CONVERT(VARCHAR(7), m.mes_inicio, 120) AS periodo,
+                ISNULL(sales.qty, 0) AS cant_facturada,
+                ISNULL(devs.qty, 0) AS cant_devuelta,
+                (ISNULL(sales.qty, 0) - ISNULL(devs.qty, 0)) AS cant_real_vendida,
+                ISNULL(sales.doc_count, 0) AS docs_facturados,
+                ISNULL(devs.doc_count, 0) AS docs_devueltos,
+                (ISNULL(sales.doc_count, 0) - ISNULL(devs.doc_count, 0)) AS docs_exitosos,
+                cs.stock_actual,
+                (cs.stock_actual - ISNULL(entradas_post.qty, 0) + ISNULL(salidas_post.qty, 0)) AS stock_inicial_calculado
+            FROM Months m
+            CROSS JOIN CurrentStock cs
+            OUTER APPLY (
+                SELECT 
+                    SUM(r.total_art) AS qty,
+                    COUNT(DISTINCT f.doc_num) AS doc_count
+                FROM saFacturaVentaReng r
+                INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                WHERE r.co_art = @co_art
+                  AND f.anulado = 0
+                  AND f.fec_emis >= m.mes_inicio
+                  AND f.fec_emis < DATEADD(month, 1, m.mes_inicio)
+            ) sales
+            OUTER APPLY (
+                SELECT 
+                    SUM(d.total_art) AS qty,
+                    COUNT(DISTINCT c.doc_num) AS doc_count
+                FROM saDevolucionClienteReng d
+                INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
+                WHERE d.co_art = @co_art
+                  AND c.anulado = 0
+                  AND c.fec_emis >= m.mes_inicio
+                  AND c.fec_emis < DATEADD(month, 1, m.mes_inicio)
+            ) devs
+            OUTER APPLY (
+                -- Entradas de inventario desde mes_inicio hasta hoy
+                SELECT (
+                    ISNULL((
+                        SELECT SUM(r.total_art)
+                        FROM saNotaRecepcionCompraReng r
+                        INNER JOIN saNotaRecepcionCompra nr ON r.doc_num = nr.doc_num
+                        WHERE r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= m.mes_inicio
+                    ), 0)
+                    +
+                    ISNULL((
+                        SELECT SUM(r.total_art)
+                        FROM saDevolucionClienteReng r
+                        INNER JOIN saDevolucionCliente dc ON r.doc_num = dc.doc_num
+                        WHERE r.co_art = @co_art AND dc.anulado = 0 AND dc.fec_emis >= m.mes_inicio
+                    ), 0)
+                    +
+                    ISNULL((
+                        SELECT SUM(r.total_art)
+                        FROM saAjusteReng r
+                        INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num
+                        WHERE r.co_art = @co_art AND a.anulado = 0 
+                          AND (r.co_tipo = '01' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%') 
+                          AND a.fecha >= m.mes_inicio
+                    ), 0)
+                ) AS qty
+            ) entradas_post
+            OUTER APPLY (
+                -- Salidas de inventario desde mes_inicio hasta hoy
+                SELECT (
+                    ISNULL((
+                        SELECT SUM(r.total_art)
+                        FROM saFacturaVentaReng r
+                        INNER JOIN saFacturaVenta fv ON r.doc_num = fv.doc_num
+                        WHERE r.co_art = @co_art AND fv.anulado = 0 AND fv.fec_emis >= m.mes_inicio
+                    ), 0)
+                    +
+                    ISNULL((
+                        SELECT SUM(r.total_art)
+                        FROM saDevolucionProveedorReng r
+                        INNER JOIN saDevolucionProveedor dp ON r.doc_num = dp.doc_num
+                        WHERE r.co_art = @co_art AND dp.anulado = 0 AND dp.fec_emis >= m.mes_inicio
+                    ), 0)
+                    +
+                    ISNULL((
+                        SELECT SUM(r.total_art)
+                        FROM saAjusteReng r
+                        INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num
+                        WHERE r.co_art = @co_art AND a.anulado = 0 
+                          AND (r.co_tipo = '02' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%') 
+                          AND a.fecha >= m.mes_inicio
+                    ), 0)
+                ) AS qty
+            ) salidas_post
+            ORDER BY m.mes_inicio ASC
+        `;
+
+        const request = pool.request();
+        request.input('co_art', co_art);
+
+        const result = await request.query(query);
+        const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+        const history = result.recordset.map(row => ({
+            anio: row.anio,
+            mes: row.mes,
+            periodo: row.periodo,
+            mes_nombre: `${monthNames[row.mes - 1]} ${row.anio}`,
+            cant_facturada: Number(row.cant_facturada) || 0,
+            cant_devuelta: Number(row.cant_devuelta) || 0,
+            cant_real_vendida: Number(row.cant_real_vendida) || 0,
+            docs_facturados: Number(row.docs_facturados) || 0,
+            docs_devueltos: Number(row.docs_devueltos) || 0,
+            docs_exitosos: Math.max(0, Number(row.docs_exitosos) || 0),
+            stock_inicial: Math.max(0, Math.round(Number(row.stock_inicial_calculado) || 0))
+        }));
+
+        res.json({
+            success: true,
+            co_art,
+            server: sede,
+            history
+        });
+    } catch (error) {
+        console.error(`[GET /analisis-compras/article-history]`, error);
+        res.status(500).json({ success: false, message: 'Error consultando histórico del artículo.', error: error.message });
     }
 });
 
