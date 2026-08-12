@@ -44,19 +44,11 @@ router.get('/', async (req, res) => {
                 const r = pool.request();
                 
                 let query = `
-                    SELECT RTRIM(co_ubicacion) AS id, RTRIM(des_ubicacion) AS descripcion
+                    SELECT RTRIM(co_ubicacion) AS id, RTRIM(des_ubicacion) AS descripcion,
+                           RTRIM(co_ubicacion) AS co_ubicacion, RTRIM(des_ubicacion) AS des_ubicacion
                     FROM saUbicacion
+                    ORDER BY des_ubicacion
                 `;
-
-                // Filtrar por los códigos de sucursal de Profit asociados a esta sede
-                const codes = (srv.profit_branch_codes || []).map(c => typeof c === 'string' ? c : c.code).filter(Boolean);
-                if (codes.length > 0) {
-                    const params = codes.map((c, i) => `@c${i}`).join(',');
-                    codes.forEach((c, i) => r.input(`c${i}`, sql.Char, c));
-                    query += ` WHERE co_sucu_in IN (${params})`;
-                }
-
-                query += ` ORDER BY des_ubicacion`;
                 
                 const dbRes = await r.query(query);
                 return dbRes.recordset.map(u => ({ ...u, sede_id: srv.id, sede_nombre: srv.name }));
