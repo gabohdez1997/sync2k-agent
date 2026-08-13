@@ -424,7 +424,7 @@ router.post('/:ajue_num/anular', async (req, res) => {
 
         const ajueHeader = ajueRes.recordset[0];
         if (ajueHeader.anulado) {
-            return res.status(400).json({ success: false, message: `El ajuste ${ajue_num} ya se encuentra anulado.` });
+            return res.status(200).json({ success: true, already_voided: true, message: `El ajuste ${ajue_num} ya se encuentra anulado en Profit Plus.` });
         }
 
         // 2. Obtener renglones del ajuste fuera de transacción
