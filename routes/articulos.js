@@ -584,6 +584,107 @@ router.get('/next-code', async (req, res) => {
     }
 });
 
+// 2.8 POST /api/v1/articulos/bulk — Consulta masiva de artículos por lista de códigos
+// ────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/v1/articulos/bulk:
+ *   post:
+ *     summary: Consulta masiva de artículos por lista de códigos
+ *     tags: [Articulos]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               codes:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Lista de artículos encontrados
+ */
+router.post('/bulk', async (req, res) => {
+    try {
+        const rawCodes = req.body.codes || [];
+        if (!Array.isArray(rawCodes) || rawCodes.length === 0) {
+            return res.status(400).json({ success: false, message: 'Debe enviar un arreglo de códigos en "codes".' });
+        }
+
+        const codes = Array.from(new Set(rawCodes.map(c => String(c || '').trim()).filter(Boolean)));
+        if (codes.length === 0) {
+            return res.status(400).json({ success: false, message: 'No se encontraron códigos válidos.' });
+        }
+
+        const requestedSede = req.body.sede || req.body.sede_id || req.query.sede || req.query.sede_id;
+        let servers = getServers();
+        if (requestedSede && requestedSede !== "Todas") {
+            servers = servers.filter(srv => srv.id === requestedSede || srv.name === requestedSede);
+        }
+
+        const idsEscaped = codes.map(c => `'${c.replace(/'/g, "''")}'`).join(',');
+
+        const results = await Promise.all(servers.map(async (srv) => {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const r = pool.request();
+
+                const querySQL = `
+                    SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS art_des, RTRIM(a.art_des) AS descripcion,
+                           a.anulado, RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
+                           RTRIM(a.co_lin) AS co_lin, RTRIM(l.lin_des) AS linea,
+                           RTRIM(a.co_cat) AS co_cat, RTRIM(c.cat_des) AS categoria,
+                           RTRIM(aun.co_uni) AS co_uni, RTRIM(ISNULL(un.des_uni, aun.co_uni)) AS unidad,
+                           RTRIM(a.tipo_imp) AS tipo_imp, RTRIM(a.campo7) AS campo7,
+                           0 AS costo,
+                           0 AS costo_bs
+                    FROM saArticulo a
+                    LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+                    LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+                    LEFT JOIN (
+                        SELECT co_art, co_uni, 
+                               ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
+                        FROM saArtUnidad
+                    ) aun ON LTRIM(RTRIM(a.co_art)) = LTRIM(RTRIM(aun.co_art)) AND aun.rn = 1
+                    LEFT JOIN saUnidad un ON LTRIM(RTRIM(aun.co_uni)) = LTRIM(RTRIM(un.co_uni))
+                    WHERE LTRIM(RTRIM(a.co_art)) IN (${idsEscaped})
+                `;
+
+                const resData = await r.query(querySQL);
+                const articulos = (resData.recordset || []).map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
+                
+                const tasa = await getExchangeRate(pool);
+                const enriched = await enrichArticulos(pool, articulos, tasa, req.body.authorized_almacenes || req.query.authorized_almacenes);
+
+                return enriched.map(item => {
+                    const totalStock = (item.disponibilidad || []).reduce((acc, d) => acc + (Number(d.stock) || 0), 0);
+                    return {
+                        ...item,
+                        stock: totalStock,
+                        stock_global: totalStock
+                    };
+                });
+            } catch (e) {
+                console.error(`[POST /articulos/bulk] Error en sede ${srv.id}:`, e.message);
+                return [];
+            }
+        }));
+
+        const flattened = results.flat();
+        return res.status(200).json({
+            success: true,
+            count: flattened.length,
+            data: flattened
+        });
+    } catch (error) {
+        console.error('[POST /articulos/bulk] Error general:', error);
+        return res.status(500).json({ success: false, message: 'Error en consulta masiva de artículos.', error: error.message });
+    }
+});
+
 // ────────────────────────────────────────────────────────────────────────────
 // 3. GET /api/v1/articulos/:co_art — Detalle completo por sede
 // ────────────────────────────────────────────────────────────────────────────
