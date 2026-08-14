@@ -128,8 +128,10 @@ router.get('/', async (req, res) => {
         const categoria = req.query.categoria;
         const ubicacion = req.query.co_ubicacion;
 
+        const con_imagen = req.query.con_imagen === 'true' || req.query.has_image === 'true' || req.query.con_img === 'true';
+
         // Decidir si hacemos búsqueda global o paginación perezosa por rendimiento.
-        const isGlobalNeeded = !!(search || linea || categoria || ubicacion || (reqSort && reqSort.startsWith('price')) || in_stock_all);
+        const isGlobalNeeded = !!(search || linea || categoria || ubicacion || (reqSort && reqSort.startsWith('price')) || in_stock_all || con_imagen);
 
         // 1. Obtener listado simultáneamente de todos los servidores (aunque sea uno solo ahora)
         let globalTotal = 0;
@@ -139,6 +141,9 @@ router.get('/', async (req, res) => {
                 const r = pool.request();
 
                 let whereClauses = ["a.anulado = 0"];
+                if (con_imagen) {
+                    whereClauses.push("LTRIM(RTRIM(ISNULL(a.campo7, ''))) != ''");
+                }
                 const co_alma = req.query.co_alma;
                 const authAlmacenes = req.query.authorized_almacenes;
 
