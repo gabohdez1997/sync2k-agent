@@ -339,7 +339,8 @@ router.get('/search', async (req, res) => {
             linea_nombre: 'l.lin_des', sublinea_nombre: 'sl.subl_des', categoria_nombre: 'c.cat_des',
             co_ubicacion: 'au.co_ubicacion', ubicacion: 'u1.des_ubicacion',
             co_ubicacion2: 'au.co_ubicacion2', ubicacion2: 'u2.des_ubicacion',
-            co_ubicacion3: 'au.co_ubicacion3', ubicacion3: 'u3.des_ubicacion'
+            co_ubicacion3: 'au.co_ubicacion3', ubicacion3: 'u3.des_ubicacion',
+            campo7: 'a.campo7'
         };
 
         const filters = Object.entries(req.query)
@@ -360,12 +361,13 @@ router.get('/search', async (req, res) => {
 
         var globalSearch = req.query.search || req.query.q;
 
-        if (!filters.length && !req.query.sede && !req.query.sort && !globalSearch) {
+        if (!filters.length && !req.query.sede && !req.query.sort && !globalSearch && !req.query.con_imagen) {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
         }
         const co_alma = req.query.co_alma;
         const authAlmacenes = req.query.authorized_almacenes;
         const in_stock_all = req.query.in_stock === 'all';
+        const con_imagen = req.query.con_imagen === 'true' || req.query.has_image === 'true' || req.query.con_img === 'true';
 
         let authStockFilter = "";
         if (co_alma) {
@@ -380,6 +382,9 @@ router.get('/search', async (req, res) => {
         const ofertaFilter = filters.find(f => f.hasOwnProperty('isOferta'));
 
         let whereClause = 'WHERE a.anulado = 0 ';
+        if (con_imagen) {
+            whereClause += " AND LTRIM(RTRIM(ISNULL(a.campo7, ''))) != '' ";
+        }
         if (!in_stock_all) {
             whereClause += ` AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art ${authStockFilter} GROUP BY st.co_art HAVING SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='ACT' THEN st.stock ELSE 0 END, 0)) - SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='COM' THEN st.stock ELSE 0 END, 0)) > 0)) `;
         }
@@ -655,7 +660,7 @@ router.post('/bulk', async (req, res) => {
 
                 const resData = await r.query(querySQL);
                 const articulos = (resData.recordset || []).map(a => ({ ...a, sede_id: srv.id, sede_nombre: srv.name }));
-                
+
                 const tasa = await getExchangeRate(pool);
                 const enriched = await enrichArticulos(pool, articulos, tasa, req.body.authorized_almacenes || req.query.authorized_almacenes);
 
@@ -1622,7 +1627,7 @@ router.put('/:co_art/imagen', async (req, res) => {
         // Si no se especifica sede, el broadcast es automático a todas las sedes activas
         const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
-            
+
             const r = new sql.Request(pool);
             r.input('co_art', sql.Char(30), co_art.trim());
             r.input('imageUrl', sql.VarChar(250), imageUrl); // campo7 es varchar(250) usualmente
