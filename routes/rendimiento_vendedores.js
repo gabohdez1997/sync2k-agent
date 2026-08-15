@@ -93,6 +93,27 @@ router.get('/', async (req, res) => {
                             AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
                       )
                 ),
+                Cortes AS (
+                    SELECT 
+                        CAST(f.fec_emis AS DATE) AS fecha,
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven
+                    FROM saFacturaVentaReng r
+                    JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                    WHERE f.anulado = 0
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      AND (
+                          r.co_art LIKE '902001%' OR r.co_art LIKE '0902001%' OR r.co_art LIKE '%902001%'
+                          OR r.co_art LIKE '902002%' OR r.co_art LIKE '0902002%' OR r.co_art LIKE '%902002%'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                ),
                 Documentos AS (
                     SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'factura' AS tipo
                     FROM saFacturaVenta
@@ -112,6 +133,9 @@ router.get('/', async (req, res) => {
                     UNION ALL
                     SELECT fecha, co_ven, 'flete' AS tipo
                     FROM Fletes
+                    UNION ALL
+                    SELECT fecha, co_ven, 'corte' AS tipo
+                    FROM Cortes
                 )
                 SELECT 
                     CONVERT(VARCHAR(10), fecha, 120) AS fecha_str,
@@ -124,7 +148,8 @@ router.get('/', async (req, res) => {
                     (SUM(CASE WHEN tipo = 'factura' THEN 1 ELSE 0 END) - SUM(CASE WHEN tipo = 'devolucion' THEN 1 ELSE 0 END)) AS docs_exitosos,
                     SUM(CASE WHEN tipo = 'cotizacion' THEN 1 ELSE 0 END) AS cotizaciones,
                     SUM(CASE WHEN tipo = 'pedido' THEN 1 ELSE 0 END) AS pedidos,
-                    SUM(CASE WHEN tipo = 'flete' THEN 1 ELSE 0 END) AS fletes
+                    SUM(CASE WHEN tipo = 'flete' THEN 1 ELSE 0 END) AS fletes,
+                    SUM(CASE WHEN tipo = 'corte' THEN 1 ELSE 0 END) AS cortes
                 FROM Documentos
                 GROUP BY fecha, co_ven
                 HAVING COUNT(*) > 0
@@ -150,57 +175,7 @@ router.get('/', async (req, res) => {
                             AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
                       )
                 ),
-                Documentos AS (
-                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'factura' AS tipo
-                    FROM saFacturaVenta
-                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
-                    UNION ALL
-                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'devolucion' AS tipo
-                    FROM saDevolucionCliente
-                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
-                    UNION ALL
-                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'cotizacion' AS tipo
-                    FROM saCotizacionCliente
-                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
-                    UNION ALL
-                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'pedido' AS tipo
-                    FROM saPedidoVenta
-                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
-                    UNION ALL
-                    SELECT fecha, co_ven, 'flete' AS tipo
-                    FROM Fletes
-                ),
-                DocSemana AS (
-                    SELECT 
-                        DATEADD(day, - ((DATEPART(weekday, fecha) + @@DATEFIRST - 2) % 7), fecha) AS semana_inicio,
-                        co_ven,
-                        tipo
-                    FROM Documentos
-                )
-                SELECT 
-                    CONVERT(VARCHAR(10), semana_inicio, 120) AS semana_inicio,
-                    CONVERT(VARCHAR(10), DATEADD(day, 6, semana_inicio), 120) AS semana_fin,
-                    DAY(semana_inicio) AS dia_inicio,
-                    MONTH(semana_inicio) AS mes_inicio,
-                    YEAR(semana_inicio) AS anio_inicio,
-                    DAY(DATEADD(day, 6, semana_inicio)) AS dia_fin,
-                    MONTH(DATEADD(day, 6, semana_inicio)) AS mes_fin,
-                    YEAR(DATEADD(day, 6, semana_inicio)) AS anio_fin,
-                    co_ven,
-                    SUM(CASE WHEN tipo = 'factura' THEN 1 ELSE 0 END) AS facturas,
-                    SUM(CASE WHEN tipo = 'devolucion' THEN 1 ELSE 0 END) AS devoluciones,
-                    (SUM(CASE WHEN tipo = 'factura' THEN 1 ELSE 0 END) - SUM(CASE WHEN tipo = 'devolucion' THEN 1 ELSE 0 END)) AS docs_exitosos,
-                    SUM(CASE WHEN tipo = 'cotizacion' THEN 1 ELSE 0 END) AS cotizaciones,
-                    SUM(CASE WHEN tipo = 'pedido' THEN 1 ELSE 0 END) AS pedidos,
-                    SUM(CASE WHEN tipo = 'flete' THEN 1 ELSE 0 END) AS fletes
-                FROM DocSemana
-                GROUP BY semana_inicio, co_ven
-                ORDER BY semana_inicio ASC
-            `;
-        } else {
-            // Mensual
-            query = `
-                ;WITH Fletes AS (
+                Cortes AS (
                     SELECT 
                         CAST(f.fec_emis AS DATE) AS fecha,
                         LTRIM(RTRIM(f.co_ven)) AS co_ven
@@ -208,7 +183,10 @@ router.get('/', async (req, res) => {
                     JOIN saFacturaVenta f ON r.doc_num = f.doc_num
                     WHERE f.anulado = 0
                       AND f.fec_emis >= @start AND f.fec_emis <= @end
-                      AND (r.co_art LIKE '901001%' OR r.co_art LIKE '0901001%' OR r.co_art LIKE '%901001%')
+                      AND (
+                          r.co_art LIKE '902001%' OR r.co_art LIKE '0902001%' OR r.co_art LIKE '%902001%'
+                          OR r.co_art LIKE '902002%' OR r.co_art LIKE '0902002%' OR r.co_art LIKE '%902002%'
+                      )
                       AND NOT EXISTS (
                           SELECT 1 
                           FROM saDevolucionClienteReng dr
@@ -237,6 +215,102 @@ router.get('/', async (req, res) => {
                     UNION ALL
                     SELECT fecha, co_ven, 'flete' AS tipo
                     FROM Fletes
+                    UNION ALL
+                    SELECT fecha, co_ven, 'corte' AS tipo
+                    FROM Cortes
+                ),
+                DocSemana AS (
+                    SELECT 
+                        DATEADD(day, - ((DATEPART(weekday, fecha) + @@DATEFIRST - 2) % 7), fecha) AS semana_inicio,
+                        co_ven,
+                        tipo
+                    FROM Documentos
+                )
+                SELECT 
+                    CONVERT(VARCHAR(10), semana_inicio, 120) AS semana_inicio,
+                    CONVERT(VARCHAR(10), DATEADD(day, 6, semana_inicio), 120) AS semana_fin,
+                    DAY(semana_inicio) AS dia_inicio,
+                    MONTH(semana_inicio) AS mes_inicio,
+                    YEAR(semana_inicio) AS anio_inicio,
+                    DAY(DATEADD(day, 6, semana_inicio)) AS dia_fin,
+                    MONTH(DATEADD(day, 6, semana_inicio)) AS mes_fin,
+                    YEAR(DATEADD(day, 6, semana_inicio)) AS anio_fin,
+                    co_ven,
+                    SUM(CASE WHEN tipo = 'factura' THEN 1 ELSE 0 END) AS facturas,
+                    SUM(CASE WHEN tipo = 'devolucion' THEN 1 ELSE 0 END) AS devoluciones,
+                    (SUM(CASE WHEN tipo = 'factura' THEN 1 ELSE 0 END) - SUM(CASE WHEN tipo = 'devolucion' THEN 1 ELSE 0 END)) AS docs_exitosos,
+                    SUM(CASE WHEN tipo = 'cotizacion' THEN 1 ELSE 0 END) AS cotizaciones,
+                    SUM(CASE WHEN tipo = 'pedido' THEN 1 ELSE 0 END) AS pedidos,
+                    SUM(CASE WHEN tipo = 'flete' THEN 1 ELSE 0 END) AS fletes,
+                    SUM(CASE WHEN tipo = 'corte' THEN 1 ELSE 0 END) AS cortes
+                FROM DocSemana
+                GROUP BY semana_inicio, co_ven
+                ORDER BY semana_inicio ASC
+            `;
+        } else {
+            // Mensual
+            query = `
+                ;WITH Fletes AS (
+                    SELECT 
+                        CAST(f.fec_emis AS DATE) AS fecha,
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven
+                    FROM saFacturaVentaReng r
+                    JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                    WHERE f.anulado = 0
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      AND (r.co_art LIKE '901001%' OR r.co_art LIKE '0901001%' OR r.co_art LIKE '%901001%')
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                ),
+                Cortes AS (
+                    SELECT 
+                        CAST(f.fec_emis AS DATE) AS fecha,
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven
+                    FROM saFacturaVentaReng r
+                    JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                    WHERE f.anulado = 0
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      AND (
+                          r.co_art LIKE '902001%' OR r.co_art LIKE '0902001%' OR r.co_art LIKE '%902001%'
+                          OR r.co_art LIKE '902002%' OR r.co_art LIKE '0902002%' OR r.co_art LIKE '%902002%'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                ),
+                Documentos AS (
+                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'factura' AS tipo
+                    FROM saFacturaVenta
+                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'devolucion' AS tipo
+                    FROM saDevolucionCliente
+                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'cotizacion' AS tipo
+                    FROM saCotizacionCliente
+                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(fec_emis AS DATE) AS fecha, LTRIM(RTRIM(co_ven)) AS co_ven, 'pedido' AS tipo
+                    FROM saPedidoVenta
+                    WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
+                    UNION ALL
+                    SELECT fecha, co_ven, 'flete' AS tipo
+                    FROM Fletes
+                    UNION ALL
+                    SELECT fecha, co_ven, 'corte' AS tipo
+                    FROM Cortes
                 )
                 SELECT 
                     YEAR(fecha) AS anio,
@@ -247,7 +321,8 @@ router.get('/', async (req, res) => {
                     (SUM(CASE WHEN tipo = 'factura' THEN 1 ELSE 0 END) - SUM(CASE WHEN tipo = 'devolucion' THEN 1 ELSE 0 END)) AS docs_exitosos,
                     SUM(CASE WHEN tipo = 'cotizacion' THEN 1 ELSE 0 END) AS cotizaciones,
                     SUM(CASE WHEN tipo = 'pedido' THEN 1 ELSE 0 END) AS pedidos,
-                    SUM(CASE WHEN tipo = 'flete' THEN 1 ELSE 0 END) AS fletes
+                    SUM(CASE WHEN tipo = 'flete' THEN 1 ELSE 0 END) AS fletes,
+                    SUM(CASE WHEN tipo = 'corte' THEN 1 ELSE 0 END) AS cortes
                 FROM Documentos
                 GROUP BY YEAR(fecha), MONTH(fecha), co_ven
                 ORDER BY anio ASC, mes ASC
@@ -287,7 +362,8 @@ router.get('/', async (req, res) => {
                 docs_exitosos: Number(row.docs_exitosos) || 0,
                 cotizaciones: Number(row.cotizaciones) || 0,
                 pedidos: Number(row.pedidos) || 0,
-                fletes: Number(row.fletes) || 0
+                fletes: Number(row.fletes) || 0,
+                cortes: Number(row.cortes) || 0
             };
         });
 
@@ -311,7 +387,8 @@ router.get('/', async (req, res) => {
                 docs_exitosos: 0,
                 cotizaciones: 0,
                 pedidos: 0,
-                fletes: 0
+                fletes: 0,
+                cortes: 0
             });
         }
 
@@ -325,13 +402,14 @@ router.get('/', async (req, res) => {
                 item.cotizaciones += r.cotizaciones;
                 item.pedidos += r.pedidos;
                 item.fletes += r.fletes;
+                item.cortes += r.cortes;
             }
         }
 
         // Si se filtró por un vendedor específico y es vista diaria, excluimos días donde ese vendedor tuvo 0 docs
         let timeline = Array.from(mainTimelineMap.values());
         if (coVen && tipoAgrupacion === 'diario') {
-            timeline = timeline.filter(t => (t.facturas + t.cotizaciones + t.pedidos + t.devoluciones + t.fletes) > 0);
+            timeline = timeline.filter(t => (t.facturas + t.cotizaciones + t.pedidos + t.devoluciones + t.fletes + t.cortes) > 0);
         }
 
         // Totales acumulados
@@ -342,8 +420,9 @@ router.get('/', async (req, res) => {
             acc.cotizaciones += m.cotizaciones;
             acc.pedidos += m.pedidos;
             acc.fletes += m.fletes;
+            acc.cortes += m.cortes;
             return acc;
-        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0 });
+        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0 });
 
         // Lista de vendedores activos en el período cruzados con MasterProfitPro.dbo.MpUsuario
         let vendedores = [];
