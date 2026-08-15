@@ -117,6 +117,8 @@ app.use('/api/v1/cobros',      require('./routes/cobros'));
 app.use('/api/v1/ajustes',     require('./routes/ajustes'));
 app.use('/api/v1/query',       require('./routes/query'));
 app.use('/api/v1/analisis-compras', require('./routes/analisis_compras'));
+app.use('/api/v1/rendimiento-vendedores', require('./routes/rendimiento_vendedores'));
+app.use('/api/v1/vendor-performance', require('./routes/rendimiento_vendedores'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });
