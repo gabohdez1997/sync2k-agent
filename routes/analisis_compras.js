@@ -364,6 +364,17 @@ router.get('/article-history', async (req, res) => {
         }
 
         let sede = req.query.sede || 'default';
+        let startDate = req.query.startDate;
+        let endDate = req.query.endDate;
+
+        if (!startDate || !endDate) {
+            const end = new Date();
+            const start = new Date();
+            start.setDate(end.getDate() - 365);
+            startDate = start.toISOString().split('T')[0];
+            endDate = end.toISOString().split('T')[0];
+        }
+
         const servers = getServers();
         if (sede === 'default') {
             if (servers && servers.length > 0) {
@@ -374,174 +385,321 @@ router.get('/article-history', async (req, res) => {
         }
 
         const pool = await getPool(sede, req.sqlAuth);
-        const query = `
-            ;WITH Numbers AS (
-                SELECT 0 AS n
-                UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3
-                UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6
-                UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9
-                UNION ALL SELECT 10 UNION ALL SELECT 11
-            ),
-            Months AS (
+
+        // Extraer año, mes y día para calcular la granularidad
+        const sParts = startDate.split('-').map(Number);
+        const eParts = endDate.split('-').map(Number);
+        const sYear = sParts[0] || new Date().getFullYear();
+        const sMonth = sParts[1] || (new Date().getMonth() + 1);
+        const sDay = sParts[2] || 1;
+        const eYear = eParts[0] || new Date().getFullYear();
+        const eMonth = eParts[1] || (new Date().getMonth() + 1);
+        const eDay = eParts[2] || 1;
+
+        // Días que tiene el mes de startDate
+        const daysInStartMonth = new Date(sYear, sMonth, 0).getDate();
+
+        // Diferencia en días del rango (inclusivo)
+        const sDate = new Date(Date.UTC(sYear, sMonth - 1, sDay));
+        const eDate = new Date(Date.UTC(eYear, eMonth - 1, eDay));
+        const diffDays = Math.max(1, Math.round((eDate.getTime() - sDate.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+
+        // Granularidad según regla:
+        // 1. Rango <= días del mes de startDate (+1) -> diario
+        // 2. Rango <= 93 días (3 meses / 90d) -> semanal
+        // 3. Rango > 93 días -> mensual
+        let tipoAgrupacion = 'mensual';
+        if (diffDays <= (daysInStartMonth + 1)) {
+            tipoAgrupacion = 'diario';
+        } else if (diffDays <= 93) {
+            tipoAgrupacion = 'semanal';
+        } else {
+            tipoAgrupacion = 'mensual';
+        }
+
+        let query = '';
+        if (tipoAgrupacion === 'diario') {
+            query = `
+                ;WITH CurrentStock AS (
+                    SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                    FROM saStockAlmacen
+                    WHERE co_art = @co_art
+                ),
+                Movimientos AS (
+                    SELECT CAST(f.fec_emis AS DATE) AS fecha, f.doc_num, r.total_art AS qty, 'factura' AS tipo
+                    FROM saFacturaVentaReng r
+                    INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                    WHERE r.co_art = @co_art AND f.anulado = 0 AND f.fec_emis >= @start AND f.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(c.fec_emis AS DATE) AS fecha, c.doc_num, d.total_art AS qty, 'devolucion' AS tipo
+                    FROM saDevolucionClienteReng d
+                    INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
+                    WHERE d.co_art = @co_art AND c.anulado = 0 AND c.fec_emis >= @start AND c.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(nr.fec_emis AS DATE) AS fecha, nr.doc_num, nr_r.total_art AS qty, 'recepcion' AS tipo
+                    FROM saNotaRecepcionCompraReng nr_r
+                    INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
+                    WHERE nr_r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(a.fecha AS DATE) AS fecha, a.ajue_num AS doc_num, ar.total_art AS qty,
+                           CASE WHEN ar.co_tipo = '01' OR ta.tipo_trans = '0' OR ar.co_tipo LIKE '%ENT%' OR ar.co_tipo LIKE '%IN%' THEN 'ajuste_entrada' ELSE 'ajuste_salida' END AS tipo
+                    FROM saAjusteReng ar
+                    INNER JOIN saAjuste a ON ar.ajue_num = a.ajue_num
+                    LEFT JOIN saTipoAjuste ta ON ar.co_tipo = ta.co_tipo
+                    WHERE ar.co_art = @co_art AND a.anulado = 0 AND a.fecha >= @start AND a.fecha <= @end
+                ),
+                Periodos AS (
+                    SELECT 
+                        fecha AS periodo_inicio,
+                        DATEADD(day, 1, fecha) AS periodo_fin,
+                        DAY(fecha) AS dia,
+                        MONTH(fecha) AS mes,
+                        YEAR(fecha) AS anio,
+                        CONVERT(VARCHAR(10), fecha, 120) AS periodo_str,
+                        SUM(CASE WHEN tipo = 'factura' THEN qty ELSE 0 END) AS cant_facturada,
+                        SUM(CASE WHEN tipo = 'devolucion' THEN qty ELSE 0 END) AS cant_devuelta,
+                        COUNT(DISTINCT CASE WHEN tipo = 'factura' THEN doc_num ELSE NULL END) AS docs_facturados,
+                        COUNT(DISTINCT CASE WHEN tipo = 'devolucion' THEN doc_num ELSE NULL END) AS docs_devueltos,
+                        SUM(CASE WHEN tipo = 'recepcion' THEN qty ELSE 0 END) AS cant_recepcionada,
+                        COUNT(DISTINCT CASE WHEN tipo = 'recepcion' THEN doc_num ELSE NULL END) AS docs_recepcion,
+                        SUM(CASE WHEN tipo = 'ajuste_entrada' THEN qty ELSE 0 END) AS cant_ajuste_entrada,
+                        SUM(CASE WHEN tipo = 'ajuste_salida' THEN qty ELSE 0 END) AS cant_ajuste_salida
+                    FROM Movimientos
+                    GROUP BY fecha
+                )
                 SELECT 
-                    n,
-                    DATEADD(month, -n, DATEADD(day, 1 - DAY(GETDATE()), CAST(GETDATE() AS DATE))) AS mes_inicio
-                FROM Numbers
-            ),
-            CurrentStock AS (
-                SELECT ISNULL(SUM(stock), 0) AS stock_actual
-                FROM saStockAlmacen
-                WHERE co_art = @co_art
-            )
-            SELECT 
-                YEAR(m.mes_inicio) AS anio,
-                MONTH(m.mes_inicio) AS mes,
-                CONVERT(VARCHAR(7), m.mes_inicio, 120) AS periodo,
-                ISNULL(sales.qty, 0) AS cant_facturada,
-                ISNULL(devs.qty, 0) AS cant_devuelta,
-                (ISNULL(sales.qty, 0) - ISNULL(devs.qty, 0)) AS cant_real_vendida,
-                ISNULL(sales.doc_count, 0) AS docs_facturados,
-                ISNULL(devs.doc_count, 0) AS docs_devueltos,
-                (ISNULL(sales.doc_count, 0) - ISNULL(devs.doc_count, 0)) AS docs_exitosos,
-                ISNULL(recep.qty, 0) AS cant_recepcionada,
-                ISNULL(recep.doc_count, 0) AS docs_recepcion,
-                ISNULL(ajustes.qty_entrada, 0) AS cant_ajuste_entrada,
-                ISNULL(ajustes.qty_salida, 0) AS cant_ajuste_salida,
-                cs.stock_actual,
-                (cs.stock_actual - ISNULL(entradas_post.qty, 0) + ISNULL(salidas_post.qty, 0)) AS stock_inicial_calculado
-            FROM Months m
-            CROSS JOIN CurrentStock cs
-            OUTER APPLY (
+                    p.*,
+                    (p.cant_facturada - p.cant_devuelta) AS cant_real_vendida,
+                    (p.docs_facturados - p.docs_devueltos) AS docs_exitosos,
+                    cs.stock_actual,
+                    (cs.stock_actual - ISNULL(entradas_post.qty, 0) + ISNULL(salidas_post.qty, 0)) AS stock_inicial_calculado
+                FROM Periodos p
+                CROSS JOIN CurrentStock cs
+                OUTER APPLY (
+                    SELECT (
+                        ISNULL((SELECT SUM(r.total_art) FROM saNotaRecepcionCompraReng r INNER JOIN saNotaRecepcionCompra nr ON r.doc_num = nr.doc_num WHERE r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saDevolucionClienteReng r INNER JOIN saDevolucionCliente dc ON r.doc_num = dc.doc_num WHERE r.co_art = @co_art AND dc.anulado = 0 AND dc.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saAjusteReng r INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo WHERE r.co_art = @co_art AND a.anulado = 0 AND (r.co_tipo = '01' OR ta.tipo_trans = '0' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%') AND a.fecha >= p.periodo_inicio), 0)
+                    ) AS qty
+                ) entradas_post
+                OUTER APPLY (
+                    SELECT (
+                        ISNULL((SELECT SUM(r.total_art) FROM saFacturaVentaReng r INNER JOIN saFacturaVenta fv ON r.doc_num = fv.doc_num WHERE r.co_art = @co_art AND fv.anulado = 0 AND fv.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saDevolucionProveedorReng r INNER JOIN saDevolucionProveedor dp ON r.doc_num = dp.doc_num WHERE r.co_art = @co_art AND dp.anulado = 0 AND dp.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saAjusteReng r INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo WHERE r.co_art = @co_art AND a.anulado = 0 AND (r.co_tipo = '02' OR ta.tipo_trans = '1' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%') AND a.fecha >= p.periodo_inicio), 0)
+                    ) AS qty
+                ) salidas_post
+                ORDER BY p.periodo_inicio ASC
+            `;
+        } else if (tipoAgrupacion === 'semanal') {
+            query = `
+                ;WITH CurrentStock AS (
+                    SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                    FROM saStockAlmacen
+                    WHERE co_art = @co_art
+                ),
+                Movimientos AS (
+                    SELECT CAST(f.fec_emis AS DATE) AS fecha, f.doc_num, r.total_art AS qty, 'factura' AS tipo
+                    FROM saFacturaVentaReng r
+                    INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                    WHERE r.co_art = @co_art AND f.anulado = 0 AND f.fec_emis >= @start AND f.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(c.fec_emis AS DATE) AS fecha, c.doc_num, d.total_art AS qty, 'devolucion' AS tipo
+                    FROM saDevolucionClienteReng d
+                    INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
+                    WHERE d.co_art = @co_art AND c.anulado = 0 AND c.fec_emis >= @start AND c.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(nr.fec_emis AS DATE) AS fecha, nr.doc_num, nr_r.total_art AS qty, 'recepcion' AS tipo
+                    FROM saNotaRecepcionCompraReng nr_r
+                    INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
+                    WHERE nr_r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(a.fecha AS DATE) AS fecha, a.ajue_num AS doc_num, ar.total_art AS qty,
+                           CASE WHEN ar.co_tipo = '01' OR ta.tipo_trans = '0' OR ar.co_tipo LIKE '%ENT%' OR ar.co_tipo LIKE '%IN%' THEN 'ajuste_entrada' ELSE 'ajuste_salida' END AS tipo
+                    FROM saAjusteReng ar
+                    INNER JOIN saAjuste a ON ar.ajue_num = a.ajue_num
+                    LEFT JOIN saTipoAjuste ta ON ar.co_tipo = ta.co_tipo
+                    WHERE ar.co_art = @co_art AND a.anulado = 0 AND a.fecha >= @start AND a.fecha <= @end
+                ),
+                DocSemana AS (
+                    SELECT 
+                        DATEADD(day, - ((DATEPART(weekday, fecha) + @@DATEFIRST - 2) % 7), fecha) AS semana_inicio,
+                        doc_num,
+                        qty,
+                        tipo
+                    FROM Movimientos
+                ),
+                Periodos AS (
+                    SELECT 
+                        semana_inicio AS periodo_inicio,
+                        DATEADD(day, 6, semana_inicio) AS periodo_fin,
+                        DAY(semana_inicio) AS dia_inicio,
+                        MONTH(semana_inicio) AS mes_inicio,
+                        YEAR(semana_inicio) AS anio_inicio,
+                        DAY(DATEADD(day, 6, semana_inicio)) AS dia_fin,
+                        MONTH(DATEADD(day, 6, semana_inicio)) AS mes_fin,
+                        YEAR(DATEADD(day, 6, semana_inicio)) AS anio_fin,
+                        CONVERT(VARCHAR(10), semana_inicio, 120) AS periodo_str,
+                        SUM(CASE WHEN tipo = 'factura' THEN qty ELSE 0 END) AS cant_facturada,
+                        SUM(CASE WHEN tipo = 'devolucion' THEN qty ELSE 0 END) AS cant_devuelta,
+                        COUNT(DISTINCT CASE WHEN tipo = 'factura' THEN doc_num ELSE NULL END) AS docs_facturados,
+                        COUNT(DISTINCT CASE WHEN tipo = 'devolucion' THEN doc_num ELSE NULL END) AS docs_devueltos,
+                        SUM(CASE WHEN tipo = 'recepcion' THEN qty ELSE 0 END) AS cant_recepcionada,
+                        COUNT(DISTINCT CASE WHEN tipo = 'recepcion' THEN doc_num ELSE NULL END) AS docs_recepcion,
+                        SUM(CASE WHEN tipo = 'ajuste_entrada' THEN qty ELSE 0 END) AS cant_ajuste_entrada,
+                        SUM(CASE WHEN tipo = 'ajuste_salida' THEN qty ELSE 0 END) AS cant_ajuste_salida
+                    FROM DocSemana
+                    GROUP BY semana_inicio
+                )
                 SELECT 
-                    SUM(r.total_art) AS qty,
-                    COUNT(DISTINCT f.doc_num) AS doc_count
-                FROM saFacturaVentaReng r
-                INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
-                WHERE r.co_art = @co_art
-                  AND f.anulado = 0
-                  AND f.fec_emis >= m.mes_inicio
-                  AND f.fec_emis < DATEADD(month, 1, m.mes_inicio)
-            ) sales
-            OUTER APPLY (
+                    p.*,
+                    (p.cant_facturada - p.cant_devuelta) AS cant_real_vendida,
+                    (p.docs_facturados - p.docs_devueltos) AS docs_exitosos,
+                    cs.stock_actual,
+                    (cs.stock_actual - ISNULL(entradas_post.qty, 0) + ISNULL(salidas_post.qty, 0)) AS stock_inicial_calculado
+                FROM Periodos p
+                CROSS JOIN CurrentStock cs
+                OUTER APPLY (
+                    SELECT (
+                        ISNULL((SELECT SUM(r.total_art) FROM saNotaRecepcionCompraReng r INNER JOIN saNotaRecepcionCompra nr ON r.doc_num = nr.doc_num WHERE r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saDevolucionClienteReng r INNER JOIN saDevolucionCliente dc ON r.doc_num = dc.doc_num WHERE r.co_art = @co_art AND dc.anulado = 0 AND dc.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saAjusteReng r INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo WHERE r.co_art = @co_art AND a.anulado = 0 AND (r.co_tipo = '01' OR ta.tipo_trans = '0' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%') AND a.fecha >= p.periodo_inicio), 0)
+                    ) AS qty
+                ) entradas_post
+                OUTER APPLY (
+                    SELECT (
+                        ISNULL((SELECT SUM(r.total_art) FROM saFacturaVentaReng r INNER JOIN saFacturaVenta fv ON r.doc_num = fv.doc_num WHERE r.co_art = @co_art AND fv.anulado = 0 AND fv.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saDevolucionProveedorReng r INNER JOIN saDevolucionProveedor dp ON r.doc_num = dp.doc_num WHERE r.co_art = @co_art AND dp.anulado = 0 AND dp.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saAjusteReng r INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo WHERE r.co_art = @co_art AND a.anulado = 0 AND (r.co_tipo = '02' OR ta.tipo_trans = '1' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%') AND a.fecha >= p.periodo_inicio), 0)
+                    ) AS qty
+                ) salidas_post
+                ORDER BY p.periodo_inicio ASC
+            `;
+        } else {
+            // Mensual
+            query = `
+                ;WITH CurrentStock AS (
+                    SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                    FROM saStockAlmacen
+                    WHERE co_art = @co_art
+                ),
+                Movimientos AS (
+                    SELECT CAST(f.fec_emis AS DATE) AS fecha, f.doc_num, r.total_art AS qty, 'factura' AS tipo
+                    FROM saFacturaVentaReng r
+                    INNER JOIN saFacturaVenta f ON r.doc_num = f.doc_num
+                    WHERE r.co_art = @co_art AND f.anulado = 0 AND f.fec_emis >= @start AND f.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(c.fec_emis AS DATE) AS fecha, c.doc_num, d.total_art AS qty, 'devolucion' AS tipo
+                    FROM saDevolucionClienteReng d
+                    INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
+                    WHERE d.co_art = @co_art AND c.anulado = 0 AND c.fec_emis >= @start AND c.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(nr.fec_emis AS DATE) AS fecha, nr.doc_num, nr_r.total_art AS qty, 'recepcion' AS tipo
+                    FROM saNotaRecepcionCompraReng nr_r
+                    INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
+                    WHERE nr_r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
+                    UNION ALL
+                    SELECT CAST(a.fecha AS DATE) AS fecha, a.ajue_num AS doc_num, ar.total_art AS qty,
+                           CASE WHEN ar.co_tipo = '01' OR ta.tipo_trans = '0' OR ar.co_tipo LIKE '%ENT%' OR ar.co_tipo LIKE '%IN%' THEN 'ajuste_entrada' ELSE 'ajuste_salida' END AS tipo
+                    FROM saAjusteReng ar
+                    INNER JOIN saAjuste a ON ar.ajue_num = a.ajue_num
+                    LEFT JOIN saTipoAjuste ta ON ar.co_tipo = ta.co_tipo
+                    WHERE ar.co_art = @co_art AND a.anulado = 0 AND a.fecha >= @start AND a.fecha <= @end
+                ),
+                Periodos AS (
+                    SELECT 
+                        DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1) AS periodo_inicio,
+                        DATEADD(month, 1, DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1)) AS periodo_fin,
+                        YEAR(fecha) AS anio,
+                        MONTH(fecha) AS mes,
+                        CONVERT(VARCHAR(7), DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1), 120) AS periodo_str,
+                        SUM(CASE WHEN tipo = 'factura' THEN qty ELSE 0 END) AS cant_facturada,
+                        SUM(CASE WHEN tipo = 'devolucion' THEN qty ELSE 0 END) AS cant_devuelta,
+                        COUNT(DISTINCT CASE WHEN tipo = 'factura' THEN doc_num ELSE NULL END) AS docs_facturados,
+                        COUNT(DISTINCT CASE WHEN tipo = 'devolucion' THEN doc_num ELSE NULL END) AS docs_devueltos,
+                        SUM(CASE WHEN tipo = 'recepcion' THEN qty ELSE 0 END) AS cant_recepcionada,
+                        COUNT(DISTINCT CASE WHEN tipo = 'recepcion' THEN doc_num ELSE NULL END) AS docs_recepcion,
+                        SUM(CASE WHEN tipo = 'ajuste_entrada' THEN qty ELSE 0 END) AS cant_ajuste_entrada,
+                        SUM(CASE WHEN tipo = 'ajuste_salida' THEN qty ELSE 0 END) AS cant_ajuste_salida
+                    FROM Movimientos
+                    GROUP BY YEAR(fecha), MONTH(fecha), DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1)
+                )
                 SELECT 
-                    SUM(d.total_art) AS qty,
-                    COUNT(DISTINCT c.doc_num) AS doc_count
-                FROM saDevolucionClienteReng d
-                INNER JOIN saDevolucionCliente c ON d.doc_num = c.doc_num
-                WHERE d.co_art = @co_art
-                  AND c.anulado = 0
-                  AND c.fec_emis >= m.mes_inicio
-                  AND c.fec_emis < DATEADD(month, 1, m.mes_inicio)
-            ) devs
-            OUTER APPLY (
-                SELECT 
-                    SUM(nr_r.total_art) AS qty,
-                    COUNT(DISTINCT nr.doc_num) AS doc_count
-                FROM saNotaRecepcionCompraReng nr_r
-                INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
-                WHERE nr_r.co_art = @co_art
-                  AND nr.anulado = 0
-                  AND nr.fec_emis >= m.mes_inicio
-                  AND nr.fec_emis < DATEADD(month, 1, m.mes_inicio)
-            ) recep
-            OUTER APPLY (
-                SELECT 
-                    SUM(CASE WHEN r.co_tipo = '01' OR ta.tipo_trans = '0' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%' THEN r.total_art ELSE 0 END) AS qty_entrada,
-                    SUM(CASE WHEN r.co_tipo = '02' OR ta.tipo_trans = '1' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%' THEN r.total_art ELSE 0 END) AS qty_salida,
-                    COUNT(DISTINCT a.ajue_num) AS doc_count
-                FROM saAjusteReng r
-                INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num
-                LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo
-                WHERE r.co_art = @co_art
-                  AND a.anulado = 0
-                  AND a.fecha >= m.mes_inicio
-                  AND a.fecha < DATEADD(month, 1, m.mes_inicio)
-            ) ajustes
-            OUTER APPLY (
-                -- Entradas de inventario desde mes_inicio hasta hoy
-                SELECT (
-                    ISNULL((
-                        SELECT SUM(r.total_art)
-                        FROM saNotaRecepcionCompraReng r
-                        INNER JOIN saNotaRecepcionCompra nr ON r.doc_num = nr.doc_num
-                        WHERE r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= m.mes_inicio
-                    ), 0)
-                    +
-                    ISNULL((
-                        SELECT SUM(r.total_art)
-                        FROM saDevolucionClienteReng r
-                        INNER JOIN saDevolucionCliente dc ON r.doc_num = dc.doc_num
-                        WHERE r.co_art = @co_art AND dc.anulado = 0 AND dc.fec_emis >= m.mes_inicio
-                    ), 0)
-                    +
-                    ISNULL((
-                        SELECT SUM(r.total_art)
-                        FROM saAjusteReng r
-                        INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num
-                        WHERE r.co_art = @co_art AND a.anulado = 0 
-                          AND (r.co_tipo = '01' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%') 
-                          AND a.fecha >= m.mes_inicio
-                    ), 0)
-                ) AS qty
-            ) entradas_post
-            OUTER APPLY (
-                -- Salidas de inventario desde mes_inicio hasta hoy
-                SELECT (
-                    ISNULL((
-                        SELECT SUM(r.total_art)
-                        FROM saFacturaVentaReng r
-                        INNER JOIN saFacturaVenta fv ON r.doc_num = fv.doc_num
-                        WHERE r.co_art = @co_art AND fv.anulado = 0 AND fv.fec_emis >= m.mes_inicio
-                    ), 0)
-                    +
-                    ISNULL((
-                        SELECT SUM(r.total_art)
-                        FROM saDevolucionProveedorReng r
-                        INNER JOIN saDevolucionProveedor dp ON r.doc_num = dp.doc_num
-                        WHERE r.co_art = @co_art AND dp.anulado = 0 AND dp.fec_emis >= m.mes_inicio
-                    ), 0)
-                    +
-                    ISNULL((
-                        SELECT SUM(r.total_art)
-                        FROM saAjusteReng r
-                        INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num
-                        WHERE r.co_art = @co_art AND a.anulado = 0 
-                          AND (r.co_tipo = '02' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%') 
-                          AND a.fecha >= m.mes_inicio
-                    ), 0)
-                ) AS qty
-            ) salidas_post
-            ORDER BY m.mes_inicio ASC
-        `;
+                    p.*,
+                    (p.cant_facturada - p.cant_devuelta) AS cant_real_vendida,
+                    (p.docs_facturados - p.docs_devueltos) AS docs_exitosos,
+                    cs.stock_actual,
+                    (cs.stock_actual - ISNULL(entradas_post.qty, 0) + ISNULL(salidas_post.qty, 0)) AS stock_inicial_calculado
+                FROM Periodos p
+                CROSS JOIN CurrentStock cs
+                OUTER APPLY (
+                    SELECT (
+                        ISNULL((SELECT SUM(r.total_art) FROM saNotaRecepcionCompraReng r INNER JOIN saNotaRecepcionCompra nr ON r.doc_num = nr.doc_num WHERE r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saDevolucionClienteReng r INNER JOIN saDevolucionCliente dc ON r.doc_num = dc.doc_num WHERE r.co_art = @co_art AND dc.anulado = 0 AND dc.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saAjusteReng r INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo WHERE r.co_art = @co_art AND a.anulado = 0 AND (r.co_tipo = '01' OR ta.tipo_trans = '0' OR r.co_tipo LIKE '%ENT%' OR r.co_tipo LIKE '%IN%') AND a.fecha >= p.periodo_inicio), 0)
+                    ) AS qty
+                ) entradas_post
+                OUTER APPLY (
+                    SELECT (
+                        ISNULL((SELECT SUM(r.total_art) FROM saFacturaVentaReng r INNER JOIN saFacturaVenta fv ON r.doc_num = fv.doc_num WHERE r.co_art = @co_art AND fv.anulado = 0 AND fv.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saDevolucionProveedorReng r INNER JOIN saDevolucionProveedor dp ON r.doc_num = dp.doc_num WHERE r.co_art = @co_art AND dp.anulado = 0 AND dp.fec_emis >= p.periodo_inicio), 0) +
+                        ISNULL((SELECT SUM(r.total_art) FROM saAjusteReng r INNER JOIN saAjuste a ON r.ajue_num = a.ajue_num LEFT JOIN saTipoAjuste ta ON r.co_tipo = ta.co_tipo WHERE r.co_art = @co_art AND a.anulado = 0 AND (r.co_tipo = '02' OR ta.tipo_trans = '1' OR r.co_tipo LIKE '%SAL%' OR r.co_tipo LIKE '%OUT%') AND a.fecha >= p.periodo_inicio), 0)
+                    ) AS qty
+                ) salidas_post
+                ORDER BY p.periodo_inicio ASC
+            `;
+        }
 
         const request = pool.request();
         request.input('co_art', co_art);
+        request.input('start', startDate);
+        request.input('end', endDate + ' 23:59:59');
 
         const result = await request.query(query);
         const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 
-        const history = result.recordset.map(row => ({
-            anio: row.anio,
-            mes: row.mes,
-            periodo: row.periodo,
-            mes_nombre: `${monthNames[row.mes - 1]} ${row.anio}`,
-            cant_facturada: Number(row.cant_facturada) || 0,
-            cant_devuelta: Number(row.cant_devuelta) || 0,
-            cant_real_vendida: Number(row.cant_real_vendida) || 0,
-            docs_facturados: Number(row.docs_facturados) || 0,
-            docs_devueltos: Number(row.docs_devueltos) || 0,
-            docs_exitosos: Math.max(0, Number(row.docs_exitosos) || 0),
-            cant_recepcionada: Number(row.cant_recepcionada) || 0,
-            docs_recepcion: Number(row.docs_recepcion) || 0,
-            cant_ajuste_entrada: Number(row.cant_ajuste_entrada) || 0,
-            cant_ajuste_salida: Number(row.cant_ajuste_salida) || 0,
-            stock_inicial: Math.max(0, Math.round(Number(row.stock_inicial_calculado) || 0))
-        }));
+        const history = result.recordset.map(row => {
+            let mes_nombre = '';
+            if (tipoAgrupacion === 'diario') {
+                const dia = String(row.dia).padStart(2, '0');
+                const mes = monthNames[row.mes - 1];
+                mes_nombre = `${dia} ${mes}`;
+            } else if (tipoAgrupacion === 'semanal') {
+                const dIni = String(row.dia_inicio).padStart(2, '0');
+                const dFin = String(row.dia_fin).padStart(2, '0');
+                if (row.mes_inicio === row.mes_fin) {
+                    mes_nombre = `${dIni} - ${dFin} ${monthNames[row.mes_fin - 1]}`;
+                } else {
+                    mes_nombre = `${dIni} ${monthNames[row.mes_inicio - 1]} - ${dFin} ${monthNames[row.mes_fin - 1]}`;
+                }
+            } else {
+                mes_nombre = `${monthNames[row.mes - 1]} ${row.anio}`;
+            }
+
+            return {
+                anio: row.anio,
+                mes: row.mes,
+                periodo: row.periodo_str,
+                mes_nombre,
+                cant_facturada: Number(row.cant_facturada) || 0,
+                cant_devuelta: Number(row.cant_devuelta) || 0,
+                cant_real_vendida: Number(row.cant_real_vendida) || 0,
+                docs_facturados: Number(row.docs_facturados) || 0,
+                docs_devueltos: Number(row.docs_devueltos) || 0,
+                docs_exitosos: Math.max(0, Number(row.docs_exitosos) || 0),
+                cant_recepcionada: Number(row.cant_recepcionada) || 0,
+                docs_recepcion: Number(row.docs_recepcion) || 0,
+                cant_ajuste_entrada: Number(row.cant_ajuste_entrada) || 0,
+                cant_ajuste_salida: Number(row.cant_ajuste_salida) || 0,
+                stock_inicial: Math.max(0, Math.round(Number(row.stock_inicial_calculado) || 0))
+            };
+        });
 
         res.json({
             success: true,
             co_art,
             server: sede,
+            tipoAgrupacion,
             history
         });
     } catch (error) {
