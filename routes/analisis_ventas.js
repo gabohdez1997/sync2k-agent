@@ -53,7 +53,42 @@ router.get('/', async (req, res) => {
         const pool = await getPool(sede, req.sqlAuth);
 
         const query = `
-            ;WITH v_ventas_stock AS (
+            ;WITH VendedoresActivos AS (
+                SELECT 
+                    LTRIM(RTRIM(v.co_ven)) AS co_ven
+                FROM saVendedor v
+                LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(v.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
+                WHERE (CAST(ISNULL(v.inactivo, 0) AS INT) = 0 AND LTRIM(RTRIM(CAST(ISNULL(v.inactivo, 0) AS VARCHAR(10)))) <> '1')
+                  AND (u.Estado IS NULL OR UPPER(LTRIM(RTRIM(u.Estado))) <> 'I')
+            ),
+            VentasPorVendedor AS (
+                SELECT 
+                    f.co_art,
+                    LTRIM(RTRIM(f.co_ven)) AS co_ven,
+                    SUM(f.cantidad) AS cant_neta
+                FROM (
+                    SELECT r.co_art, f.co_ven, r.total_art AS cantidad
+                    FROM saFacturaVenta f 
+                    JOIN saFacturaVentaReng r ON f.doc_num = r.doc_num 
+                    WHERE f.anulado = 0 AND f.fec_emis >= @start AND f.fec_emis <= @end
+                    UNION ALL
+                    SELECT r.co_art, d.co_ven, -r.total_art AS cantidad
+                    FROM saDevolucionCliente d 
+                    JOIN saDevolucionClienteReng r ON d.doc_num = r.doc_num 
+                    WHERE d.anulado = 0 AND d.fec_emis >= @start AND d.fec_emis <= @end
+                ) f
+                JOIN VendedoresActivos va ON LTRIM(RTRIM(f.co_ven)) = va.co_ven
+                GROUP BY f.co_art, f.co_ven
+                HAVING SUM(f.cantidad) > 0
+            ),
+            ConteoVendedoresArticulo AS (
+                SELECT 
+                    co_art,
+                    COUNT(DISTINCT co_ven) AS cant_vendedores
+                FROM VentasPorVendedor
+                GROUP BY co_art
+            ),
+            v_ventas_stock AS (
                 SELECT 
                     'VENTA' AS tipo_transaccion, 
                     f.fec_emis AS fecha, 
@@ -102,12 +137,14 @@ router.get('/', async (req, res) => {
                 - SUM(CASE WHEN v.tipo_transaccion = 'DEVOLUCION' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE 0 END) as ventas_netas,
                 SUM(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.monto ELSE 0 END) 
                 - SUM(CASE WHEN v.tipo_transaccion = 'DEVOLUCION' AND v.fecha >= @start AND v.fecha <= @end THEN v.monto ELSE 0 END) as valor_ventas,
+                ISNULL(cva.cant_vendedores, 0) as cant_vendedores,
                 STDEV(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE NULL END) as desviacion_ventas
             FROM saArticulo a
             LEFT JOIN v_ventas_stock v ON a.co_art = v.co_art
+            LEFT JOIN ConteoVendedoresArticulo cva ON a.co_art = cva.co_art
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
             LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl AND a.co_lin = sl.co_lin
-            LEFT JOIN saCategoriaArticulo c ON a.co_cat = c.co_cat
+            LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             LEFT JOIN (
                 SELECT au.co_art, au.co_uni, u.des_uni,
                        ROW_NUMBER() OVER(PARTITION BY au.co_art ORDER BY au.uni_principal DESC) as rn
@@ -115,7 +152,7 @@ router.get('/', async (req, res) => {
                 LEFT JOIN saUnidad u ON LTRIM(RTRIM(au.co_uni)) = LTRIM(RTRIM(u.co_uni))
             ) aun ON a.co_art = aun.co_art AND aun.rn = 1
             WHERE a.anulado = 0 AND a.co_art NOT LIKE '09%'
-            GROUP BY a.co_art
+            GROUP BY a.co_art, cva.cant_vendedores
             HAVING SUM(CASE WHEN v.tipo_transaccion = 'STOCK' THEN v.stock_actual ELSE 0 END) > 0 
                 OR (SUM(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE 0 END) > 0)
         `;
@@ -124,7 +161,33 @@ router.get('/', async (req, res) => {
         request.input('start', startDate);
         request.input('end', endDate + ' 23:59:59');
 
-        const result = await request.query(query);
+        const [result, vendorsCountRes] = await Promise.all([
+            request.query(query),
+            pool.request()
+                .input('start', startDate)
+                .input('end', endDate + ' 23:59:59')
+                .query(`
+                    ;WITH VendedoresActivos AS (
+                        SELECT 
+                            LTRIM(RTRIM(v.co_ven)) AS co_ven
+                        FROM saVendedor v
+                        LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(v.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
+                        WHERE (CAST(ISNULL(v.inactivo, 0) AS INT) = 0 AND LTRIM(RTRIM(CAST(ISNULL(v.inactivo, 0) AS VARCHAR(10)))) <> '1')
+                          AND (u.Estado IS NULL OR UPPER(LTRIM(RTRIM(u.Estado))) <> 'I')
+                    )
+                    SELECT 
+                        (SELECT COUNT(DISTINCT co_ven) FROM VendedoresActivos) AS total_vendedores_activos,
+                        (SELECT COUNT(DISTINCT RTRIM(f.co_ven)) 
+                         FROM saFacturaVenta f 
+                         JOIN VendedoresActivos va ON LTRIM(RTRIM(f.co_ven)) = va.co_ven
+                         WHERE f.anulado = 0 AND f.fec_emis >= @start AND f.fec_emis <= @end) AS total_vendedores_activos_periodo
+                `)
+        ]);
+
+        const totalActivosMaestro = Number(vendorsCountRes.recordset[0]?.total_vendedores_activos) || 0;
+        const totalActivosPeriodo = Number(vendorsCountRes.recordset[0]?.total_vendedores_activos_periodo) || 0;
+        // Total de vendedores activos (usando maestros o los activos con ventas en el período)
+        const totalVendedores = totalActivosMaestro > 0 ? totalActivosMaestro : (totalActivosPeriodo > 0 ? totalActivosPeriodo : 1);
 
         let totalSalesVal = 0;
         let totalUnidadesVendidas = 0;
@@ -148,6 +211,22 @@ router.get('/', async (req, res) => {
             const stdev = Number(row.desviacion_ventas) || 0;
             const cv = (stdev > 0 && vpd > 0) ? (stdev / vpd) : 0;
 
+            const cant_vendedores = ventas_netas > 0 ? (Number(row.cant_vendedores) || 0) : 0;
+            const pct_vendedores = (ventas_netas > 0 && totalVendedores > 0) ? Number(((cant_vendedores / totalVendedores) * 100).toFixed(2)) : 0;
+
+            let categorizacion = 'F';
+            if (ventas_netas <= 0 || cant_vendedores <= 0) {
+                categorizacion = 'F';
+            } else if (pct_vendedores > 75) {
+                categorizacion = 'A';
+            } else if (pct_vendedores >= 50) {
+                categorizacion = 'B';
+            } else if (pct_vendedores >= 25) {
+                categorizacion = 'C';
+            } else {
+                categorizacion = 'D';
+            }
+
             totalSalesVal += valor_ventas;
             totalUnidadesVendidas += ventas_netas;
 
@@ -166,11 +245,15 @@ router.get('/', async (req, res) => {
                 ventas_netas,
                 valor_ventas,
                 vpd,
-                cv
+                cv,
+                cant_vendedores,
+                total_vendedores: totalVendedores,
+                pct_vendedores,
+                categorizacion
             };
         });
 
-        // Clasificación ABC / XYZ
+        // Clasificación ABC / XYZ (legacy compatible)
         items.sort((a, b) => b.valor_ventas - a.valor_ventas || b.ventas_netas - a.ventas_netas);
         let cumulativeVal = 0;
         items = items.map(item => {
@@ -199,10 +282,12 @@ router.get('/', async (req, res) => {
             startDate,
             endDate,
             businessDays,
+            totalVendedores,
             kpis: {
                 total_articulos: items.length,
                 total_unidades_vendidas: totalUnidadesVendidas,
                 total_valor_ventas: totalSalesVal,
+                total_vendedores: totalVendedores,
                 articulos_con_stock: items.filter(i => i.stock_actual > 0).length,
                 articulos_sin_stock: items.filter(i => i.stock_actual <= 0).length
             },
@@ -292,7 +377,7 @@ router.get('/article-vendors', async (req, res) => {
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
             LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl AND a.co_lin = sl.co_lin
-            LEFT JOIN saCategoriaArticulo c ON a.co_cat = c.co_cat
+            LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             LEFT JOIN (
                 SELECT au.co_art, au.co_uni, u.des_uni,
                        ROW_NUMBER() OVER(PARTITION BY au.co_art ORDER BY au.uni_principal DESC) as rn
@@ -315,7 +400,17 @@ router.get('/article-vendors', async (req, res) => {
         rankingReq.input('end', endDate + ' 23:59:59');
 
         const rankingRes = await rankingReq.query(`
-            ;WITH VentasArticulo AS (
+            ;WITH VendedoresActivos AS (
+                SELECT 
+                    LTRIM(RTRIM(v.co_ven)) AS co_ven,
+                    RTRIM(ISNULL(u.desc_usuario, ISNULL(v.ven_des, v.co_ven))) AS ven_des,
+                    0 AS inactivo
+                FROM saVendedor v
+                LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(v.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
+                WHERE (CAST(ISNULL(v.inactivo, 0) AS INT) = 0 AND LTRIM(RTRIM(CAST(ISNULL(v.inactivo, 0) AS VARCHAR(10)))) <> '1')
+                  AND (u.Estado IS NULL OR UPPER(LTRIM(RTRIM(u.Estado))) <> 'I')
+            ),
+            VentasArticulo AS (
                 SELECT 
                     LTRIM(RTRIM(f.co_ven)) AS co_ven,
                     r.total_art AS cant,
@@ -337,24 +432,49 @@ router.get('/article-vendors', async (req, res) => {
                 WHERE d.anulado = 0
                   AND r.co_art = @co_art
                   AND d.fec_emis >= @start AND d.fec_emis <= @end
+            ),
+            VentasAgrupadas AS (
+                SELECT 
+                    v.co_ven,
+                    SUM(v.cant) AS cant_vendida,
+                    SUM(v.monto) AS monto_total,
+                    COUNT(DISTINCT v.doc_num) AS facturas_count
+                FROM VentasArticulo v
+                GROUP BY v.co_ven
+            ),
+            TodosLosVendedores AS (
+                SELECT 
+                    va.co_ven,
+                    va.ven_des,
+                    0 AS inactivo,
+                    ISNULL(vg.cant_vendida, 0) AS cant_vendida,
+                    ISNULL(vg.monto_total, 0) AS monto_total,
+                    ISNULL(vg.facturas_count, 0) AS facturas_count
+                FROM VendedoresActivos va
+                LEFT JOIN VentasAgrupadas vg ON va.co_ven = vg.co_ven
+                UNION ALL
+                SELECT 
+                    vg.co_ven,
+                    RTRIM(ISNULL(u.desc_usuario, ISNULL(ven.ven_des, vg.co_ven))) AS ven_des,
+                    1 AS inactivo,
+                    vg.cant_vendida,
+                    vg.monto_total,
+                    vg.facturas_count
+                FROM VentasAgrupadas vg
+                LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(vg.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
+                LEFT JOIN saVendedor ven ON UPPER(LTRIM(RTRIM(vg.co_ven))) = UPPER(LTRIM(RTRIM(ven.co_ven)))
+                WHERE vg.co_ven NOT IN (SELECT co_ven FROM VendedoresActivos)
+                  AND vg.cant_vendida > 0
             )
             SELECT 
-                v.co_ven,
-                RTRIM(ISNULL(u.desc_usuario, ISNULL(ven.ven_des, v.co_ven))) AS ven_des,
-                MAX(CASE 
-                    WHEN CAST(ISNULL(ven.inactivo, 0) AS INT) = 1 OR LTRIM(RTRIM(CAST(ISNULL(ven.inactivo, 0) AS VARCHAR(10)))) = '1' THEN 1
-                    WHEN UPPER(LTRIM(RTRIM(ISNULL(u.Estado, '')))) = 'I' THEN 1 
-                    ELSE 0 
-                END) AS inactivo,
-                SUM(v.cant) AS cant_vendida,
-                SUM(v.monto) AS monto_total,
-                COUNT(DISTINCT v.doc_num) AS facturas_count
-            FROM VentasArticulo v
-            LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(v.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
-            LEFT JOIN saVendedor ven ON UPPER(LTRIM(RTRIM(v.co_ven))) = UPPER(LTRIM(RTRIM(ven.co_ven)))
-            GROUP BY v.co_ven, u.desc_usuario, ven.ven_des
-            HAVING SUM(v.cant) > 0
-            ORDER BY SUM(v.cant) DESC
+                co_ven,
+                ven_des,
+                inactivo,
+                cant_vendida,
+                monto_total,
+                facturas_count
+            FROM TodosLosVendedores
+            ORDER BY inactivo ASC, cant_vendida DESC, ven_des ASC;
         `);
 
         let totalArtVendidos = 0;

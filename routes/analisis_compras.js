@@ -104,7 +104,11 @@ router.get('/', async (req, res) => {
                 a.co_art,
                 MAX(a.art_des) as des_art,
                 MAX(a.co_lin) as co_lin,
+                MAX(l.lin_des) as des_lin,
+                MAX(a.co_subl) as co_subl,
+                MAX(sl.subl_des) as des_subl,
                 MAX(a.co_cat) as co_cat,
+                MAX(c.cat_des) as des_cat,
                 RTRIM(COALESCE(MAX(aun.co_uni), '01')) as co_uni,
                 RTRIM(COALESCE(MAX(aun.des_uni), MAX(aun.co_uni), 'UND')) as des_uni,
                 COALESCE(MAX(fact.cost_unit_om), MAX(rec.cost_unit_om), MAX(p2.monto) / 1.30, 0) as costo_actual,
@@ -116,6 +120,9 @@ router.get('/', async (req, res) => {
                 STDEV(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE NULL END) as desviacion_ventas
             FROM saArticulo a
             LEFT JOIN v_compras_inventario v ON a.co_art = v.co_art
+            LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+            LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl AND a.co_lin = sl.co_lin
+            LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             LEFT JOIN (
                 SELECT au.co_art, au.co_uni, u.des_uni,
                        ROW_NUMBER() OVER(PARTITION BY au.co_art ORDER BY au.uni_principal DESC) as rn
@@ -184,10 +191,21 @@ router.get('/', async (req, res) => {
         let totalSalesVal = 0;
         
         items = items.map(item => {
+            const co_art = (item.co_art || '').trim();
+            const des_art = (item.des_art || '').trim();
+            const co_lin = (item.co_lin || '').trim();
+            const des_lin = (item.des_lin || '').trim();
+            const co_subl = (item.co_subl || '').trim();
+            const des_subl = (item.des_subl || '').trim();
+            const co_cat = (item.co_cat || '').trim();
+            const des_cat = (item.des_cat || '').trim();
+            const co_uni = (item.co_uni || '').trim();
+            const des_uni = (item.des_uni || '').trim();
+
             const vpd = (item.ventas_netas > 0 ? item.ventas_netas : 0) / businessDays;
             // Si no hay datos historicos de TR, asumimos 15 días promedio
             const tr = item.tiempo_reposicion_promedio || 15; 
-            const isFrac = isFractionalUnit(item.co_uni, item.des_uni);
+            const isFrac = isFractionalUnit(co_uni, des_uni);
             const demandaTR = vpd * tr;
             
             // Normalización de la Desviación Estándar de Demanda Diaria (evita distorsión por facturas al mayor esporádicas)
@@ -242,6 +260,16 @@ router.get('/', async (req, res) => {
 
             return {
                 ...item,
+                co_art,
+                des_art,
+                co_lin,
+                des_lin,
+                co_subl,
+                des_subl,
+                co_cat,
+                des_cat,
+                co_uni,
+                des_uni,
                 is_frac: isFrac,
                 vpd,
                 tr,

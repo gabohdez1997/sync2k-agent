@@ -1144,7 +1144,7 @@ router.get('/cajero-mes', async (req, res) => {
 // --- REPORT ARTICULOS CON PRECIOS ---
 router.get('/articulos-precios', async (req, res) => {
     try {
-        const { sede, search, co_lin, co_cat } = req.query;
+        const { sede, search, co_lin, co_subl, co_cat } = req.query;
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -1165,6 +1165,10 @@ router.get('/articulos-precios', async (req, res) => {
             r.input('co_lin', sql.VarChar, co_lin);
             whereClauses.push("a.co_lin = @co_lin");
         }
+        if (co_subl && co_subl !== 'all' && co_subl !== 'null') {
+            r.input('co_subl', sql.VarChar, co_subl);
+            whereClauses.push("a.co_subl = @co_subl");
+        }
         if (co_cat && co_cat !== 'all' && co_cat !== 'null') {
             r.input('co_cat', sql.VarChar, co_cat);
             whereClauses.push("a.co_cat = @co_cat");
@@ -1178,6 +1182,12 @@ router.get('/articulos-precios', async (req, res) => {
                 RTRIM(a.art_des) AS art_des,
                 RTRIM(ISNULL(a.modelo, '')) AS modelo,
                 a.anulado,
+                RTRIM(a.co_lin) AS co_lin,
+                RTRIM(l.lin_des) AS des_lin,
+                RTRIM(a.co_subl) AS co_subl,
+                RTRIM(sl.subl_des) AS des_subl,
+                RTRIM(a.co_cat) AS co_cat,
+                RTRIM(c.cat_des) AS des_cat,
                 ISNULL(p1.monto, 0) AS precio1, 
                 ISNULL(m1.monto_min, 0) AS margen1, 
                 ISNULL(p2.monto, 0) AS precio2, 
@@ -1199,6 +1209,7 @@ router.get('/articulos-precios', async (req, res) => {
                 ) AS stock_global
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+            LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl AND a.co_lin = sl.co_lin
             LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             OUTER APPLY (
                 SELECT TOP 1 monto FROM saArtPrecio 
@@ -1248,7 +1259,7 @@ router.get('/articulos-precios', async (req, res) => {
 // --- REPORT CANTIDAD REAL VENDIDA POR ARTICULO ---
 router.get('/articulos-ventas', async (req, res) => {
     try {
-        const { sede, search, co_lin, co_cat, fecha_desde, fecha_hasta } = req.query;
+        const { sede, search, co_lin, co_subl, co_cat, fecha_desde, fecha_hasta } = req.query;
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -1283,6 +1294,10 @@ router.get('/articulos-ventas', async (req, res) => {
             r.input('co_lin', sql.VarChar, co_lin);
             whereClauses.push("a.co_lin = @co_lin");
         }
+        if (co_subl && co_subl !== 'all' && co_subl !== 'null') {
+            r.input('co_subl', sql.VarChar, co_subl);
+            whereClauses.push("a.co_subl = @co_subl");
+        }
         if (co_cat && co_cat !== 'all' && co_cat !== 'null') {
             r.input('co_cat', sql.VarChar, co_cat);
             whereClauses.push("a.co_cat = @co_cat");
@@ -1296,6 +1311,12 @@ router.get('/articulos-ventas', async (req, res) => {
                 RTRIM(a.art_des) AS art_des,
                 RTRIM(ISNULL(a.modelo, '')) AS modelo,
                 RTRIM(ISNULL(a.ref, '')) AS referencia,
+                RTRIM(ISNULL(a.co_lin, '')) AS co_lin,
+                RTRIM(ISNULL(l.lin_des, '')) AS des_lin,
+                RTRIM(ISNULL(a.co_subl, '')) AS co_subl,
+                RTRIM(ISNULL(subl.subl_des, '')) AS des_subl,
+                RTRIM(ISNULL(a.co_cat, '')) AS co_cat,
+                RTRIM(ISNULL(c.cat_des, '')) AS des_cat,
                 a.anulado,
                 ISNULL(sales.qty, 0) AS cant_facturada,
                 ISNULL(devs.qty, 0) AS cant_devuelta,
@@ -1305,6 +1326,7 @@ router.get('/articulos-ventas', async (req, res) => {
                 (ISNULL(sales.doc_count, 0) - ISNULL(devs.doc_count, 0)) AS docs_exitosos
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+            LEFT JOIN saSubLinea subl ON a.co_subl = subl.co_subl
             LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
             OUTER APPLY (
                 SELECT 

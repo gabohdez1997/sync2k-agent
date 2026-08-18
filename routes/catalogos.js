@@ -276,13 +276,38 @@ router.put('/sublineas/:co_subl', async (req, res) => {
     }
 });
 
-// ── Categorías ──────────────────────────────────────────────────────────────
-router.get('/categorias', (req, res) =>
-    catalogEndpoint(req, res,
-        `SELECT RTRIM(co_cat) AS co_cat, RTRIM(cat_des) AS cat_des FROM saCatArticulo`,
-        'co_cat', 'co_cat'
-    )
-);
+// ── Categorías (filtro opcional ?co_subl=XX o ?co_lin=XX) ─────────────────
+router.get('/categorias', async (req, res) => {
+    const { co_subl, co_lin } = req.query;
+    let query = `
+        SELECT DISTINCT 
+            RTRIM(c.co_cat) AS co_cat, 
+            RTRIM(c.cat_des) AS cat_des,
+            RTRIM(a.co_subl) AS co_subl,
+            RTRIM(a.co_lin) AS co_lin
+        FROM saCatArticulo c
+        LEFT JOIN (
+            SELECT DISTINCT co_cat, co_subl, co_lin 
+            FROM saArticulo 
+            WHERE co_cat IS NOT NULL
+        ) a ON c.co_cat = a.co_cat
+        WHERE 1 = 1
+    `;
+    if (co_subl) query += ` AND RTRIM(a.co_subl) = @co_subl`;
+    if (co_lin) query += ` AND RTRIM(a.co_lin) = @co_lin`;
+
+    try {
+        const data = await aggregateUnique(req.sqlAuth, async (pool) => {
+            const r = pool.request();
+            if (co_subl) r.input('co_subl', sql.VarChar, co_subl);
+            if (co_lin) r.input('co_lin', sql.VarChar, co_lin);
+            return (await r.query(query)).recordset;
+        }, 'co_cat', 'co_cat');
+        res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
 
 /**
  * @swagger
