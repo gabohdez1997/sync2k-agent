@@ -1694,8 +1694,7 @@ router.post('/sync', async (req, res) => {
                             RTRIM(a.item) AS item, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref,
                             a.anulado, a.tipo_imp, a.peso, a.volumen, a.stock_min, a.stock_max,
                             RTRIM(a.campo1) AS campo1, RTRIM(a.campo7) AS campo7
-                     FROM saArticulo a
-                     WHERE a.anulado = 0`
+                     FROM saArticulo a`
                 );
 
                 const artMap = new Map();
@@ -1802,7 +1801,7 @@ router.post('/sync', async (req, res) => {
                         r.input('sdFecha_Reg', sql.SmallDateTime, f);
                         r.input('sArt_Des', sql.VarChar(120), dataToInsert.art_des || 'NUEVO ARTÍCULO');
                         r.input('sTipo', sql.Char(1), dataToInsert.tipo || 'V');
-                        r.input('bAnulado', sql.Bit, 0);
+                        r.input('bAnulado', sql.Bit, dataToInsert.anulado ? 1 : 0);
                         r.input('sdFecha_Inac', sql.SmallDateTime, f);
                         r.input('sCo_Lin', sql.Char(6), dataToInsert.co_lin);
                         r.input('sCo_Subl', sql.Char(6), dataToInsert.co_subl);
@@ -1885,6 +1884,13 @@ router.post('/sync', async (req, res) => {
                                 .input('art', sql.Char(30), dataToInsert.co_art)
                                 .input('img', sql.VarChar(250), dataToInsert.campo7)
                                 .query('UPDATE saArticulo SET campo7 = @img WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
+                        }
+
+                        // Si el artículo original estaba anulado, asegurar su estado anulado en destino
+                        if (dataToInsert.anulado) {
+                            await pool.request()
+                                .input('art', sql.Char(30), dataToInsert.co_art)
+                                .query('UPDATE saArticulo SET anulado = 1, fecha_inac = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
                         }
 
                         migratedCount++;

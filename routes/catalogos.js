@@ -822,9 +822,9 @@ router.get('/stats', async (req, res) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const [artRes, cliRes, provRes] = await Promise.all([
-                    pool.request().query('SELECT COUNT(*) AS total FROM saArticulo WHERE ISNULL(anulado, 0) = 0'),
-                    pool.request().query('SELECT COUNT(*) AS total FROM saCliente WHERE ISNULL(inactivo, 0) = 0'),
-                    pool.request().query('SELECT COUNT(*) AS total FROM saProveedor WHERE ISNULL(inactivo, 0) = 0')
+                    pool.request().query('SELECT COUNT(*) AS total FROM saArticulo'),
+                    pool.request().query('SELECT COUNT(*) AS total FROM saCliente'),
+                    pool.request().query('SELECT COUNT(*) AS total FROM saProveedor')
                 ]);
                 return {
                     sede_id: srv.id,

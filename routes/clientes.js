@@ -15,7 +15,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sCo_Zon', sql.Char(6), padProfit(data.co_zon || d.co_zon, 6));
     r.input('sCo_Ven', sql.VarChar(10), data.co_ven || d.co_ven || '01');
     r.input('sEstado', sql.Char(1), '1');
-    r.input('bInactivo', sql.Bit, 0);
+    r.input('bInactivo', sql.Bit, data.inactivo ? 1 : 0);
     r.input('bValido', sql.Bit, 0);
     r.input('bSinCredito', sql.Bit, 0);
     r.input('bLunes', sql.Bit, 0);
@@ -719,7 +719,7 @@ router.post('/sync', async (req, res) => {
                             RTRIM(tip_cli) AS tip_cli, RTRIM(co_mone) AS co_mone, RTRIM(cond_pag) AS cond_pag,
                             RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr, contrib, contribu_e, porc_esp,
                             RTRIM(tipo_per) AS tipo_per, inactivo
-                     FROM saCliente WHERE inactivo = 0`
+                     FROM saCliente`
                 );
 
                 const cliMap = new Map();
@@ -807,6 +807,13 @@ router.post('/sync', async (req, res) => {
                         const r = new sql.Request(pool);
                         bindClienteInsert(r, dataToInsert, defaults, new Date(), auditUser);
                         await r.execute('pInsertarCliente');
+
+                        // Si el cliente original estaba inactivo, asegurar su estado inactivo en destino
+                        if (dataToInsert.inactivo) {
+                            await pool.request()
+                                .input('cli', sql.Char(16), padProfit(co_cli, 16))
+                                .query('UPDATE saCliente SET inactivo = 1 WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@cli))');
+                        }
 
                         migratedCount++;
                         totalSynced++;

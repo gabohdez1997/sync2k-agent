@@ -575,7 +575,7 @@ router.post('/sync', async (req, res) => {
                             RTRIM(co_pais) AS co_pais, RTRIM(ciudad) AS ciudad, RTRIM(zip) AS zip,
                             RTRIM(website) AS website, formtype, taxid, contribu_e, rete_regis_doc,
                             porc_esp, inactivo, RTRIM(co_seg) AS co_seg, RTRIM(co_zon) AS co_zon
-                     FROM saProveedor WHERE inactivo = 0`
+                     FROM saProveedor`
                 );
                 
                 const provMap = new Map();
@@ -667,6 +667,13 @@ router.post('/sync', async (req, res) => {
                         const r = new sql.Request(pool);
                         bindProveedorInsert(r, dataToInsert, defaults, new Date(), auditUser);
                         await r.execute('pInsertarProveedor');
+
+                        // Si el proveedor original estaba inactivo, asegurar su estado inactivo en destino
+                        if (dataToInsert.inactivo) {
+                            await pool.request()
+                                .input('prov', sql.Char(16), padProfit(co_prov, 16))
+                                .query('UPDATE saProveedor SET inactivo = 1 WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@prov))');
+                        }
 
                         migratedCount++;
                         totalSynced++;
