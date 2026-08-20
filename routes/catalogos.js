@@ -808,4 +808,53 @@ router.get('/tipos_proveedor', (req, res) =>
     )
 );
 
+// ── Estadísticas por Sede (Artículos, Clientes, Proveedores) ───────────────
+router.get('/stats', async (req, res) => {
+    try {
+        const { getServers } = require('../db');
+        const requestedSede = req.query.sede || req.query.sede_id;
+        let servers = getServers();
+        if (requestedSede) {
+            servers = servers.filter(s => s.id === requestedSede);
+        }
+
+        const stats = await Promise.all(servers.map(async (srv) => {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const [artRes, cliRes, provRes] = await Promise.all([
+                    pool.request().query('SELECT COUNT(*) AS total FROM saArticulo WHERE ISNULL(anulado, 0) = 0'),
+                    pool.request().query('SELECT COUNT(*) AS total FROM saCliente WHERE ISNULL(inactivo, 0) = 0'),
+                    pool.request().query('SELECT COUNT(*) AS total FROM saProveedor WHERE ISNULL(inactivo, 0) = 0')
+                ]);
+                return {
+                    sede_id: srv.id,
+                    sede_nombre: srv.name,
+                    articulos: Number(artRes.recordset[0]?.total) || 0,
+                    clientes: Number(cliRes.recordset[0]?.total) || 0,
+                    proveedores: Number(provRes.recordset[0]?.total) || 0,
+                    online: true
+                };
+            } catch (e) {
+                return {
+                    sede_id: srv.id,
+                    sede_nombre: srv.name,
+                    articulos: 0,
+                    clientes: 0,
+                    proveedores: 0,
+                    online: false,
+                    error: e.message
+                };
+            }
+        }));
+
+        res.status(200).json({
+            success: true,
+            data: requestedSede ? (stats[0] || null) : stats
+        });
+    } catch (error) {
+        console.error('[STATS ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error al obtener estadísticas', error: error.message });
+    }
+});
+
 module.exports = router;

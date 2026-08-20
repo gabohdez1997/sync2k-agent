@@ -542,4 +542,165 @@ router.delete('/:co_prov', async (req, res) => {
     }
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// 7. POST /api/v1/proveedores/sync — Sincronización multisede de proveedores
+// ────────────────────────────────────────────────────────────────────────────
+router.post('/sync', async (req, res) => {
+    try {
+        const servers = getServers();
+        if (!servers || servers.length < 2) {
+            return res.status(200).json({
+                success: true,
+                message: 'Se requiere al menos 2 sedes activas para sincronizar.',
+                total_synced: 0,
+                summary: []
+            });
+        }
+
+        // 1. Obtener todos los proveedores de cada servidor
+        const serverSuppliers = {};
+        const allUniqueSuppliers = new Map();
+
+        for (const srv of servers) {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const result = await pool.request().query(
+                    `SELECT RTRIM(co_prov) AS co_prov, RTRIM(prov_des) AS prov_des, RTRIM(rif) AS rif,
+                            RTRIM(direc1) AS direc1, RTRIM(direc2) AS direc2, RTRIM(telefonos) AS telefonos,
+                            RTRIM(fax) AS fax, RTRIM(respons) AS respons, fecha_reg,
+                            RTRIM(tip_pro) AS tip_pro, mont_cre, RTRIM(co_mone) AS co_mone,
+                            RTRIM(cond_pag) AS cond_pag, plaz_pag, desc_ppago, desc_glob,
+                            nacional, dis_cen, nit, RTRIM(email) AS email, RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr,
+                            comentario, tipo_adi, matriz, RTRIM(co_tab) AS co_tab, RTRIM(tipo_per) AS tipo_per,
+                            RTRIM(co_pais) AS co_pais, RTRIM(ciudad) AS ciudad, RTRIM(zip) AS zip,
+                            RTRIM(website) AS website, formtype, taxid, contribu_e, rete_regis_doc,
+                            porc_esp, inactivo, RTRIM(co_seg) AS co_seg, RTRIM(co_zon) AS co_zon
+                     FROM saProveedor WHERE inactivo = 0`
+                );
+                
+                const provMap = new Map();
+                for (const row of result.recordset) {
+                    const key = (row.co_prov || '').trim().toUpperCase();
+                    if (key) {
+                        provMap.set(key, row);
+                        if (!allUniqueSuppliers.has(key)) {
+                            allUniqueSuppliers.set(key, row);
+                        }
+                    }
+                }
+                serverSuppliers[srv.id] = { server: srv, map: provMap, pool };
+            } catch (err) {
+                console.warn(`[SYNC PROVEEDORES] Error leyendo proveedores de sede ${srv.name}:`, err.message);
+            }
+        }
+
+        // 2. Para cada servidor, detectar cuáles proveedores faltan y migrarlos
+        const summary = [];
+        let totalSynced = 0;
+        const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
+
+        for (const srv of servers) {
+            const srvData = serverSuppliers[srv.id];
+            if (!srvData) {
+                summary.push({
+                    sede_id: srv.id,
+                    sede_nombre: srv.name,
+                    migrated: 0,
+                    errors: ['No se pudo conectar a la base de datos de esta sede.']
+                });
+                continue;
+            }
+
+            const { pool, map } = srvData;
+            const defaults = await loadDefaults(pool);
+            let migratedCount = 0;
+            const errors = [];
+
+            for (const [co_prov, supplier] of allUniqueSuppliers.entries()) {
+                if (!map.has(co_prov)) {
+                    // El proveedor no existe en esta sede: migrarlo con consistencia referencial
+                    try {
+                        // Clonar datos
+                        const dataToInsert = { ...supplier };
+
+                        // 1. Validar co_seg en destino
+                        const segCheck = await pool.request().input('seg', sql.VarChar, dataToInsert.co_seg || '').query(
+                            'SELECT TOP 1 co_seg FROM saSegmento WHERE LTRIM(RTRIM(co_seg)) = LTRIM(RTRIM(@seg))'
+                        );
+                        dataToInsert.co_seg = segCheck.recordset.length ? dataToInsert.co_seg : defaults.co_seg;
+
+                        // 2. Validar co_zon en destino
+                        const zonCheck = await pool.request().input('zon', sql.VarChar, dataToInsert.co_zon || '').query(
+                            'SELECT TOP 1 co_zon FROM saZona WHERE LTRIM(RTRIM(co_zon)) = LTRIM(RTRIM(@zon))'
+                        );
+                        dataToInsert.co_zon = zonCheck.recordset.length ? dataToInsert.co_zon : defaults.co_zon;
+
+                        // 3. Validar tip_pro en destino
+                        const tipCheck = await pool.request().input('tip', sql.VarChar, dataToInsert.tip_pro || '').query(
+                            'SELECT TOP 1 tip_pro FROM saTipoProveedor WHERE LTRIM(RTRIM(tip_pro)) = LTRIM(RTRIM(@tip))'
+                        );
+                        dataToInsert.tip_pro = tipCheck.recordset.length ? dataToInsert.tip_pro : defaults.tip_pro;
+
+                        // 4. Validar cond_pag en destino
+                        const condCheck = await pool.request().input('cond', sql.VarChar, dataToInsert.cond_pag || '').query(
+                            'SELECT TOP 1 co_cond FROM saCondicionPago WHERE LTRIM(RTRIM(co_cond)) = LTRIM(RTRIM(@cond))'
+                        );
+                        dataToInsert.cond_pag = condCheck.recordset.length ? dataToInsert.cond_pag : defaults.cond_pag;
+
+                        // 5. Validar co_mone en destino
+                        const monCheck = await pool.request().input('mone', sql.VarChar, dataToInsert.co_mone || '').query(
+                            'SELECT TOP 1 co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone))'
+                        );
+                        dataToInsert.co_mone = monCheck.recordset.length ? dataToInsert.co_mone : defaults.co_mone;
+
+                        // 6. Cuenta de egresos
+                        dataToInsert.co_cta_ingr_egr = (dataToInsert.co_cta_ingr_egr && dataToInsert.co_cta_ingr_egr !== '01') ? dataToInsert.co_cta_ingr_egr : (defaults.co_cta || '02');
+
+                        // 7. Tabulador ISLR dinámico según tipo_per
+                        const tipo_per = dataToInsert.tipo_per || '3';
+                        dataToInsert.tipo_per = tipo_per;
+                        dataToInsert.co_tab = await resolveCoTab(pool, dataToInsert.co_tab, tipo_per);
+
+                        // 8. País
+                        dataToInsert.co_pais = dataToInsert.co_pais || 'VE';
+
+                        const r = new sql.Request(pool);
+                        bindProveedorInsert(r, dataToInsert, defaults, new Date(), auditUser);
+                        await r.execute('pInsertarProveedor');
+
+                        migratedCount++;
+                        totalSynced++;
+                        map.set(co_prov, dataToInsert); // Actualizar mapa en memoria
+                    } catch (err) {
+                        errors.push(`Proveedor ${co_prov} (${supplier.prov_des || supplier.descripcion}): ${err.message}`);
+                    }
+                }
+            }
+
+            summary.push({
+                sede_id: srv.id,
+                sede_nombre: srv.name,
+                migrated: migratedCount,
+                errors
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            total_synced: totalSynced,
+            summary,
+            message: totalSynced > 0
+                ? `Sincronización completada con éxito. Se migraron ${totalSynced} proveedores.`
+                : 'Todas las sucursales ya se encuentran sincronizadas.'
+        });
+    } catch (error) {
+        console.error('[SYNC PROVEEDORES FATAL ERROR]:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error general al sincronizar proveedores.',
+            error: error.message || String(error)
+        });
+    }
+});
+
 module.exports = router;
