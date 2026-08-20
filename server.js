@@ -104,6 +104,7 @@ app.get('/swagger.json', (req, res) => {
 app.use('/api/v1/articulos',   require('./routes/articulos'));
 app.use('/api/v1/catalogos',   require('./routes/catalogos'));
 app.use('/api/v1/clientes',    require('./routes/clientes'));
+app.use('/api/v1/proveedores', require('./routes/proveedores'));
 app.use('/api/v1/pedidos',     require('./routes/pedidos'));
 app.use('/api/v1/usuarios',    require('./routes/usuarios'));
 app.use('/api/v1/config',      require('./routes/config'));

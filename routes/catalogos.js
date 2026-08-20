@@ -800,4 +800,12 @@ router.get('/tarjetas_credito', (req, res) =>
     )
 );
 
+// ── Tipos de Proveedor ──────────────────────────────────────────────────────
+router.get('/tipos_proveedor', (req, res) =>
+    catalogEndpoint(req, res,
+        `SELECT RTRIM(tip_pro) AS tip_pro, RTRIM(des_tipo) AS des_tipo FROM saTipoProveedor`,
+        'tip_pro', 'des_tipo'
+    )
+);
+
 module.exports = router;
