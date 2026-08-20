@@ -547,6 +547,236 @@ router.get('/search', async (req, res) => {
 
 
 // ────────────────────────────────────────────────────────────────────────────
+// 2.3 GET /api/v1/articulos/export-all — Exportar todos los artículos de la sede
+// ────────────────────────────────────────────────────────────────────────────
+router.get('/export-all', async (req, res) => {
+    try {
+        const servers = getServers();
+        const srv = (req.query.sede ? servers.find(s => s.id === req.query.sede) : null) || servers[0];
+        if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
+
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const result = await pool.request().query(
+            `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS art_des, RTRIM(a.tipo) AS tipo,
+                    RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(a.co_cat) AS co_cat,
+                    RTRIM(a.co_color) AS co_color, RTRIM(a.co_ubicacion) AS co_ubicacion,
+                    RTRIM(a.item) AS item, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref,
+                    a.anulado, a.tipo_imp, a.peso, a.volumen, a.stock_min, a.stock_max,
+                    RTRIM(a.campo1) AS campo1, RTRIM(a.campo7) AS campo7
+             FROM saArticulo a`
+        );
+
+        return res.status(200).json({
+            success: true,
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (error) {
+        console.error('[ARTICULOS EXPORT ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error exportando artículos', error: error.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 2.4 POST /api/v1/articulos/import-batch — Importar lote de artículos faltantes
+// ────────────────────────────────────────────────────────────────────────────
+router.post('/import-batch', async (req, res) => {
+    try {
+        const { items } = req.body;
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(200).json({ success: true, migrated: 0, errors: [] });
+        }
+
+        const servers = getServers();
+        const srv = (req.query.sede ? servers.find(s => s.id === req.query.sede) : null) || servers[0];
+        if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
+
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const defaultAlmacen = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
+
+        const [resLin, resCat, resCol, resUbi, resUni] = await Promise.all([
+            pool.request().query("SELECT TOP 1 RTRIM(co_lin) AS co_lin FROM saLineaArticulo ORDER BY CASE WHEN RTRIM(co_lin) = '01' THEN 0 ELSE 1 END, co_lin"),
+            pool.request().query("SELECT TOP 1 RTRIM(co_cat) AS co_cat FROM saCatArticulo ORDER BY CASE WHEN RTRIM(co_cat) = '01' THEN 0 ELSE 1 END, co_cat"),
+            pool.request().query("SELECT TOP 1 RTRIM(co_color) AS co_color FROM saColor ORDER BY CASE WHEN RTRIM(co_color) = '01' THEN 0 ELSE 1 END, co_color"),
+            pool.request().query("SELECT TOP 1 RTRIM(co_ubicacion) AS co_ubicacion FROM saUbicacion ORDER BY CASE WHEN RTRIM(co_ubicacion) = '01' THEN 0 ELSE 1 END, co_ubicacion"),
+            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni")
+        ]);
+
+        const defaultLin = resLin.recordset[0]?.co_lin || '01';
+        const defaultCat = resCat.recordset[0]?.co_cat || '01';
+        const defaultCol = resCol.recordset[0]?.co_color || '01';
+        const defaultUbi = resUbi.recordset[0]?.co_ubicacion || '01';
+        const defaultUni = resUni.recordset[0]?.co_uni || 'UND';
+        const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
+
+        let migratedCount = 0;
+        const errors = [];
+
+        const existingRes = await pool.request().query('SELECT RTRIM(co_art) AS co_art FROM saArticulo');
+        const existingSet = new Set(existingRes.recordset.map(r => (r.co_art || '').trim().toUpperCase()));
+
+        for (const item of items) {
+            const co_art = (item.co_art || '').trim().toUpperCase();
+            if (!co_art || existingSet.has(co_art)) continue;
+
+            try {
+                const dataToInsert = { ...item };
+
+                // 1. Validar línea
+                const linCheck = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin || '').query(
+                    'SELECT TOP 1 co_lin FROM saLineaArticulo WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin))'
+                );
+                dataToInsert.co_lin = linCheck.recordset.length ? dataToInsert.co_lin : defaultLin;
+
+                // 2. Validar sublínea
+                const sublCheck = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin).input('subl', sql.VarChar, dataToInsert.co_subl || '').query(
+                    'SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin)) AND LTRIM(RTRIM(co_subl)) = LTRIM(RTRIM(@subl))'
+                );
+                if (sublCheck.recordset.length) {
+                    dataToInsert.co_subl = dataToInsert.co_subl;
+                } else {
+                    const firstSubl = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin).query(
+                        'SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin)) ORDER BY co_subl'
+                    );
+                    dataToInsert.co_subl = firstSubl.recordset[0]?.co_subl || '01';
+                }
+
+                // 3. Validar co_cat
+                const catCheck = await pool.request().input('cat', sql.VarChar, dataToInsert.co_cat || '').query(
+                    'SELECT TOP 1 co_cat FROM saCatArticulo WHERE LTRIM(RTRIM(co_cat)) = LTRIM(RTRIM(@cat))'
+                );
+                dataToInsert.co_cat = catCheck.recordset.length ? dataToInsert.co_cat : defaultCat;
+
+                // 4. Validar co_color
+                const colCheck = await pool.request().input('col', sql.VarChar, dataToInsert.co_color || '').query(
+                    'SELECT TOP 1 co_color FROM saColor WHERE LTRIM(RTRIM(co_color)) = LTRIM(RTRIM(@col))'
+                );
+                dataToInsert.co_color = colCheck.recordset.length ? dataToInsert.co_color : defaultCol;
+
+                // 5. Validar co_ubicacion
+                const ubiCheck = await pool.request().input('ubi', sql.VarChar, dataToInsert.co_ubicacion || '').query(
+                    'SELECT TOP 1 co_ubicacion FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@ubi))'
+                );
+                dataToInsert.co_ubicacion = ubiCheck.recordset.length ? dataToInsert.co_ubicacion : defaultUbi;
+
+                const f = new Date();
+                const r = new sql.Request(pool);
+                r.input('sCo_Art', sql.Char(30), dataToInsert.co_art);
+                r.input('sdFecha_Reg', sql.SmallDateTime, f);
+                r.input('sArt_Des', sql.VarChar(120), dataToInsert.art_des || 'NUEVO ARTÍCULO');
+                r.input('sTipo', sql.Char(1), dataToInsert.tipo || 'V');
+                r.input('bAnulado', sql.Bit, dataToInsert.anulado ? 1 : 0);
+                r.input('sdFecha_Inac', sql.SmallDateTime, f);
+                r.input('sCo_Lin', sql.Char(6), dataToInsert.co_lin);
+                r.input('sCo_Subl', sql.Char(6), dataToInsert.co_subl);
+                r.input('sCo_Cat', sql.Char(6), dataToInsert.co_cat);
+                r.input('sCo_Color', sql.Char(6), dataToInsert.co_color);
+                r.input('sCo_Ubicacion', sql.Char(6), dataToInsert.co_ubicacion);
+                r.input('sItem', sql.VarChar(10), dataToInsert.item || null);
+                r.input('sModelo', sql.VarChar(20), dataToInsert.modelo || '');
+                r.input('sRef', sql.VarChar(20), dataToInsert.ref || null);
+                r.input('bGenerico', sql.Bit, 0);
+                r.input('bManeja_Serial', sql.Bit, 0);
+                r.input('bManeja_Lote', sql.Bit, 0);
+                r.input('bManeja_Lote_Venc', sql.Bit, 0);
+                r.input('deMargen_Min', sql.Decimal(18, 5), 0);
+                r.input('deMargen_Max', sql.Decimal(18, 5), 0);
+                r.input('sTipo_Imp', sql.Char(1), dataToInsert.tipo_imp || '1');
+                r.input('sTipo_Imp2', sql.Char(1), null);
+                r.input('sTipo_Imp3', sql.Char(1), null);
+                r.input('sCo_Reten', sql.Char(6), null);
+                r.input('sCod_Proc', sql.Char(6), null);
+                r.input('sGarantia', sql.VarChar(30), '');
+                r.input('deVolumen', sql.Decimal(18, 5), Number(dataToInsert.volumen) || 0);
+                r.input('dePeso', sql.Decimal(18, 5), Number(dataToInsert.peso) || 0);
+                r.input('deStock_Min', sql.Decimal(18, 5), Number(dataToInsert.stock_min) || 0);
+                r.input('deStock_Max', sql.Decimal(18, 5), Number(dataToInsert.stock_max) || 0);
+                r.input('deStock_Pedido', sql.Decimal(18, 5), 0);
+                r.input('iRelac_Unidad', sql.Int, 1);
+                r.input('dePunt_Ven', sql.Decimal(18, 5), 0);
+                r.input('dePunt_Cli', sql.Decimal(18, 5), 0);
+                r.input('deLic_Mon_Ilc', sql.Decimal(18, 5), 0);
+                r.input('deLic_Capacidad', sql.Decimal(18, 5), 0);
+                r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
+                r.input('sLic_Tipo', sql.Char(1), null);
+                r.input('bPrec_Om', sql.Bit, 0);
+                r.input('sComentario', sql.VarChar(sql.MAX), 'Migrado vía Sincronización');
+                r.input('sTipo_Cos', sql.Char(4), '1');
+                r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
+                r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
+                r.input('deMont_Comi', sql.Decimal(18, 5), 0);
+                r.input('dePorc_Arancel', sql.Decimal(18, 5), 0);
+                r.input('sI_Art_Des', sql.VarChar(120), null);
+                r.input('sDis_Cen', sql.VarChar(sql.MAX), null);
+                r.input('sReten_Iva_Tercero', sql.Char(16), null);
+                r.input('sCampo1', sql.VarChar(60), dataToInsert.campo1 || null);
+                r.input('sCampo2', sql.VarChar(60), null);
+                r.input('sCampo3', sql.VarChar(60), null);
+                r.input('sCampo4', sql.VarChar(60), null);
+                r.input('sCampo5', sql.VarChar(60), null);
+                r.input('sCampo6', sql.VarChar(60), null);
+                r.input('sCampo7', sql.VarChar(60), dataToInsert.campo7 || null);
+                r.input('sCampo8', sql.VarChar(60), null);
+                r.input('sCo_Us_In', sql.Char(6), auditUser);
+                r.input('sCo_Sucu_In', sql.Char(6), defaultAlmacen);
+                r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
+                r.input('sRevisado', sql.Char(1), null);
+                r.input('sTrasnfe', sql.Char(1), null);
+
+                await r.execute('pInsertarArticulo');
+
+                const checkUnit = await pool.request()
+                    .input('art', sql.VarChar, dataToInsert.co_art)
+                    .query('SELECT TOP 1 co_art FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
+                
+                if (!checkUnit.recordset.length) {
+                    await pool.request()
+                        .input('art', sql.Char(30), dataToInsert.co_art)
+                        .input('uni', sql.Char(6), defaultUni)
+                        .input('user', sql.Char(6), auditUser)
+                        .input('sucu', sql.Char(6), defaultAlmacen)
+                        .query(`
+                            INSERT INTO saArtUnidad (co_art, co_uni, relacion, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
+                            VALUES (@art, @uni, 1, 1, 1, 1, @user, GETDATE(), @sucu, 'SYNC2K')
+                        `);
+                }
+
+                if (dataToInsert.campo7) {
+                    await pool.request()
+                        .input('art', sql.Char(30), dataToInsert.co_art)
+                        .input('img', sql.VarChar(250), dataToInsert.campo7)
+                        .query('UPDATE saArticulo SET campo7 = @img WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
+                }
+
+                if (dataToInsert.anulado) {
+                    await pool.request()
+                        .input('art', sql.Char(30), dataToInsert.co_art)
+                        .query('UPDATE saArticulo SET anulado = 1, fecha_inac = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
+                }
+
+                existingSet.add(co_art);
+                migratedCount++;
+            } catch (err) {
+                errors.push(`Artículo ${co_art} (${item.art_des}): ${err.message}`);
+            }
+        }
+
+        return res.status(200).json({
+            success: true,
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            migrated: migratedCount,
+            errors
+        });
+    } catch (error) {
+        console.error('[ARTICULOS IMPORT BATCH ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error importando lote de artículos', error: error.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // 2.5 GET /api/v1/articulos/next-code — Obtener el siguiente código disponible
 // ────────────────────────────────────────────────────────────────────────────
 /**

@@ -396,6 +396,139 @@ router.get('/search', async (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// 2.1 GET /api/v1/clientes/export-all — Exportar todos los clientes de la sede
+// ────────────────────────────────────────────────────────────────────────────
+router.get('/export-all', async (req, res) => {
+    try {
+        const servers = getServers();
+        const srv = (req.query.sede ? servers.find(s => s.id === req.query.sede) : null) || servers[0];
+        if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
+
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const result = await pool.request().query(
+            `SELECT RTRIM(co_cli) AS co_cli, RTRIM(cli_des) AS cli_des, RTRIM(rif) AS rif,
+                    RTRIM(direc1) AS direc1, RTRIM(telefonos) AS telefonos, RTRIM(email) AS email,
+                    RTRIM(co_zon) AS co_zon, RTRIM(co_seg) AS co_seg, RTRIM(co_ven) AS co_ven,
+                    RTRIM(tip_cli) AS tip_cli, RTRIM(co_mone) AS co_mone, RTRIM(cond_pag) AS cond_pag,
+                    RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr, contrib, contribu_e, porc_esp,
+                    RTRIM(tipo_per) AS tipo_per, inactivo
+             FROM saCliente`
+        );
+
+        return res.status(200).json({
+            success: true,
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (error) {
+        console.error('[CLIENTES EXPORT ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error exportando clientes', error: error.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 2.2 POST /api/v1/clientes/import-batch — Importar lote de clientes faltantes
+// ────────────────────────────────────────────────────────────────────────────
+router.post('/import-batch', async (req, res) => {
+    try {
+        const { items } = req.body;
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(200).json({ success: true, migrated: 0, errors: [] });
+        }
+
+        const servers = getServers();
+        const srv = (req.query.sede ? servers.find(s => s.id === req.query.sede) : null) || servers[0];
+        if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
+
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const defaults = await loadDefaults(pool);
+        const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
+
+        let migratedCount = 0;
+        const errors = [];
+
+        const existingRes = await pool.request().query('SELECT RTRIM(co_cli) AS co_cli FROM saCliente');
+        const existingSet = new Set(existingRes.recordset.map(r => (r.co_cli || '').trim().toUpperCase()));
+
+        for (const item of items) {
+            const co_cli = (item.co_cli || '').trim().toUpperCase();
+            if (!co_cli || existingSet.has(co_cli)) continue;
+
+            try {
+                const dataToInsert = { ...item };
+
+                // 1. Validar co_seg
+                const segCheck = await pool.request().input('seg', sql.VarChar, dataToInsert.co_seg || '').query(
+                    'SELECT TOP 1 co_seg FROM saSegmento WHERE LTRIM(RTRIM(co_seg)) = LTRIM(RTRIM(@seg))'
+                );
+                dataToInsert.co_seg = segCheck.recordset.length ? dataToInsert.co_seg : defaults.co_seg;
+
+                // 2. Validar co_zon
+                const zonCheck = await pool.request().input('zon', sql.VarChar, dataToInsert.co_zon || '').query(
+                    'SELECT TOP 1 co_zon FROM saZona WHERE LTRIM(RTRIM(co_zon)) = LTRIM(RTRIM(@zon))'
+                );
+                dataToInsert.co_zon = zonCheck.recordset.length ? dataToInsert.co_zon : defaults.co_zon;
+
+                // 3. Validar co_ven
+                const venCheck = await pool.request().input('ven', sql.VarChar, dataToInsert.co_ven || '').query(
+                    'SELECT TOP 1 co_ven FROM saVendedor WHERE LTRIM(RTRIM(co_ven)) = LTRIM(RTRIM(@ven))'
+                );
+                dataToInsert.co_ven = venCheck.recordset.length ? dataToInsert.co_ven : defaults.co_ven;
+
+                // 4. Validar tip_cli
+                const tipCheck = await pool.request().input('tip', sql.VarChar, dataToInsert.tip_cli || '').query(
+                    'SELECT TOP 1 tip_cli FROM saTipoCliente WHERE LTRIM(RTRIM(tip_cli)) = LTRIM(RTRIM(@tip))'
+                );
+                dataToInsert.tip_cli = tipCheck.recordset.length ? dataToInsert.tip_cli : defaults.tip_cli;
+
+                // 5. Validar cond_pag
+                const condCheck = await pool.request().input('cond', sql.VarChar, dataToInsert.cond_pag || '').query(
+                    'SELECT TOP 1 co_cond FROM saCondicionPago WHERE LTRIM(RTRIM(co_cond)) = LTRIM(RTRIM(@cond))'
+                );
+                dataToInsert.cond_pag = condCheck.recordset.length ? dataToInsert.cond_pag : (defaults.co_cond || '01');
+
+                // 6. Validar co_mone
+                const monCheck = await pool.request().input('mone', sql.VarChar, dataToInsert.co_mone || '').query(
+                    'SELECT TOP 1 co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone))'
+                );
+                dataToInsert.co_mone = monCheck.recordset.length ? dataToInsert.co_mone : defaults.co_mone;
+
+                // 7. Cuenta de ingresos
+                dataToInsert.co_cta_ingr_egr = dataToInsert.co_cta_ingr_egr || defaults.co_cta || '01';
+
+                const r = new sql.Request(pool);
+                bindClienteInsert(r, dataToInsert, defaults, new Date(), auditUser);
+                await r.execute('pInsertarCliente');
+
+                if (dataToInsert.inactivo) {
+                    await pool.request()
+                        .input('cli', sql.Char(16), padProfit(co_cli, 16))
+                        .query('UPDATE saCliente SET inactivo = 1 WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@cli))');
+                }
+
+                existingSet.add(co_cli);
+                migratedCount++;
+            } catch (err) {
+                errors.push(`Cliente ${co_cli} (${item.cli_des || item.descripcion}): ${err.message}`);
+            }
+        }
+
+        return res.status(200).json({
+            success: true,
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            migrated: migratedCount,
+            errors
+        });
+    } catch (error) {
+        console.error('[CLIENTES IMPORT BATCH ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error importando lote de clientes', error: error.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // 3. GET /api/v1/clientes/:co_cli — Detalle del cliente desde todas las sedes
 // ────────────────────────────────────────────────────────────────────────────
 /**
