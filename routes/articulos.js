@@ -1106,14 +1106,20 @@ router.post('/', async (req, res) => {
         if (!data.co_art || !data.art_des)
             return res.status(400).json({ success: false, message: 'Campos obligatorios: co_art, art_des' });
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
             const f = new Date();
-            const [resLin, resSubl, resCat, resCol] = await Promise.all([
+            const [resLin, resSubl, resCat, resCol, resSuc] = await Promise.all([
                 pool.request().query('SELECT TOP 1 RTRIM(co_lin) AS id FROM saLineaArticulo'),
                 pool.request().query('SELECT TOP 1 RTRIM(co_subl) AS id FROM saSubLinea'),
                 pool.request().query('SELECT TOP 1 RTRIM(co_cat) AS id FROM saCatArticulo'),
-                pool.request().query('SELECT TOP 1 RTRIM(co_color) AS id FROM saColor')
+                pool.request().query('SELECT TOP 1 RTRIM(co_color) AS id FROM saColor'),
+                pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur")
             ]);
+
+            const configuredSucu = (srv.profit_branch_codes || []).find(b => b.is_default)?.code 
+                || (srv.profit_branch_codes || [])[0]?.code 
+                || (srv.profit_branch_codes || [])[0];
+            const defaultAlmacen = configuredSucu || resSuc.recordset[0]?.co_sucur || '01';
 
             const r = new sql.Request(pool);
             r.input('sCo_Art', sql.Char(30), data.co_art);
@@ -1173,7 +1179,7 @@ router.post('/', async (req, res) => {
             r.input('sCampo7', sql.VarChar(60), null);
             r.input('sCampo8', sql.VarChar(60), null);
             r.input('sCo_Us_In', sql.Char(6), '999');
-            r.input('sCo_Sucu_In', sql.Char(6), null);
+            r.input('sCo_Sucu_In', sql.Char(6), defaultAlmacen);
             r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
             r.input('sRevisado', sql.Char(1), null);
             r.input('sTrasnfe', sql.Char(1), null);
@@ -1183,9 +1189,12 @@ router.post('/', async (req, res) => {
             await pool.request()
                 .input('co_art', sql.Char(30), data.co_art)
                 .input('ubic', sql.Char(6), data.co_ubicacion || '01    ')
+                .input('sucu', sql.Char(6), defaultAlmacen)
                 .query(`
                     UPDATE saArticulo 
                     SET co_ubicacion = @ubic,
+                        co_sucu_in = ISNULL(co_sucu_in, @sucu),
+                        co_sucu_mo = @sucu,
                         tipo_imp2 = NULL,
                         tipo_imp3 = NULL,
                         relac_unidad = 0,

@@ -552,8 +552,8 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Campos obligatorios: co_prov/rif, prov_des/descripcion' });
         }
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
-            const defaults = await loadDefaults(pool);
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+            const defaults = await loadDefaults(pool, srv);
             const r = new sql.Request(pool);
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
 
@@ -584,7 +584,7 @@ router.put('/:co_prov', async (req, res) => {
         const { co_prov } = req.params;
         const data = req.body;
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
             const check = await pool.request().input('co_prov', sql.VarChar, co_prov).query(
                 `SELECT validador,
                         RTRIM(co_prov)           AS co_prov,
@@ -610,7 +610,7 @@ router.put('/:co_prov', async (req, res) => {
             if (!check.recordset.length) throw new Error('El proveedor no existe en esta sede.');
 
             const row = check.recordset[0];
-            const defaults = await loadDefaults(pool);
+            const defaults = await loadDefaults(pool, srv);
             row.co_mone = row.co_mone || defaults.co_mone;
             row.tip_pro = row.tip_pro || defaults.tip_pro;
             row.co_zon = row.co_zon || defaults.co_zon;
@@ -628,7 +628,7 @@ router.put('/:co_prov', async (req, res) => {
             const r = new sql.Request(pool);
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
 
-            bindProveedorUpdate(r, data, row, new Date(), auditUser);
+            bindProveedorUpdate(r, data, row, new Date(), auditUser, defaults);
             const spResult = await r.execute('pActualizarProveedor');
 
             if (spResult.returnValue !== 0 && spResult.returnValue !== undefined) {
@@ -749,7 +749,7 @@ router.post('/sync', async (req, res) => {
             }
 
             const { pool, map } = srvData;
-            const defaults = await loadDefaults(pool);
+            const defaults = await loadDefaults(pool, srv);
             let migratedCount = 0;
             const errors = [];
 

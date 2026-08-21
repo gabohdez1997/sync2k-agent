@@ -592,8 +592,8 @@ router.post('/', async (req, res) => {
         if (!data.co_cli || (!data.cli_des && !data.descripcion))
             return res.status(400).json({ success: false, message: 'Campos obligatorios: co_cli, descripcion' });
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
-            const defaults = await loadDefaults(pool);
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+            const defaults = await loadDefaults(pool, srv);
             const r = new sql.Request(pool);
             let auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
@@ -623,7 +623,7 @@ router.put('/:co_cli', async (req, res) => {
         const { co_cli } = req.params;
         const data = req.body;
 
-        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
             const check = await pool.request().input('co_cli', sql.VarChar, co_cli).query(
                 `SELECT validador,
                         RTRIM(co_cli)           AS co_cli,
@@ -649,7 +649,7 @@ router.put('/:co_cli', async (req, res) => {
             const row = check.recordset[0];
 
             // Siempre cargar defaults reales de FK para garantizar valores válidos
-            const defaults = await loadDefaults(pool);
+            const defaults = await loadDefaults(pool, srv);
             row.co_mone = row.co_mone || defaults.co_mone;
             row.tip_cli = row.tip_cli || defaults.tip_cli;
             row.co_zon = row.co_zon || defaults.co_zon;
@@ -692,7 +692,7 @@ router.put('/:co_cli', async (req, res) => {
                 sTip_Cli: data.tip_cli || row.tip_cli,
             }));
 
-            bindClienteUpdate(r, data, row, new Date(), auditUser);
+            bindClienteUpdate(r, data, row, new Date(), auditUser, defaults);
             const spResult = await r.execute('pActualizarCliente');
 
             console.log('[PUT DEBUG] SP returnValue:', spResult.returnValue);
@@ -887,7 +887,7 @@ router.post('/sync', async (req, res) => {
             }
 
             const { pool, map } = srvData;
-            const defaults = await loadDefaults(pool);
+            const defaults = await loadDefaults(pool, srv);
             let migratedCount = 0;
             const errors = [];
 
