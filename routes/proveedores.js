@@ -48,7 +48,7 @@ function bindProveedorInsert(r, data, defaults, ts = new Date(), auditUser = '99
     const d = defaults;
     const co_prov = (data.co_prov || data.rif || '').trim().toUpperCase();
     r.input('sCo_Prov', sql.Char(16), padProfit(co_prov, 16));
-    r.input('sProv_des', sql.VarChar(100), (data.prov_des || data.descripcion || '').trim());
+    r.input('sProv_des', sql.VarChar(60), String(data.prov_des || data.descripcion || '').trim().substring(0, 60));
     r.input('sCo_seg', sql.Char(6), padProfit(data.co_seg || d.co_seg, 6));
     r.input('sCo_zon', sql.Char(6), padProfit(data.co_zon || d.co_zon, 6));
     r.input('bInactivo', sql.Bit, data.inactivo ? 1 : 0);
@@ -462,6 +462,15 @@ router.post('/import-batch', async (req, res) => {
                 const r = new sql.Request(pool);
                 bindProveedorInsert(r, dataToInsert, defaults, new Date(), auditUser);
                 await r.execute('pInsertarProveedor');
+
+                if (item.prov_des && item.prov_des.length > 60) {
+                    try {
+                        await pool.request()
+                            .input('prov', sql.Char(16), padProfit(co_prov, 16))
+                            .input('des', sql.VarChar(120), String(item.prov_des).trim().substring(0, 120))
+                            .query('UPDATE saProveedor SET prov_des = @des WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@prov))');
+                    } catch {}
+                }
 
                 if (dataToInsert.inactivo) {
                     await pool.request()

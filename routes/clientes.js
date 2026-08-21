@@ -10,8 +10,8 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sLogin', sql.Char(20), '');
     r.input('sPassword', sql.Char(20), '');
     r.input('sSalesTax', sql.Char(8), null);
-    r.input('sCli_Des', sql.VarChar(60), data.cli_des || data.descripcion);
-    r.input('sCo_Seg', sql.Char(6), padProfit('01', 6));
+    r.input('sCli_Des', sql.VarChar(60), String(data.cli_des || data.descripcion || 'CLIENTE').trim().substring(0, 60));
+    r.input('sCo_Seg', sql.Char(6), padProfit(data.co_seg || d.co_seg || '01', 6));
     r.input('sCo_Zon', sql.Char(6), padProfit(data.co_zon || d.co_zon, 6));
     r.input('sCo_Ven', sql.VarChar(10), data.co_ven || d.co_ven || '01');
     r.input('sEstado', sql.Char(1), '1');
@@ -490,6 +490,15 @@ router.post('/import-batch', async (req, res) => {
                 const r = new sql.Request(pool);
                 bindClienteInsert(r, dataToInsert, defaults, new Date(), auditUser);
                 await r.execute('pInsertarCliente');
+
+                if (item.cli_des && item.cli_des.length > 60) {
+                    try {
+                        await pool.request()
+                            .input('cli', sql.Char(16), padProfit(co_cli, 16))
+                            .input('des', sql.VarChar(120), String(item.cli_des).trim().substring(0, 120))
+                            .query('UPDATE saCliente SET cli_des = @des WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@cli))');
+                    } catch {}
+                }
 
                 if (dataToInsert.inactivo) {
                     await pool.request()
