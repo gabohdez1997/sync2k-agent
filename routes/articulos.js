@@ -592,32 +592,43 @@ router.post('/import-batch', async (req, res) => {
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);
-        const [resLin, resCat, resCol, resUbi, resUni, resSuc] = await Promise.all([
-            pool.request().query("SELECT TOP 1 RTRIM(co_lin) AS co_lin FROM saLineaArticulo ORDER BY CASE WHEN RTRIM(co_lin) = '01' THEN 0 ELSE 1 END, co_lin"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_cat) AS co_cat FROM saCatArticulo ORDER BY CASE WHEN RTRIM(co_cat) = '01' THEN 0 ELSE 1 END, co_cat"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_color) AS co_color FROM saColor ORDER BY CASE WHEN RTRIM(co_color) = '01' THEN 0 ELSE 1 END, co_color"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_ubicacion) AS co_ubicacion FROM saUbicacion ORDER BY CASE WHEN RTRIM(co_ubicacion) = '01' THEN 0 ELSE 1 END, co_ubicacion"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur")
+        const [existingRes, linRes, sublRes, catRes, colRes, ubiRes, resSuc, resUni] = await Promise.all([
+            pool.request().query('SELECT RTRIM(co_art) AS co_art FROM saArticulo'),
+            pool.request().query('SELECT RTRIM(co_lin) AS id FROM saLineaArticulo'),
+            pool.request().query('SELECT RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl FROM saSubLinea'),
+            pool.request().query('SELECT RTRIM(co_cat) AS id FROM saCatArticulo'),
+            pool.request().query('SELECT RTRIM(co_color) AS id FROM saColor'),
+            pool.request().query('SELECT RTRIM(co_ubicacion) AS id FROM saUbicacion'),
+            pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur"),
+            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni")
         ]);
+
+        const existingSet = new Set(existingRes.recordset.map(r => (r.co_art || '').trim().toUpperCase()));
+        const linSet = new Set(linRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const sublSet = new Set(sublRes.recordset.map(r => `${(r.co_lin || '').trim().toUpperCase()}__${(r.co_subl || '').trim().toUpperCase()}`));
+        const sublByLin = new Map();
+        for (const s of sublRes.recordset) {
+            const lin = (s.co_lin || '').trim().toUpperCase();
+            if (!sublByLin.has(lin)) sublByLin.set(lin, (s.co_subl || '').trim().toUpperCase());
+        }
+        const catSet = new Set(catRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const colSet = new Set(colRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const ubiSet = new Set(ubiRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
 
         const configuredSucu = (srv.profit_branch_codes || []).find(b => b.is_default)?.code 
             || (srv.profit_branch_codes || [])[0]?.code 
             || (srv.profit_branch_codes || [])[0];
         const defaultAlmacen = configuredSucu || resSuc.recordset[0]?.co_sucur || '01';
 
-        const defaultLin = resLin.recordset[0]?.co_lin || '01';
-        const defaultCat = resCat.recordset[0]?.co_cat || '01';
-        const defaultCol = resCol.recordset[0]?.co_color || '01';
-        const defaultUbi = resUbi.recordset[0]?.co_ubicacion || '01';
+        const defaultLin = linRes.recordset[0]?.id || '01';
+        const defaultCat = catRes.recordset[0]?.id || '01';
+        const defaultCol = colRes.recordset[0]?.id || '01';
+        const defaultUbi = ubiRes.recordset[0]?.id || '01';
         const defaultUni = resUni.recordset[0]?.co_uni || 'UND';
         const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
         let migratedCount = 0;
         const errors = [];
-
-        const existingRes = await pool.request().query('SELECT RTRIM(co_art) AS co_art FROM saArticulo');
-        const existingSet = new Set(existingRes.recordset.map(r => (r.co_art || '').trim().toUpperCase()));
 
         for (const item of items) {
             const co_art = (item.co_art || '').trim().toUpperCase();
@@ -626,42 +637,25 @@ router.post('/import-batch', async (req, res) => {
             try {
                 const dataToInsert = { ...item };
 
-                // 1. Validar línea
-                const linCheck = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin || '').query(
-                    'SELECT TOP 1 co_lin FROM saLineaArticulo WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin))'
-                );
-                dataToInsert.co_lin = linCheck.recordset.length ? dataToInsert.co_lin : defaultLin;
+                const cleanLin = (dataToInsert.co_lin || '').trim().toUpperCase();
+                dataToInsert.co_lin = linSet.has(cleanLin) ? dataToInsert.co_lin : defaultLin;
 
-                // 2. Validar sublínea
-                const sublCheck = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin).input('subl', sql.VarChar, dataToInsert.co_subl || '').query(
-                    'SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin)) AND LTRIM(RTRIM(co_subl)) = LTRIM(RTRIM(@subl))'
-                );
-                if (sublCheck.recordset.length) {
+                const targetLin = (dataToInsert.co_lin || '').trim().toUpperCase();
+                const targetSubl = (dataToInsert.co_subl || '').trim().toUpperCase();
+                if (sublSet.has(`${targetLin}__${targetSubl}`)) {
                     dataToInsert.co_subl = dataToInsert.co_subl;
                 } else {
-                    const firstSubl = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin).query(
-                        'SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin)) ORDER BY co_subl'
-                    );
-                    dataToInsert.co_subl = firstSubl.recordset[0]?.co_subl || '01';
+                    dataToInsert.co_subl = sublByLin.get(targetLin) || '01';
                 }
 
-                // 3. Validar co_cat
-                const catCheck = await pool.request().input('cat', sql.VarChar, dataToInsert.co_cat || '').query(
-                    'SELECT TOP 1 co_cat FROM saCatArticulo WHERE LTRIM(RTRIM(co_cat)) = LTRIM(RTRIM(@cat))'
-                );
-                dataToInsert.co_cat = catCheck.recordset.length ? dataToInsert.co_cat : defaultCat;
+                const cleanCat = (dataToInsert.co_cat || '').trim().toUpperCase();
+                dataToInsert.co_cat = catSet.has(cleanCat) ? dataToInsert.co_cat : defaultCat;
 
-                // 4. Validar co_color
-                const colCheck = await pool.request().input('col', sql.VarChar, dataToInsert.co_color || '').query(
-                    'SELECT TOP 1 co_color FROM saColor WHERE LTRIM(RTRIM(co_color)) = LTRIM(RTRIM(@col))'
-                );
-                dataToInsert.co_color = colCheck.recordset.length ? dataToInsert.co_color : defaultCol;
+                const cleanCol = (dataToInsert.co_color || '').trim().toUpperCase();
+                dataToInsert.co_color = colSet.has(cleanCol) ? dataToInsert.co_color : defaultCol;
 
-                // 5. Validar co_ubicacion
-                const ubiCheck = await pool.request().input('ubi', sql.VarChar, dataToInsert.co_ubicacion || '').query(
-                    'SELECT TOP 1 co_ubicacion FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@ubi))'
-                );
-                dataToInsert.co_ubicacion = ubiCheck.recordset.length ? dataToInsert.co_ubicacion : defaultUbi;
+                const cleanUbi = (dataToInsert.co_ubicacion || '').trim().toUpperCase();
+                dataToInsert.co_ubicacion = ubiSet.has(cleanUbi) ? dataToInsert.co_ubicacion : defaultUbi;
 
                 const f = new Date();
                 const r = new sql.Request(pool);

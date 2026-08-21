@@ -424,8 +424,21 @@ router.post('/import-batch', async (req, res) => {
         let migratedCount = 0;
         const errors = [];
 
-        const existingRes = await pool.request().query('SELECT RTRIM(co_prov) AS co_prov FROM saProveedor');
+        const [existingRes, segRes, zonRes, tipRes, condRes, monRes] = await Promise.all([
+            pool.request().query('SELECT RTRIM(co_prov) AS co_prov FROM saProveedor'),
+            pool.request().query('SELECT RTRIM(co_seg) AS id FROM saSegmento'),
+            pool.request().query('SELECT RTRIM(co_zon) AS id FROM saZona'),
+            pool.request().query('SELECT RTRIM(tip_pro) AS id FROM saTipoProveedor'),
+            pool.request().query('SELECT RTRIM(co_cond) AS id FROM saCondicionPago'),
+            pool.request().query('SELECT RTRIM(co_mone) AS id FROM saMoneda')
+        ]);
+
         const existingSet = new Set(existingRes.recordset.map(r => (r.co_prov || '').trim().toUpperCase()));
+        const segSet = new Set(segRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const zonSet = new Set(zonRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const tipSet = new Set(tipRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const condSet = new Set(condRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
+        const monSet = new Set(monRes.recordset.map(r => (r.id || '').trim().toUpperCase()));
 
         for (const item of items) {
             const co_prov = (item.co_prov || item.rif || '').trim().toUpperCase();
@@ -434,45 +447,16 @@ router.post('/import-batch', async (req, res) => {
             try {
                 const dataToInsert = { ...item };
 
-                // 1. Validar co_seg
-                const segCheck = await pool.request().input('seg', sql.VarChar, dataToInsert.co_seg || '').query(
-                    'SELECT TOP 1 co_seg FROM saSegmento WHERE LTRIM(RTRIM(co_seg)) = LTRIM(RTRIM(@seg))'
-                );
-                dataToInsert.co_seg = segCheck.recordset.length ? dataToInsert.co_seg : defaults.co_seg;
-
-                // 2. Validar co_zon
-                const zonCheck = await pool.request().input('zon', sql.VarChar, dataToInsert.co_zon || '').query(
-                    'SELECT TOP 1 co_zon FROM saZona WHERE LTRIM(RTRIM(co_zon)) = LTRIM(RTRIM(@zon))'
-                );
-                dataToInsert.co_zon = zonCheck.recordset.length ? dataToInsert.co_zon : defaults.co_zon;
-
-                // 3. Validar tip_pro
-                const tipCheck = await pool.request().input('tip', sql.VarChar, dataToInsert.tip_pro || '').query(
-                    'SELECT TOP 1 tip_pro FROM saTipoProveedor WHERE LTRIM(RTRIM(tip_pro)) = LTRIM(RTRIM(@tip))'
-                );
-                dataToInsert.tip_pro = tipCheck.recordset.length ? dataToInsert.tip_pro : defaults.tip_pro;
-
-                // 4. Validar cond_pag
-                const condCheck = await pool.request().input('cond', sql.VarChar, dataToInsert.cond_pag || '').query(
-                    'SELECT TOP 1 co_cond FROM saCondicionPago WHERE LTRIM(RTRIM(co_cond)) = LTRIM(RTRIM(@cond))'
-                );
-                dataToInsert.cond_pag = condCheck.recordset.length ? dataToInsert.cond_pag : defaults.cond_pag;
-
-                // 5. Validar co_mone
-                const monCheck = await pool.request().input('mone', sql.VarChar, dataToInsert.co_mone || '').query(
-                    'SELECT TOP 1 co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone))'
-                );
-                dataToInsert.co_mone = monCheck.recordset.length ? dataToInsert.co_mone : defaults.co_mone;
-
-                // 6. Cuenta de egresos
+                dataToInsert.co_seg = segSet.has((dataToInsert.co_seg || '').trim().toUpperCase()) ? dataToInsert.co_seg : defaults.co_seg;
+                dataToInsert.co_zon = zonSet.has((dataToInsert.co_zon || '').trim().toUpperCase()) ? dataToInsert.co_zon : defaults.co_zon;
+                dataToInsert.tip_pro = tipSet.has((dataToInsert.tip_pro || '').trim().toUpperCase()) ? dataToInsert.tip_pro : defaults.tip_pro;
+                dataToInsert.cond_pag = condSet.has((dataToInsert.cond_pag || '').trim().toUpperCase()) ? dataToInsert.cond_pag : defaults.cond_pag;
+                dataToInsert.co_mone = monSet.has((dataToInsert.co_mone || '').trim().toUpperCase()) ? dataToInsert.co_mone : defaults.co_mone;
                 dataToInsert.co_cta_ingr_egr = (dataToInsert.co_cta_ingr_egr && dataToInsert.co_cta_ingr_egr !== '01') ? dataToInsert.co_cta_ingr_egr : (defaults.co_cta || '02');
 
-                // 7. Tabulador ISLR dinámico
                 const tipo_per = dataToInsert.tipo_per || '3';
                 dataToInsert.tipo_per = tipo_per;
                 dataToInsert.co_tab = await resolveCoTab(pool, dataToInsert.co_tab, tipo_per);
-
-                // 8. País
                 dataToInsert.co_pais = dataToInsert.co_pais || 'VE';
 
                 const r = new sql.Request(pool);
