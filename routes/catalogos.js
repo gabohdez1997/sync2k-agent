@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool } = require('../db');
-const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse, padProfit } = require('../helpers/multiSede');
+const { sql, getPool, getServers } = require('../db');
+const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse, padProfit, resolveServer } = require('../helpers/multiSede');
 
 /**
  * @swagger
