@@ -25,15 +25,19 @@ app.use((req, res, next) => {
         console.log(`[PNA DEBUG] Respondiendo OPTIONS para: ${origin || 'Desconocido'}`);
         res.setHeader('Access-Control-Allow-Origin', origin || '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
-        res.setHeader('Access-Control-Allow-Headers', 'x-api-key, x-sql-auth, x-profit-user, content-type');
+        res.setHeader('Access-Control-Allow-Headers', 'x-api-key, x-sql-auth, x-profit-user, x-branch-id, content-type');
         res.setHeader('Access-Control-Max-Age', '86400');
         return res.sendStatus(204);
     }
     next();
 });
 
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+    origin: '*',
+    allowedHeaders: ['x-api-key', 'x-sql-auth', 'x-profit-user', 'x-branch-id', 'content-type']
+}));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Configuraciones obtenidas del entorno
 const PORT = process.env.PORT || 3000;
