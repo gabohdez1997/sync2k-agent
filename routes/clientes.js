@@ -65,7 +65,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
     r.input('sRevisado', sql.Char(1), '0');
     r.input('sTrasnfe', sql.Char(1), '0');
-    r.input('sCo_Sucu_In', sql.Char(6), padProfit('01', 6));
+    r.input('sCo_Sucu_In', sql.Char(6), padProfit(d.co_sucu || '01', 6));
     r.input('bJuridico', sql.Bit, 0);
     r.input('iTipo_Adi', sql.Int, 1);
     r.input('sMatriz', sql.Char(16), null);
@@ -85,7 +85,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
 }
 
 // ── Helper: inputs del STORED PROCEDURE pActualizarCliente ──────────────────
-function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999') {
+function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999', defaults = null) {
     r.input('sCo_Cli', sql.Char(16), data.co_cli || row.co_cli);
     r.input('sCo_CliOri', sql.Char(16), row.co_cli);
     r.input('sLogin', sql.Char(20), '');
@@ -144,7 +144,7 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999') {
     r.input('sCampo7', sql.VarChar(60), '');
     r.input('sCampo8', sql.VarChar(60), '');
     r.input('sCo_Us_Mo', sql.VarChar(10), auditUser);
-    r.input('sCo_Sucu_Mo', sql.Char(6), '01');
+    r.input('sCo_Sucu_Mo', sql.Char(6), padProfit(defaults?.co_sucu || '01', 6));
     r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
     r.input('sCampos', sql.VarChar(sql.MAX), null);
     r.input('sRevisado', sql.Char(1), '0');
@@ -170,15 +170,21 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999') {
 }
 
 // ── Helper: carga defaults de FK ───────────────────────────────────────────
-async function loadDefaults(pool) {
-    const [cta, seg, zon, ven, tip, mon, cond] = await Promise.all([
+async function loadDefaults(pool, srv = null) {
+    const defaultSucu = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code 
+        || (srv?.profit_branch_codes || [])[0]?.code 
+        || (srv?.profit_branch_codes || [])[0] 
+        || null;
+
+    const [cta, seg, zon, ven, tip, mon, cond, sucu] = await Promise.all([
         pool.request().query('SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS id FROM saCuentaIngEgr'),
         pool.request().query('SELECT TOP 1 RTRIM(co_seg) AS id FROM saSegmento'),
         pool.request().query('SELECT TOP 1 RTRIM(co_zon) AS id FROM saZona'),
         pool.request().query('SELECT TOP 1 RTRIM(co_ven) AS id FROM saVendedor'),
         pool.request().query('SELECT TOP 1 RTRIM(tip_cli) AS id FROM saTipoCliente ORDER BY CASE WHEN RTRIM(tip_cli) = \'01\' THEN 0 ELSE 1 END, tip_cli'),
         pool.request().query('SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN co_mone IN (\'BS\',\'VES\',\'BSF\') THEN 0 ELSE 1 END, co_mone'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago')
+        pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago'),
+        pool.request().query('SELECT TOP 1 RTRIM(co_sucur) AS id FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = \'01\' THEN 0 ELSE 1 END, co_sucur')
     ]);
     return {
         co_cta: cta.recordset[0]?.id || '01',
@@ -187,7 +193,8 @@ async function loadDefaults(pool) {
         co_ven: ven.recordset[0]?.id || '01',
         tip_cli: tip.recordset[0]?.id || '01',
         co_mone: mon.recordset[0]?.id || '01',
-        co_cond: cond.recordset[0]?.id || '01'
+        co_cond: cond.recordset[0]?.id || '01',
+        co_sucu: defaultSucu || sucu.recordset[0]?.id || '01'
     };
 }
 
@@ -441,7 +448,7 @@ router.post('/import-batch', async (req, res) => {
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);
-        const defaults = await loadDefaults(pool);
+        const defaults = await loadDefaults(pool, srv);
         const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
         let migratedCount = 0;

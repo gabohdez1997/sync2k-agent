@@ -592,15 +592,19 @@ router.post('/import-batch', async (req, res) => {
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);
-        const defaultAlmacen = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
-
-        const [resLin, resCat, resCol, resUbi, resUni] = await Promise.all([
+        const [resLin, resCat, resCol, resUbi, resUni, resSuc] = await Promise.all([
             pool.request().query("SELECT TOP 1 RTRIM(co_lin) AS co_lin FROM saLineaArticulo ORDER BY CASE WHEN RTRIM(co_lin) = '01' THEN 0 ELSE 1 END, co_lin"),
             pool.request().query("SELECT TOP 1 RTRIM(co_cat) AS co_cat FROM saCatArticulo ORDER BY CASE WHEN RTRIM(co_cat) = '01' THEN 0 ELSE 1 END, co_cat"),
             pool.request().query("SELECT TOP 1 RTRIM(co_color) AS co_color FROM saColor ORDER BY CASE WHEN RTRIM(co_color) = '01' THEN 0 ELSE 1 END, co_color"),
             pool.request().query("SELECT TOP 1 RTRIM(co_ubicacion) AS co_ubicacion FROM saUbicacion ORDER BY CASE WHEN RTRIM(co_ubicacion) = '01' THEN 0 ELSE 1 END, co_ubicacion"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni")
+            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni"),
+            pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur")
         ]);
+
+        const configuredSucu = (srv.profit_branch_codes || []).find(b => b.is_default)?.code 
+            || (srv.profit_branch_codes || [])[0]?.code 
+            || (srv.profit_branch_codes || [])[0];
+        const defaultAlmacen = configuredSucu || resSuc.recordset[0]?.co_sucur || '01';
 
         const defaultLin = resLin.recordset[0]?.co_lin || '01';
         const defaultCat = resCat.recordset[0]?.co_cat || '01';

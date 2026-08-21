@@ -94,7 +94,7 @@ function bindProveedorInsert(r, data, defaults, ts = new Date(), auditUser = '99
     r.input('sCampo7', sql.VarChar(60), '');
     r.input('sCampo8', sql.VarChar(60), '');
     r.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
-    r.input('sCo_Sucu_In', sql.Char(6), padProfit('01', 6));
+    r.input('sCo_Sucu_In', sql.Char(6), padProfit(d.co_sucu || '01', 6));
     r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
     r.input('sRevisado', sql.Char(1), '0');
     r.input('sTrasnfe', sql.Char(1), '0');
@@ -105,7 +105,7 @@ function bindProveedorInsert(r, data, defaults, ts = new Date(), auditUser = '99
 }
 
 // ── Helper: inputs del STORED PROCEDURE pActualizarProveedor ────────────────
-function bindProveedorUpdate(r, data, row, ts = new Date(), auditUser = '999') {
+function bindProveedorUpdate(r, data, row, ts = new Date(), auditUser = '999', defaults = null) {
     const co_prov = (data.co_prov || row.co_prov).trim().toUpperCase();
     r.input('sCo_Prov', sql.Char(16), padProfit(co_prov, 16));
     r.input('sCo_ProvOri', sql.Char(16), padProfit(row.co_prov, 16));
@@ -156,7 +156,7 @@ function bindProveedorUpdate(r, data, row, ts = new Date(), auditUser = '999') {
     r.input('sCampo7', sql.VarChar(60), '');
     r.input('sCampo8', sql.VarChar(60), '');
     r.input('sCo_Us_Mo', sql.Char(6), padProfit(auditUser, 6));
-    r.input('sCo_Sucu_Mo', sql.Char(6), padProfit('01', 6));
+    r.input('sCo_Sucu_Mo', sql.Char(6), padProfit(defaults?.co_sucu || '01', 6));
     r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
     r.input('sCampos', sql.VarChar(sql.MAX), null);
     r.input('sRevisado', sql.Char(1), '0');
@@ -170,14 +170,20 @@ function bindProveedorUpdate(r, data, row, ts = new Date(), auditUser = '999') {
 }
 
 // ── Helper: carga defaults de FK para Proveedor ─────────────────────────────
-async function loadDefaults(pool) {
-    const [cta, seg, zon, tip, mon, cond] = await Promise.all([
+async function loadDefaults(pool, srv = null) {
+    const defaultSucu = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code 
+        || (srv?.profit_branch_codes || [])[0]?.code 
+        || (srv?.profit_branch_codes || [])[0] 
+        || null;
+
+    const [cta, seg, zon, tip, mon, cond, sucu] = await Promise.all([
         pool.request().query('SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS id FROM saCuentaIngEgr ORDER BY CASE WHEN RTRIM(co_cta_ingr_egr) = \'02\' THEN 0 ELSE 1 END'),
         pool.request().query('SELECT TOP 1 RTRIM(co_seg) AS id FROM saSegmento'),
         pool.request().query('SELECT TOP 1 RTRIM(co_zon) AS id FROM saZona'),
         pool.request().query('SELECT TOP 1 RTRIM(tip_pro) AS id FROM saTipoProveedor ORDER BY CASE WHEN RTRIM(tip_pro) = \'01\' THEN 0 ELSE 1 END, tip_pro'),
         pool.request().query('SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN co_mone IN (\'BS\',\'VES\',\'BSF\') THEN 0 ELSE 1 END, co_mone'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago')
+        pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago'),
+        pool.request().query('SELECT TOP 1 RTRIM(co_sucur) AS id FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = \'01\' THEN 0 ELSE 1 END, co_sucur')
     ]);
     return {
         co_cta: cta.recordset[0]?.id || '02',
@@ -185,7 +191,8 @@ async function loadDefaults(pool) {
         co_zon: zon.recordset[0]?.id || '01',
         tip_pro: tip.recordset[0]?.id || '01',
         co_mone: mon.recordset[0]?.id || '01',
-        cond_pag: cond.recordset[0]?.id || '01'
+        cond_pag: cond.recordset[0]?.id || '01',
+        co_sucu: defaultSucu || sucu.recordset[0]?.id || '01'
     };
 }
 
@@ -411,7 +418,7 @@ router.post('/import-batch', async (req, res) => {
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);
-        const defaults = await loadDefaults(pool);
+        const defaults = await loadDefaults(pool, srv);
         const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
         
         let migratedCount = 0;
