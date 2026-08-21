@@ -811,11 +811,16 @@ router.get('/tipos_proveedor', (req, res) =>
 // ── Estadísticas por Sede (Artículos, Clientes, Proveedores) ───────────────
 router.get('/stats', async (req, res) => {
     try {
-        const { getServers } = require('../db');
-        const requestedSede = req.query.sede || req.query.sede_id;
+        const requestedSede = req.query.sede || req.query.sede_id || req.headers['x-branch-id'];
         let servers = getServers();
         if (requestedSede) {
-            servers = servers.filter(s => s.id === requestedSede);
+            const clean = String(requestedSede).trim().toLowerCase();
+            const found = servers.filter(s => 
+                String(s.id).toLowerCase() === clean || 
+                String(s.name || '').toLowerCase() === clean || 
+                (s.profit_server_id && String(s.profit_server_id).toLowerCase() === clean)
+            );
+            if (found.length > 0) servers = found;
         }
 
         const stats = await Promise.all(servers.map(async (srv) => {

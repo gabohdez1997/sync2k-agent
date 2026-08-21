@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
-const { executeWrite, writeResponse, paginatedResponse } = require('../helpers/multiSede');
+const { executeWrite, writeResponse, paginatedResponse, resolveServer } = require('../helpers/multiSede');
 
 // ── Helper: enriquece artículos con precios y stock ─────────────────────────
 async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null) {
@@ -551,8 +551,7 @@ router.get('/search', async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────
 router.get('/export-all', async (req, res) => {
     try {
-        const servers = getServers();
-        const srv = (req.query.sede ? servers.find(s => s.id === req.query.sede) : null) || servers[0];
+        const srv = resolveServer(req);
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);
@@ -589,8 +588,7 @@ router.post('/import-batch', async (req, res) => {
             return res.status(200).json({ success: true, migrated: 0, errors: [] });
         }
 
-        const servers = getServers();
-        const srv = (req.query.sede ? servers.find(s => s.id === req.query.sede) : null) || servers[0];
+        const srv = resolveServer(req);
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);

@@ -153,11 +153,41 @@ function padProfit(val, length) {
     return str.padEnd(length, ' ');
 }
 
+/**
+ * Resuelve la sede adecuada según query params, headers x-branch-id, .env o primera disponible
+ */
+function resolveServer(req) {
+    const servers = getServers();
+    if (!servers || servers.length === 0) return null;
+    
+    const target = req?.query?.sede || req?.query?.sede_id || req?.headers?.['x-branch-id'];
+    if (target) {
+        const clean = String(target).trim().toLowerCase();
+        const found = servers.find(s => 
+            String(s.id).toLowerCase() === clean || 
+            String(s.name || '').toLowerCase() === clean || 
+            (s.profit_server_id && String(s.profit_server_id).toLowerCase() === clean)
+        );
+        if (found) return found;
+    }
+    
+    const envBranch = process.env.LOCAL_BRANCH_NAME;
+    if (envBranch) {
+        const cleanEnv = String(envBranch).trim().toLowerCase();
+        const foundEnv = servers.find(s => String(s.name || '').toLowerCase() === cleanEnv || String(s.id).toLowerCase() === cleanEnv);
+        if (foundEnv) return foundEnv;
+    }
+    
+    return servers[0];
+}
+
 module.exports = { 
     aggregateRead, 
     aggregateUnique, 
     executeWrite, 
     writeResponse, 
     paginatedResponse,
-    padProfit
+    padProfit,
+    resolveServer
 };
+
