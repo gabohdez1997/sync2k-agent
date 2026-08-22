@@ -3,7 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, resolveServer } = require('../helpers/multiSede');
 
-// ── Helper: enriquece artículos con precios y stock ─────────────────────────
+// ── Helper: enriquece artículos con precios, stock y último costo ─────────────
 async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null) {
     if (!articulos.length) return articulos;
     const ids = articulos.map(a => `'${a.co_art.replace(/'/g, "''")}'`).join(',');
@@ -15,7 +15,7 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         if (list) authCondition = ` AND s.co_alma IN (${list})`;
     }
 
-    const [resStock, resPrecios] = await Promise.all([
+    const [resStock, resPrecios, resCostos] = await Promise.all([
         pool.request().query(`
             SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma,
                    RTRIM(a.des_alma) AS des_alma,
@@ -24,8 +24,6 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
             FROM saStockAlmacen s LEFT JOIN saAlmacen a ON s.co_alma = a.co_alma
             WHERE LTRIM(RTRIM(s.co_art)) IN (${ids}) ${authCondition}
             GROUP BY s.co_art, s.co_alma, a.des_alma
-            HAVING (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
-                    SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0))) > 0
         `),
         pool.request().query(`
             WITH UP AS (
@@ -39,11 +37,43 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
                   AND p.Inactivo = 0 AND GETDATE() >= p.desde AND (p.hasta IS NULL OR GETDATE() <= p.hasta)
             )
             SELECT co_art, id_precio, precio, moneda, margen FROM UP WHERE rn = 1
-        `)
+        `),
+        pool.request().query(`
+            SELECT r.co_art,
+                   r.cost_unit_om,
+                   r.cost_unit,
+                   r.fec_emis AS fecha_ultima_compra,
+                   r.co_mone
+            FROM (
+                SELECT RTRIM(fr.co_art) AS co_art,
+                       CASE 
+                           WHEN RTRIM(fn.co_mone) = 'BS' THEN (fr.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= fn.fec_emis ORDER BY fecha DESC), 0)) 
+                           ELSE fr.cost_unit_om 
+                       END AS cost_unit_om,
+                       fr.cost_unit,
+                       fn.fec_emis,
+                       RTRIM(fn.co_mone) AS co_mone,
+                       ROW_NUMBER() OVER(PARTITION BY fr.co_art ORDER BY fn.fec_emis DESC) as rn
+                FROM saFacturaCompraReng fr 
+                INNER JOIN saFacturaCompra fn ON fr.doc_num = fn.doc_num
+                WHERE LTRIM(RTRIM(fr.co_art)) IN (${ids}) AND fn.anulado = 0
+            ) r
+            WHERE r.rn = 1
+        `).catch(err => {
+            console.error('[enrichArticulos] Error fetching last purchase cost:', err.message);
+            return { recordset: [] };
+        })
     ]);
 
     const stockMap = {};
-    resStock.recordset.forEach(s => { (stockMap[s.co_art] = stockMap[s.co_art] || []).push({ co_alma: s.co_alma, des_alma: s.des_alma, stock: s.stock }); });
+    resStock.recordset.forEach(s => { 
+        (stockMap[s.co_art] = stockMap[s.co_art] || []).push({ 
+            co_alma: s.co_alma, 
+            des_alma: s.des_alma, 
+            stock: s.stock 
+        }); 
+    });
+
     const precioMap = {};
     resPrecios.recordset.forEach(p => {
         (precioMap[p.co_art] = precioMap[p.co_art] || []).push({
@@ -52,12 +82,44 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         });
     });
 
-    return articulos.map(a => ({
-        ...a,
-        tasa_bcv: tasa,
-        disponibilidad: stockMap[a.co_art] || [],
-        precios: precioMap[a.co_art] || []
-    }));
+    const costMap = {};
+    if (resCostos && resCostos.recordset) {
+        resCostos.recordset.forEach(c => {
+            costMap[c.co_art] = {
+                ultimo_costo_om: Number(c.cost_unit_om) || 0,
+                ultimo_costo: Number(c.cost_unit) || 0,
+                fecha_ultima_compra: c.fecha_ultima_compra
+            };
+        });
+    }
+
+    return articulos.map(a => {
+        const pList = precioMap[a.co_art] || [];
+        const p2Obj = pList.find(p => p.id_precio === '02' || p.id_precio === '2') || pList[1] || pList[0];
+        const p2 = Number(p2Obj?.precio) || 0;
+        const m2 = Number(p2Obj?.margen) || 0;
+        
+        let costo_estimado = 0;
+        if (p2 > 0 && m2 > 0) {
+            costo_estimado = m2 > 1 ? Number((p2 / (1 + (m2 / 100))).toFixed(2)) : Number((p2 / m2).toFixed(2));
+        }
+
+        const costInfo = costMap[a.co_art] || {};
+        const ultCosto = costInfo.ultimo_costo_om || 0;
+        const finalCosto = ultCosto > 0 ? ultCosto : (costo_estimado > 0 ? costo_estimado : (p2 > 0 ? p2 : 0));
+
+        return {
+            ...a,
+            tasa_bcv: tasa,
+            disponibilidad: stockMap[a.co_art] || [],
+            precios: pList,
+            ultimo_costo_om: ultCosto,
+            fecha_ultima_compra: costInfo.fecha_ultima_compra || null,
+            costo_estimado: costo_estimado,
+            costo_sugerido_usd: finalCosto,
+            costo_sugerido_ves: Number((finalCosto * tasa).toFixed(2))
+        };
+    });
 }
 
 /**

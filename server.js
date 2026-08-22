@@ -124,6 +124,8 @@ app.use('/api/v1/query',       require('./routes/query'));
 app.use('/api/v1/analisis-compras', require('./routes/analisis_compras'));
 app.use('/api/v1/analisis-ventas', require('./routes/analisis_ventas'));
 app.use('/api/v1/sales-analysis', require('./routes/analisis_ventas'));
+app.use('/api/v1/ordenes-compras', require('./routes/ordenes_compras'));
+app.use('/api/v1/purchase-orders', require('./routes/ordenes_compras'));
 app.use('/api/v1/rendimiento-vendedores', require('./routes/rendimiento_vendedores'));
 app.use('/api/v1/vendor-performance', require('./routes/rendimiento_vendedores'));
 // Manejo de rutas no encontradas (404)

@@ -889,19 +889,7 @@ router.post('/:doc_num/anular', async (req, res) => {
                         WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
                     `);
 
-                // 2. Anular renglones: poner pendiente a 0
-                await transaction.request()
-                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
-                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                    .query(`
-                        UPDATE saPedidoVentaReng
-                        SET pendiente = 0,
-                            fe_us_mo = GETDATE(),
-                            co_us_mo = @auditUser
-                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
-                    `);
-
-                // 3. Devolver stock comprometido (restar stock tipo 'COM')
+                // 2. Devolver stock comprometido (restar stock tipo 'COM')
                 // IMPORTANTE: Usar `pendiente` en vez de `total_art` porque si el pedido fue
                 // parcialmente facturado, parte del stock COM ya fue restado por la factura.
                 // Solo debemos restar el COM que realmente queda comprometido.

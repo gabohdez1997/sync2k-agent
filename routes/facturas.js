@@ -213,19 +213,7 @@ router.post('/:doc_num/anular', async (req, res) => {
                         WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
                     `);
 
-                // 2. Anular renglones de la factura (poner pendiente a 0)
-                await transaction.request()
-                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
-                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                    .query(`
-                        UPDATE saFacturaVentaReng
-                        SET pendiente = 0,
-                            fe_us_mo = GETDATE(),
-                            co_us_mo = @auditUser
-                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
-                    `);
-
-                // 3. Devolver stock al almacén (Sumar stock tipo 'ACT')
+                // 2. Devolver stock al almacén (Sumar stock tipo 'ACT')
                 console.log(`🧹 [AGENT] Devolviendo stock de ${resL.recordset.length} renglones de la factura...`);
                 for (const line of resL.recordset) {
                     const rStock = new sql.Request(transaction);
