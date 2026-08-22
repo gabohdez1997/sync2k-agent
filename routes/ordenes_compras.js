@@ -167,6 +167,7 @@ router.get('/:doc_num', async (req, res) => {
                         SELECT r.reng_num, RTRIM(r.co_art) AS co_art, 
                                ISNULL(NULLIF(RTRIM(r.des_art), ''), RTRIM(a.art_des)) AS art_des,
                                RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl,
+                               RTRIM(a.modelo) AS modelo,
                                r.total_art AS cantidad, r.pendiente, r.rowguid AS rowguid_doc,
                                RTRIM(r.co_alma) AS co_alma,
                                r.cost_unit AS precio, r.cost_unit AS cost_unit,
@@ -234,13 +235,27 @@ router.post('/', async (req, res) => {
         const usdCode = resUSD.recordset[0]?.co_mone || 'US$';
         const bsCode   = resMoneda.recordset[0]?.g_moneda || 'BS';
         const defCond  = prov.cond_pag || resCond.recordset[0]?.co_cond || '01';
-        const defAlma  = resAlma.recordset[0]?.co_alma || '01';
 
         // Resolución dinámica de sucursal por sede
         const configuredSucu = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code 
             || (srv?.profit_branch_codes || [])[0]?.code 
             || (srv?.profit_branch_codes || [])[0];
         const defSucu  = configuredSucu || resSucu.recordset[0]?.co_sucur || '01';
+
+        // Resolución dinámica del almacén por defecto según la sede/sucursal
+        const resAlmaSucu = await pool.request()
+            .input('sucuCode', sql.Char(6), padProfit(defSucu, 6))
+            .query(`
+                SELECT TOP 1 RTRIM(co_alma) AS co_alma 
+                FROM saAlmacen 
+                ORDER BY CASE 
+                    WHEN LTRIM(RTRIM(co_sucur)) = LTRIM(RTRIM(@sucuCode)) THEN 0 
+                    WHEN LTRIM(RTRIM(co_alma)) = LTRIM(RTRIM(@sucuCode)) THEN 1
+                    WHEN LTRIM(RTRIM(co_alma)) = '01' THEN 2 
+                    ELSE 3 
+                END, co_alma
+            `);
+        const defAlma  = resAlmaSucu.recordset[0]?.co_alma || resAlma.recordset[0]?.co_alma || '01';
 
         const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || '02';
         const defTran  = resTran.recordset[0]?.co_tran || '01';
@@ -486,7 +501,7 @@ router.post('/', async (req, res) => {
                 rL.input('sDes_Art',           sql.VarChar(120),     (item.art_des || '').substring(0, 120));
                 rL.input('sCo_Uni',            sql.Char(6),          padProfit(finalUni, 6));
                 rL.input('sSCo_Uni',           sql.Char(6),          padProfit(finalUni, 6));
-                rL.input('sCo_Alma',           sql.Char(6),          padProfit(item.co_alma || defAlma, 6));
+                rL.input('sCo_Alma',           sql.Char(6),          padProfit(defAlma, 6));
                 rL.input('sTipo_Imp',          sql.Char(1),          item.tipo_imp || '1');
                 rL.input('sTipo_Imp2',         sql.Char(1),          null);
                 rL.input('sTipo_Imp3',         sql.Char(1),          null);
