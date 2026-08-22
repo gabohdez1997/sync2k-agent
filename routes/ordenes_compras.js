@@ -129,7 +129,10 @@ router.get('/:doc_num', async (req, res) => {
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`
                         SELECT RTRIM(c.doc_num) AS doc_num, RTRIM(c.descrip) AS descrip,
                                RTRIM(c.co_prov) AS co_prov, RTRIM(p.prov_des) AS prov_des,
-                               RTRIM(c.co_cond) AS co_cond, RTRIM(cd.cond_des) AS cond_des,
+                               RTRIM(c.co_cond) AS co_cond, 
+                               ISNULL(NULLIF(RTRIM(cd.cond_des), ''), ISNULL(NULLIF(RTRIM(cdp.cond_des), ''), RTRIM(c.co_cond))) AS cond_des,
+                               RTRIM(p.cond_pag) AS prov_cond_pag,
+                               RTRIM(cdp.cond_des) AS prov_cond_des,
                                c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, 
                                c.anulado,
                                RTRIM(c.co_mone) AS co_mone, 
@@ -158,9 +161,10 @@ router.get('/:doc_num', async (req, res) => {
                                    ELSE '1'
                                END AS status
                         FROM saOrdenCompra c
-                        LEFT JOIN saProveedor    p  ON c.co_prov = p.co_prov
-                        LEFT JOIN saCondicionPago cd ON c.co_cond = cd.co_cond
-                        LEFT JOIN saZona         z  ON p.co_zon  = z.co_zon
+                        LEFT JOIN saProveedor    p   ON c.co_prov = p.co_prov
+                        LEFT JOIN saCondicionPago cd  ON c.co_cond = cd.co_cond
+                        LEFT JOIN saCondicionPago cdp ON p.cond_pag = cdp.co_cond
+                        LEFT JOIN saZona         z   ON p.co_zon  = z.co_zon
                         WHERE LTRIM(RTRIM(c.doc_num)) = LTRIM(RTRIM(@doc_num))
                     `),
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`

@@ -517,11 +517,13 @@ router.get('/:co_prov', async (req, res) => {
                             RTRIM(p.co_seg) AS co_seg, p.inactivo,
                             RTRIM(p.tip_pro) AS tip_pro, RTRIM(tp.des_tipo) AS tip_pro_des,
                             RTRIM(p.co_mone) AS co_mone, RTRIM(p.cond_pag) AS cond_pag,
+                            RTRIM(cp.cond_des) AS cond_des, RTRIM(cp.cond_des) AS cond_pag_des,
                             p.contribu_e, p.porc_esp, RTRIM(p.tipo_per) AS tipo_per,
                             RTRIM(p.ciudad) AS ciudad, RTRIM(p.respons) AS respons
                      FROM saProveedor p
                      LEFT JOIN saZona z ON p.co_zon = z.co_zon
                      LEFT JOIN saTipoProveedor tp ON p.tip_pro = tp.tip_pro
+                     LEFT JOIN saCondicionPago cp ON p.cond_pag = cp.co_cond
                      WHERE LTRIM(RTRIM(p.co_prov)) = LTRIM(RTRIM(@co_prov))`
                 );
                 if (!result.recordset.length) return null;
