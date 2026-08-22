@@ -147,8 +147,9 @@ router.get('/:doc_num', async (req, res) => {
                                    )
                                END AS tasa,
                                c.total_bruto, c.monto_imp, c.total_neto,
-                               RTRIM(c.comentario) AS comentario,
-                               RTRIM(c.dir_ent) AS dir_ent,
+                                RTRIM(c.comentario) AS comentario,
+                                RTRIM(c.campo8) AS campo8,
+                                RTRIM(c.dir_ent) AS dir_ent,
                                RTRIM(p.rif) AS rif, RTRIM(p.direc1) AS direc1, 
                                RTRIM(p.telefonos) AS telefonos, RTRIM(p.email) AS email,
                                RTRIM(p.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 
@@ -433,21 +434,26 @@ router.post('/', async (req, res) => {
             rH.input('deMonto_Imp2',      sql.Decimal(18, 2),   0);
             rH.input('deMonto_Imp3',      sql.Decimal(18, 2),   0);
             rH.input('sDir_Ent',          sql.VarChar(sql.MAX), (data.dir_ent || existingHeader?.dir_ent || '').substring(0, 100));
-            const finalComment = (data.comentario ? data.comentario + ' | ' : '') + (isUpdate ? 'Editado vía API' : 'Creado vía API');
-            rH.input('sComentario',       sql.VarChar(sql.MAX), finalComment.substring(0, 500));
+            const cleanComment = String(data.comentario || existingHeader?.comentario || '')
+                .replace(/\s*\|\s*EDITADO V\u00cdA API/gi, '')
+                .replace(/\s*\|\s*CREADO V\u00cdA API/gi, '')
+                .replace(/\s*\|\s*EDITADO VIA API/gi, '')
+                .replace(/\s*\|\s*CREADO VIA API/gi, '')
+                .trim();
+            rH.input('sComentario',       sql.VarChar(sql.MAX), cleanComment ? cleanComment.substring(0, 500) : null);
             rH.input('bImpresa',          sql.Bit,              existingHeader?.impresa || 0);
             const rawTaxVal = (data.salestax || existingHeader?.salestax || defTax || '').trim();
             const finalTax  = rawTaxVal === '' ? null : rawTaxVal;
             rH.input('sSalestax',         sql.Char(8),          finalTax);
             rH.input('sDis_Cen',          sql.VarChar(sql.MAX), existingHeader?.dis_cen || '');
-            rH.input('sCampo1',           sql.VarChar(60),      null);
-            rH.input('sCampo2',           sql.VarChar(60),      null);
-            rH.input('sCampo3',           sql.VarChar(60),      null);
-            rH.input('sCampo4',           sql.VarChar(60),      null);
-            rH.input('sCampo5',           sql.VarChar(60),      null);
-            rH.input('sCampo6',           sql.VarChar(60),      null);
-            rH.input('sCampo7',           sql.VarChar(60),      null);
-            rH.input('sCampo8',           sql.VarChar(60),      null);
+            rH.input('sCampo1',           sql.VarChar(60),      data.campo1 || existingHeader?.campo1 || null);
+            rH.input('sCampo2',           sql.VarChar(60),      data.campo2 || existingHeader?.campo2 || null);
+            rH.input('sCampo3',           sql.VarChar(60),      data.campo3 || existingHeader?.campo3 || null);
+            rH.input('sCampo4',           sql.VarChar(60),      data.campo4 || existingHeader?.campo4 || null);
+            rH.input('sCampo5',           sql.VarChar(60),      data.campo5 || existingHeader?.campo5 || null);
+            rH.input('sCampo6',           sql.VarChar(60),      data.campo6 || existingHeader?.campo6 || null);
+            rH.input('sCampo7',           sql.VarChar(60),      data.campo7 || existingHeader?.campo7 || null);
+            rH.input('sCampo8',           sql.VarChar(60),      (isUpdate ? 'Editado vía API' : 'Creado vía API'));
             rH.input('sRevisado',         sql.Char(1),          null);
             rH.input('sTrasnfe',          sql.Char(1),          null);
             rH.input('sCo_Us_In',         sql.Char(6),          padProfit(isUpdate ? (existingHeader.co_us_in || auditUser) : auditUser, 6));
