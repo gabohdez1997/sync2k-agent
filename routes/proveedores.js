@@ -555,6 +555,14 @@ router.post('/', async (req, res) => {
         }
 
         const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+            const co_prov_clean = (data.co_prov || data.rif || '').trim().toUpperCase();
+            const check = await pool.request().input('co_prov', sql.VarChar, co_prov_clean).query(
+                'SELECT 1 FROM saProveedor WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov))'
+            );
+            if (check.recordset.length > 0) {
+                return { skipped: true, message: 'Proveedor ya registrado en esta sede' };
+            }
+
             const defaults = await loadDefaults(pool, srv);
             const r = new sql.Request(pool);
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();

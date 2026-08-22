@@ -489,12 +489,129 @@ router.get('/monedas', (req, res) =>
 );
 
 // ── Condiciones de Pago ─────────────────────────────────────────────────────
-router.get('/condiciones_pago', (req, res) =>
+router.get(['/condiciones_pago', '/condiciones-pago'], (req, res) =>
     catalogEndpoint(req, res,
         `SELECT RTRIM(co_cond) AS co_cond, RTRIM(cond_des) AS cond_des, CAST(dias_cred AS INT) AS dias_cred FROM saCondicionPago`,
         'co_cond', 'cond_des'
     )
 );
+
+// ── Exportar todas las condiciones de pago de la sede ────────────────────────
+router.get(['/condiciones-pago/export-all', '/condiciones_pago/export-all'], async (req, res) => {
+    try {
+        const srv = resolveServer(req);
+        if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
+
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const result = await pool.request().query(
+            `SELECT RTRIM(co_cond) AS co_cond, RTRIM(cond_des) AS cond_des, 
+                    ISNULL(dias_cred, 0) AS dias_cred,
+                    RTRIM(campo1) AS campo1, RTRIM(campo2) AS campo2, RTRIM(campo3) AS campo3, RTRIM(campo4) AS campo4,
+                    RTRIM(campo5) AS campo5, RTRIM(campo6) AS campo6, RTRIM(campo7) AS campo7, RTRIM(campo8) AS campo8
+             FROM saCondicionPago`
+        );
+
+        return res.status(200).json({
+            success: true,
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (error) {
+        console.error('[CONDICIONES PAGO EXPORT ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error exportando condiciones de pago', error: error.message });
+    }
+});
+
+// ── Importar lote de condiciones de pago ─────────────────────────────────────
+router.post(['/condiciones-pago/import-batch', '/condiciones_pago/import-batch'], async (req, res) => {
+    try {
+        const { items } = req.body;
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(200).json({ success: true, migrated: 0, errors: [] });
+        }
+
+        const srv = resolveServer(req);
+        if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
+
+        const pool = await getPool(srv.id, req.sqlAuth);
+        const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
+        const sucuCode = (srv.profit_branch_codes || [])[0]?.code || (srv.profit_branch_codes || [])[0] || '01';
+
+        let migratedCount = 0;
+        const errors = [];
+
+        const existingRes = await pool.request().query('SELECT RTRIM(co_cond) AS co_cond FROM saCondicionPago');
+        const existingSet = new Set(existingRes.recordset.map(r => (r.co_cond || '').trim().toUpperCase()));
+
+        for (const item of items) {
+            const co_cond = (item.co_cond || '').trim().toUpperCase();
+            if (!co_cond || existingSet.has(co_cond)) continue;
+
+            const cond_des = String(item.cond_des || '').trim().substring(0, 60);
+            const dias_cred = parseInt(item.dias_cred) || 0;
+
+            try {
+                let spSuccess = false;
+                try {
+                    const r = new sql.Request(pool);
+                    r.input('sCo_Cond',    sql.Char(6),           padProfit(co_cond, 6));
+                    r.input('sCond_Des',   sql.VarChar(60),       cond_des);
+                    r.input('iDias_Cred',  sql.Int,               dias_cred);
+                    r.input('sCampo1',     sql.VarChar(60),       item.campo1 || null);
+                    r.input('sCampo2',     sql.VarChar(60),       item.campo2 || null);
+                    r.input('sCampo3',     sql.VarChar(60),       item.campo3 || null);
+                    r.input('sCampo4',     sql.VarChar(60),       item.campo4 || null);
+                    r.input('sCampo5',     sql.VarChar(60),       item.campo5 || null);
+                    r.input('sCampo6',     sql.VarChar(60),       item.campo6 || null);
+                    r.input('sCampo7',     sql.VarChar(60),       item.campo7 || null);
+                    r.input('sCampo8',     sql.VarChar(60),       item.campo8 || null);
+                    r.input('sCo_Us_In',   sql.Char(6),           padProfit(auditUser, 6));
+                    r.input('sCo_Sucu_In', sql.Char(6),           padProfit(sucuCode, 6));
+                    r.input('sMaquina',    sql.VarChar(60),       'SYNC2K');
+                    r.input('gRowguid',    sql.UniqueIdentifier,  null);
+                    await r.execute('pInsertarCondicionPago');
+                    spSuccess = true;
+                } catch (spErr) {
+                    spSuccess = false;
+                }
+
+                if (!spSuccess) {
+                    const rDirect = new sql.Request(pool);
+                    rDirect.input('co_cond',   sql.Char(6),     padProfit(co_cond, 6));
+                    rDirect.input('cond_des',  sql.VarChar(60), cond_des);
+                    rDirect.input('dias_cred', sql.Int,         dias_cred);
+                    rDirect.input('audit_user',sql.Char(6),     padProfit(auditUser, 6));
+                    rDirect.input('sucu_code', sql.Char(6),     padProfit(sucuCode, 6));
+                    await rDirect.query(`
+                        IF NOT EXISTS (SELECT 1 FROM saCondicionPago WHERE LTRIM(RTRIM(co_cond)) = LTRIM(RTRIM(@co_cond)))
+                        BEGIN
+                            INSERT INTO saCondicionPago (co_cond, cond_des, dias_cred, co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo, rowguid)
+                            VALUES (@co_cond, @cond_des, @dias_cred, @audit_user, GETDATE(), @audit_user, GETDATE(), @sucu_code, @sucu_code, NEWID())
+                        END
+                    `);
+                }
+
+                existingSet.add(co_cond);
+                migratedCount++;
+            } catch (err) {
+                errors.push(`Condición ${co_cond} (${cond_des}): ${err.message}`);
+            }
+        }
+
+        return res.status(200).json({
+            success: true,
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            migrated: migratedCount,
+            errors
+        });
+    } catch (error) {
+        console.error('[CONDICIONES PAGO IMPORT BATCH ERROR]:', error);
+        res.status(500).json({ success: false, message: 'Error importando lote de condiciones de pago', error: error.message });
+    }
+});
 
 // ── Almacenes ───────────────────────────────────────────────────────────────
 // Almacenes se exponen CON sede_id porque pueden diferir entre sedes
@@ -826,10 +943,11 @@ router.get('/stats', async (req, res) => {
         const stats = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
-                const [artRes, cliRes, provRes] = await Promise.all([
+                const [artRes, cliRes, provRes, condRes] = await Promise.all([
                     pool.request().query('SELECT COUNT(*) AS total FROM saArticulo'),
                     pool.request().query('SELECT COUNT(*) AS total FROM saCliente'),
-                    pool.request().query('SELECT COUNT(*) AS total FROM saProveedor')
+                    pool.request().query('SELECT COUNT(*) AS total FROM saProveedor'),
+                    pool.request().query('SELECT COUNT(*) AS total FROM saCondicionPago')
                 ]);
                 return {
                     sede_id: srv.id,
@@ -837,6 +955,7 @@ router.get('/stats', async (req, res) => {
                     articulos: Number(artRes.recordset[0]?.total) || 0,
                     clientes: Number(cliRes.recordset[0]?.total) || 0,
                     proveedores: Number(provRes.recordset[0]?.total) || 0,
+                    condiciones_pago: Number(condRes.recordset[0]?.total) || 0,
                     online: true
                 };
             } catch (e) {
@@ -846,6 +965,7 @@ router.get('/stats', async (req, res) => {
                     articulos: 0,
                     clientes: 0,
                     proveedores: 0,
+                    condiciones_pago: 0,
                     online: false,
                     error: e.message
                 };

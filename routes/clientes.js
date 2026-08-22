@@ -593,6 +593,14 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Campos obligatorios: co_cli, descripcion' });
 
         const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+            const co_cli = (data.co_cli || data.rif || '').trim().toUpperCase();
+            const check = await pool.request().input('co_cli', sql.VarChar, co_cli).query(
+                'SELECT 1 FROM saCliente WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))'
+            );
+            if (check.recordset.length > 0) {
+                return { skipped: true, message: 'Cliente ya registrado en esta sede' };
+            }
+
             const defaults = await loadDefaults(pool, srv);
             const r = new sql.Request(pool);
             let auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
