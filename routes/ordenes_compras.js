@@ -70,6 +70,7 @@ router.get('/', async (req, res) => {
                     SELECT RTRIM(c.doc_num) AS doc_num, RTRIM(c.descrip) AS descrip,
                            RTRIM(c.co_prov) AS co_prov, RTRIM(p.prov_des) AS prov_des, RTRIM(p.rif) AS rif,
                            c.fec_emis, c.fec_venc, c.fec_reg, c.fe_us_in AS fec_us_in, c.fe_us_mo AS fec_us_mo, 
+                           RTRIM(c.co_us_in) AS co_us_in, RTRIM(c.co_us_mo) AS co_us_mo,
                            c.anulado,
                            RTRIM(c.co_mone) AS co_mone, 
                            CASE 
@@ -150,6 +151,8 @@ router.get('/:doc_num', async (req, res) => {
                                 RTRIM(c.comentario) AS comentario,
                                 RTRIM(c.campo8) AS campo8,
                                 RTRIM(c.dir_ent) AS dir_ent,
+                                RTRIM(c.co_us_in) AS co_us_in,
+                                RTRIM(c.co_us_mo) AS co_us_mo,
                                RTRIM(p.rif) AS rif, RTRIM(p.direc1) AS direc1, 
                                RTRIM(p.telefonos) AS telefonos, RTRIM(p.email) AS email,
                                RTRIM(p.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 

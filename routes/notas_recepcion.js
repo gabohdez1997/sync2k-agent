@@ -99,6 +99,7 @@ router.get('/', async (req, res) => {
                         RTRIM(c.nro_fact) AS nro_fact,
                         RTRIM(c.campo8) AS campo8,
                         RTRIM(c.co_us_in) AS co_us_in,
+                        RTRIM(c.co_us_mo) AS co_us_mo,
                         RTRIM(c.co_sucu_in) AS co_sucu_in,
                         (SELECT COUNT(*) FROM saNotaRecepcionCompraReng r WHERE r.doc_num = c.doc_num) AS cant_renglones,
                         (SELECT ISNULL(SUM(r.total_art), 0) FROM saNotaRecepcionCompraReng r WHERE r.doc_num = c.doc_num) AS total_unidades,
@@ -107,6 +108,8 @@ router.get('/', async (req, res) => {
                             FROM saNotaRecepcionCompraReng r 
                             WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND LTRIM(RTRIM(r.num_doc)) <> ''
                         ) AS orden_compra,
+                        RTRIM(oc_info.oc_co_us_in) AS oc_co_us_in,
+                        RTRIM(oc_info.oc_doc_num) AS oc_doc_num,
                         (
                             SELECT TOP 1 RTRIM(al.des_alma)
                             FROM saNotaRecepcionCompraReng r
@@ -121,6 +124,15 @@ router.get('/', async (req, res) => {
                         '${srv.id}' AS sede_id
                     FROM saNotaRecepcionCompra c
                     LEFT JOIN saProveedor p ON c.co_prov = p.co_prov
+                    OUTER APPLY (
+                        SELECT TOP 1 oc.doc_num AS oc_doc_num, oc.co_us_in AS oc_co_us_in
+                        FROM saOrdenCompra oc
+                        WHERE oc.doc_num = (
+                            SELECT TOP 1 nrr.num_doc 
+                            FROM saNotaRecepcionCompraReng nrr 
+                            WHERE nrr.doc_num = c.doc_num AND nrr.num_doc IS NOT NULL AND LTRIM(RTRIM(nrr.num_doc)) <> ''
+                        ) OR (c.n_control IS NOT NULL AND oc.doc_num = c.n_control)
+                    ) oc_info
                     WHERE ${whereSQL}
                     ORDER BY c.fec_emis DESC, c.doc_num DESC
                 `;
@@ -373,12 +385,29 @@ router.get('/:doc_num', async (req, res) => {
                             RTRIM(c.comentario) AS comentario,
                             RTRIM(c.campo8) AS campo8,
                             RTRIM(c.co_us_in) AS co_us_in,
+                            RTRIM(c.co_us_mo) AS co_us_mo,
                             RTRIM(c.co_sucu_in) AS co_sucu_in,
+                            (
+                                SELECT TOP 1 RTRIM(r.num_doc) 
+                                FROM saNotaRecepcionCompraReng r 
+                                WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND LTRIM(RTRIM(r.num_doc)) <> ''
+                            ) AS orden_compra,
+                            RTRIM(oc_info.oc_co_us_in) AS oc_co_us_in,
+                            RTRIM(oc_info.oc_doc_num) AS oc_doc_num,
                             '${srv.name || srv.id}' AS sede_nombre,
                             '${srv.id}' AS sede_id
                         FROM saNotaRecepcionCompra c
                         LEFT JOIN saProveedor p ON c.co_prov = p.co_prov
                         LEFT JOIN saCondicionPago cd ON c.co_cond = cd.co_cond
+                        OUTER APPLY (
+                            SELECT TOP 1 oc.doc_num AS oc_doc_num, oc.co_us_in AS oc_co_us_in
+                            FROM saOrdenCompra oc
+                            WHERE oc.doc_num = (
+                                SELECT TOP 1 nrr.num_doc 
+                                FROM saNotaRecepcionCompraReng nrr 
+                                WHERE nrr.doc_num = c.doc_num AND nrr.num_doc IS NOT NULL AND LTRIM(RTRIM(nrr.num_doc)) <> ''
+                            ) OR (c.n_control IS NOT NULL AND oc.doc_num = c.n_control)
+                        ) oc_info
                         WHERE c.doc_num = @doc_num
                     `);
 
