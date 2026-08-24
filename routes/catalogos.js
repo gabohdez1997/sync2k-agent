@@ -683,22 +683,88 @@ router.get('/tipos_cliente', (req, res) =>
  *         description: Tasa de cambio por sede
  */
 router.get('/tasa', async (req, res) => {
-    console.log(`[TASA] Petición recibida. Auth User: ${req.profitUser || 'N/A'}`);
+    const targetDate = (req.query.fecha || '').trim();
     try {
         const data = await aggregateRead(req.sqlAuth, async (pool, srv) => {
-            console.log(`[TASA] Consultando sede: ${srv.name}...`);
-            const r = await pool.request().query(
-                `SELECT TOP 1 RTRIM(co_mone) AS co_mone, tasa_v AS tasa, fecha FROM saTasa
-                 WHERE LTRIM(RTRIM(co_mone)) NOT IN ('BS','VES','VEB','VEF','BS.','BSF') 
-                 ORDER BY fecha DESC`
-            );
-            console.log(`[TASA] Sede ${srv.name} encontró: ${r.recordset.length} registros.`);
-            return r.recordset.map(t => ({ ...t, sede_id: srv.id, sede_nombre: srv.name }));
+            const r = pool.request();
+            let query;
+            if (targetDate) {
+                r.input('targetDate', sql.VarChar(10), targetDate);
+                query = `
+                    SELECT TOP 1 
+                        RTRIM(co_mone) AS co_mone, 
+                        tasa_v AS tasa, 
+                        tasa_c,
+                        CONVERT(VARCHAR(10), fecha, 120) AS fecha_str,
+                        fecha,
+                        CASE WHEN CONVERT(VARCHAR(10), fecha, 120) = @targetDate THEN 1 ELSE 0 END AS es_exacta
+                    FROM saTasa
+                    WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'DOL', '$', 'US')
+                      AND CONVERT(VARCHAR(10), fecha, 120) <= @targetDate
+                    ORDER BY fecha DESC
+                `;
+            } else {
+                query = `
+                    SELECT TOP 1 
+                        RTRIM(co_mone) AS co_mone, 
+                        tasa_v AS tasa, 
+                        tasa_c,
+                        CONVERT(VARCHAR(10), fecha, 120) AS fecha_str,
+                        fecha,
+                        1 AS es_exacta
+                    FROM saTasa
+                    WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'DOL', '$', 'US')
+                    ORDER BY fecha DESC
+                `;
+            }
+            const resQ = await r.query(query);
+            return resQ.recordset.map(t => ({ ...t, sede_id: srv.id, sede_nombre: srv.name }));
         });
-        console.log(`[TASA] Respuesta final: ${data.length} tasas encontradas.`);
-        res.status(200).json({ success: true, count: data.length, data });
+        res.status(200).json({ success: true, count: data.length, data, fechaConsultada: targetDate || null });
     } catch (error) {
         console.error('[TASA] Error Crítico:', error.message);
+        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/tasa/history:
+ *   get:
+ *     summary: Historial de tasas registradas en Profit Plus
+ *     tags: [Catalogos]
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 7
+ *     responses:
+ *       200:
+ *         description: Historial de tasas por fecha
+ */
+router.get('/tasa/history', async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 7;
+        const data = await aggregateRead(req.sqlAuth, async (pool, srv) => {
+            const r = await pool.request()
+                .input('limit', sql.Int, limit)
+                .query(`
+                    SELECT TOP (@limit)
+                        RTRIM(co_mone) AS co_mone,
+                        tasa_v AS tasa,
+                        tasa_c,
+                        CONVERT(VARCHAR(10), fecha, 120) AS fecha_str,
+                        fecha
+                    FROM saTasa
+                    WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'DOL', '$', 'US')
+                    ORDER BY fecha DESC
+                `);
+            return r.recordset.map(t => ({ ...t, sede_id: srv.id, sede_nombre: srv.name }));
+        });
+        res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        console.error('[TASA HISTORY] Error:', error.message);
         res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
     }
 });
