@@ -81,21 +81,21 @@ router.get('/', async (req, res) => {
         // Query con CTEs inline - no depende de una vista pre-instalada
         const query = `
             ;WITH v_compras_inventario AS (
-                SELECT 'VENTA' AS tipo_transaccion, f.fec_emis AS fecha, r.co_art, r.total_art AS cantidad, 0 AS dias_reposicion, 0 AS stock_actual, 0 AS en_transito
+                SELECT 'VENTA' AS tipo_transaccion, f.fec_emis AS fecha, r.co_art, r.total_art AS cantidad, 0 AS dias_reposicion, 0 AS stock_actual, 0 AS en_transito, f.doc_num
                 FROM saFacturaVenta f JOIN saFacturaVentaReng r ON f.doc_num = r.doc_num WHERE f.anulado = 0
                 UNION ALL
-                SELECT 'DEVOLUCION', d.fec_emis, r.co_art, r.total_art, 0, 0, 0
+                SELECT 'DEVOLUCION', d.fec_emis, r.co_art, r.total_art, 0, 0, 0, d.doc_num
                 FROM saDevolucionCliente d JOIN saDevolucionClienteReng r ON d.doc_num = r.doc_num WHERE d.anulado = 0
                 UNION ALL
-                SELECT 'RECEPCION', nr.fec_emis, nrr.co_art, nrr.total_art, ISNULL(DATEDIFF(day, oc.fec_emis, nr.fec_emis), 0), 0, 0
+                SELECT 'RECEPCION', nr.fec_emis, nrr.co_art, nrr.total_art, ISNULL(DATEDIFF(day, oc.fec_emis, nr.fec_emis), 0), 0, 0, nr.doc_num
                 FROM saNotaRecepcionCompra nr JOIN saNotaRecepcionCompraReng nrr ON nr.doc_num = nrr.doc_num
                 LEFT JOIN saOrdenCompra oc ON nrr.num_doc = oc.doc_num AND oc.anulado = 0
                 WHERE nr.anulado = 0
                 UNION ALL
-                SELECT 'STOCK', GETDATE(), co_art, 0, 0, SUM(ISNULL(stock, 0)), 0
+                SELECT 'STOCK', GETDATE(), co_art, 0, 0, SUM(ISNULL(stock, 0)), 0, ''
                 FROM saStockAlmacen GROUP BY co_art
                 UNION ALL
-                SELECT 'TRANSITO', GETDATE(), r.co_art, 0, 0, 0, SUM(ISNULL(r.pendiente, 0))
+                SELECT 'TRANSITO', GETDATE(), r.co_art, 0, 0, 0, SUM(ISNULL(r.pendiente, 0)), ''
                 FROM saOrdenCompra c JOIN saOrdenCompraReng r ON c.doc_num = r.doc_num
                 WHERE c.anulado = 0 AND c.status IN ('0', '1') AND r.pendiente > 0
                 GROUP BY r.co_art
@@ -103,6 +103,7 @@ router.get('/', async (req, res) => {
             SELECT 
                 a.co_art,
                 MAX(a.art_des) as des_art,
+                MAX(RTRIM(a.modelo)) as modelo,
                 MAX(a.co_lin) as co_lin,
                 MAX(l.lin_des) as des_lin,
                 MAX(a.co_subl) as co_subl,
@@ -116,6 +117,9 @@ router.get('/', async (req, res) => {
                 SUM(CASE WHEN v.tipo_transaccion = 'TRANSITO' THEN v.en_transito ELSE 0 END) as en_transito,
                 SUM(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE 0 END) 
                 - SUM(CASE WHEN v.tipo_transaccion = 'DEVOLUCION' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE 0 END) as ventas_netas,
+                COUNT(DISTINCT CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end AND v.cantidad > 0 THEN v.doc_num ELSE NULL END) as cant_docs_exitosos,
+                MAX(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE NULL END) as cant_max_doc,
+                MIN(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end AND v.cantidad > 0 THEN v.cantidad ELSE NULL END) as cant_min_doc,
                 AVG(CASE WHEN v.tipo_transaccion = 'RECEPCION' AND v.fecha >= @start AND v.fecha <= @end AND v.dias_reposicion > 0 THEN (v.dias_reposicion * 1.0) ELSE NULL END) as tiempo_reposicion_promedio,
                 STDEV(CASE WHEN v.tipo_transaccion = 'VENTA' AND v.fecha >= @start AND v.fecha <= @end THEN v.cantidad ELSE NULL END) as desviacion_ventas
             FROM saArticulo a
@@ -258,10 +262,19 @@ router.get('/', async (req, res) => {
             // Factor XYZ (Coeficiente de variación)
             const cv = vpd > 0 ? (stdDev / vpd) : 100;
 
+            const modelo = (item.modelo || '').trim();
+            const cant_docs_exitosos = Number(item.cant_docs_exitosos) || 0;
+            const cant_max_doc = Number(item.cant_max_doc) || 0;
+            const cant_min_doc = Number(item.cant_min_doc) || 0;
+
             return {
                 ...item,
                 co_art,
                 des_art,
+                modelo,
+                cant_docs_exitosos,
+                cant_max_doc,
+                cant_min_doc,
                 co_lin,
                 des_lin,
                 co_subl,
