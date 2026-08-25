@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
+const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
 /**
  * @swagger
@@ -419,24 +420,14 @@ router.post('/', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 5. Correlativo de Factura (DOC_VEN_FACT)
-            const resCorr = await transaction.request().query(`
-                UPDATE saSerie
-                SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                WHERE co_serie = (
-                    SELECT TOP 1 co_serie
-                    FROM saConsecutivo
-                    WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'DOC_VEN_FACT'
-                )
-            `);
-            let corrRow = resCorr.recordset[0];
-            if (!corrRow || !corrRow.prox_n) {
-                throw new Error("No se pudo obtener el correlativo de factura de venta.");
-            }
-            const proxN = Number(corrRow.prox_n || 0);
-            const docNum = proxN.toString().padStart(10, '0');
-            console.log(`✨ [AGENT] Nuevo número de factura generado: ${docNum}`);
+            // 5. Correlativo de Factura (DOC_VEN_FACT / V001)
+            const corrRes = await getProximoConsecutivo({
+                runner: transaction,
+                co_tipo_serie: 'FACTURA',
+                co_sucur: sucuCode
+            });
+            const docNum = corrRes.docNum;
+            console.log(`✨ [AGENT] Nuevo número de factura generado: ${docNum} (Prefijo: '${corrRes.prefijo}', ProxN: ${corrRes.proxN})`);
 
             // 6. Insertar Cabecera de Factura
             const rH = new sql.Request(transaction);

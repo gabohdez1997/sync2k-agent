@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
+const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
 console.log("ðŸ› ï¸ [AGENT] Iniciando Módulo de Pedidos (Versión Unificada POST)");
 
@@ -341,62 +342,13 @@ router.post('/', async (req, res) => {
                 
             } else {
                 // --- MODO NUEVO ---
-                let corrRow = null;
-
-                // 1) Ruta estándar de Profit.
-                const resCorr = await transaction.request().query(`
-                    UPDATE saSerie
-                    SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                    OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                    WHERE co_serie = (
-                        SELECT TOP 1 co_serie
-                        FROM saConsecutivo
-                        WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'PVEN_NUM'
-                    )
-                `);
-                corrRow = resCorr.recordset[0] || null;
-
-                // 2) Fallback por instalaciones que usan otros códigos de consecutivo.
-                if (!corrRow) {
-                    const resCorrAlt = await transaction.request().query(`
-                        UPDATE saSerie
-                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                        OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                        WHERE co_serie = (
-                            SELECT TOP 1 co_serie
-                            FROM saConsecutivo
-                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) IN ('PVEN_NUM','PED_NUM','PEDIDO_NUM')
-                               OR UPPER(LTRIM(RTRIM(co_consecutivo))) LIKE '%PVEN%'
-                               OR UPPER(LTRIM(RTRIM(co_consecutivo))) LIKE '%PED%'
-                        )
-                    `);
-                    corrRow = resCorrAlt.recordset[0] || null;
-                }
-
-                // 3) àšltimo fallback: generar desde el máximo doc_num existente.
-                if (!corrRow) {
-                    const fallbackRes = await transaction.request().query(`
-                        SELECT
-                            ISNULL(MAX(CAST(RIGHT(LTRIM(RTRIM(doc_num)), 10) AS BIGINT)), 0) + 1 AS prox_n,
-                            (
-                                SELECT TOP 1 RTRIM(desde_a)
-                                FROM saSerie
-                                WHERE LTRIM(RTRIM(ISNULL(desde_a, ''))) <> ''
-                            ) AS prefijo
-                        FROM saPedidoVenta
-                        WHERE TRY_CAST(RIGHT(LTRIM(RTRIM(doc_num)), 10) AS BIGINT) IS NOT NULL
-                    `);
-                    corrRow = fallbackRes.recordset[0] || null;
-                }
-
-                if (!corrRow || !corrRow.prox_n) {
-                    throw new Error("No se pudo obtener el correlativo.");
-                }
-
-                const proxN = Number(corrRow.prox_n || 0);
-                // Regla solicitada: correlativo solo numérico de 10 caracteres.
-                docNum = proxN.toString().padStart(10, '0');
-                console.log(`âœ¨ [AGENT] Nuevo número generado: ${docNum}`);
+                const corrRes = await getProximoConsecutivo({
+                    runner: transaction,
+                    co_tipo_serie: 'PEDIDO',
+                    co_sucur: defSucu
+                });
+                docNum = corrRes.docNum;
+                console.log(`✨ [AGENT] Nuevo número generado para Pedido: ${docNum} (Prefijo: '${corrRes.prefijo}', ProxN: ${corrRes.proxN})`);
             }
 
             // --- VALIDAR DISPONIBILIDAD DE STOCK ---

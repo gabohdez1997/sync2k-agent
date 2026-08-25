@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, pgPool, getServers } = require('../db');
+const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
 function padProfit(str, length) {
     if (!str) return ' '.repeat(length);
@@ -53,75 +54,18 @@ router.post('/', async (req, res) => {
         const isSalida = String(data.tipo || '').toUpperCase() === 'SAL' || String(data.co_tipo || '').trim() === '02';
         const coTipo = isSalida ? '02' : '01';
 
-        // 1. Obtener el próximo consecutivo para AJUS_NUM (fuera de la transacción)
+        // 1. Obtener el próximo consecutivo para AJUS_NUM (I001)
         let ajueNum = null;
-        for (const consecName of ['AJUS_NUM', 'AJUS', 'AJU', 'AJUSTE', 'AJUSTES', 'AJU_ENT', 'AJU_SAL']) {
-            try {
-                const consecRes = await pool.request()
-                    .input('sCo_Consecutivo', sql.Char(16), padProfit(consecName, 16))
-                    .execute('pConsecutivoProximo');
-                if (consecRes.recordset && consecRes.recordset[0]?.ProximoConsecutivo) {
-                    const rawVal = consecRes.recordset[0].ProximoConsecutivo.trim();
-                    if (rawVal) {
-                        ajueNum = /^\d+$/.test(rawVal) ? rawVal.padStart(10, '0') : rawVal;
-                        break;
-                    }
-                }
-            } catch (e) {
-                // Continuar con el siguiente candidato fuera de transacción
-            }
-        }
-
-        if (!ajueNum) {
-            try {
-                const resCorr = await pool.request().query(`
-                    UPDATE saSerie
-                    SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                    OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                    WHERE co_serie = (
-                        SELECT TOP 1 co_serie
-                        FROM saConsecutivo
-                        WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) IN ('AJUS_NUM', 'AJUS', 'AJUSTE', 'AJUSTES', 'AJU_ENT', 'AJU_SAL')
-                           OR UPPER(LTRIM(RTRIM(co_consecutivo))) LIKE '%AJU%'
-                    )
-                `);
-                const corrRow = resCorr.recordset[0] || null;
-                if (corrRow && corrRow.prox_n) {
-                    const proxN = Number(corrRow.prox_n || 0);
-                    ajueNum = proxN.toString().padStart(10, '0');
-                } else {
-                    const resDirect = await pool.request().query(`
-                        UPDATE saSerie
-                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                        OUTPUT INSERTED.prox_n
-                        WHERE LTRIM(RTRIM(co_serie)) = '001'
-                    `);
-                    if (resDirect.recordset && resDirect.recordset.length > 0) {
-                        ajueNum = Number(resDirect.recordset[0].prox_n).toString().padStart(10, '0');
-                    }
-                }
-            } catch (eSerie) {
-                console.warn('[AJUSTES] Falló saSerie fallback:', eSerie.message);
-            }
-        }
-
-        if (!ajueNum) {
-            try {
-                const resMax = await pool.request().query(`
-                    SELECT ISNULL(MAX(CASE WHEN ISNUMERIC(LTRIM(RTRIM(ajue_num))) = 1 THEN CAST(LTRIM(RTRIM(ajue_num)) AS BIGINT) ELSE 0 END), 0) + 1 as max_num
-                    FROM saAjuste
-                `);
-                if (resMax.recordset && resMax.recordset[0]?.max_num) {
-                    const proxN = String(resMax.recordset[0].max_num);
-                    ajueNum = proxN.padStart(10, '0');
-                }
-            } catch (eMax) {
-                console.error('[AJUSTES] Falló fallback MAX(ajue_num):', eMax.message);
-            }
-        }
-
-        if (ajueNum && /^\d+$/.test(ajueNum)) {
-            ajueNum = ajueNum.padStart(10, '0');
+        try {
+            const corrRes = await getProximoConsecutivo({
+                runner: pool,
+                co_tipo_serie: 'AJUSTE',
+                co_sucur: data.co_sucu_in || '01'
+            });
+            ajueNum = corrRes.docNum;
+            console.log(`✨ [AJUSTES] Nuevo número generado para Ajuste: ${ajueNum} (Prefijo: '${corrRes.prefijo}', ProxN: ${corrRes.proxN})`);
+        } catch (eCorr) {
+            console.error('[AJUSTES] Error al generar correlativo:', eCorr.message);
         }
 
         if (!ajueNum) {

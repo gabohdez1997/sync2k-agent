@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
+const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
 /**
  * @swagger
@@ -487,25 +488,14 @@ router.post('/', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 1. Obtener correlativo de Cobro
-            const resCorr = await transaction.request().query(`
-                UPDATE saSerie
-                SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                WHERE co_serie = (
-                    SELECT TOP 1 co_serie
-                    FROM saConsecutivo
-                    WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'COBRO'
-                      AND co_serie IS NOT NULL
-                )
-            `);
-            let corrRow = resCorr.recordset[0];
-            if (!corrRow || !corrRow.prox_n) {
-                throw new Error("No se pudo obtener el correlativo de cobro.");
-            }
-            const proxN = Number(corrRow.prox_n || 0);
-            const cobNum = proxN.toString().padStart(10, '0');
-            console.log(`✨ [AGENT] Nuevo número de cobro generado: ${cobNum}`);
+            // 1. Obtener correlativo de Cobro (COBRO / V024)
+            const corrRes = await getProximoConsecutivo({
+                runner: transaction,
+                co_tipo_serie: 'COBRO',
+                co_sucur: sucuCode
+            });
+            const cobNum = corrRes.docNum;
+            console.log(`✨ [AGENT] Nuevo número de cobro generado: ${cobNum} (Prefijo: '${corrRes.prefijo}', ProxN: ${corrRes.proxN})`);
 
             // 2. Insertar Cabecera de Cobro
             const rH = new sql.Request(transaction);
@@ -900,25 +890,18 @@ router.post('/', async (req, res) => {
                     const isDebit = diffBs > 0;
                     const diffDocType = isDebit ? 'N/DB' : 'N/CR';
                     const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
+                    const tipoSerieDiff = isDebit ? 'V022' : 'V020';
 
-                    // Obtener correlativo
-                    const resCorrDiff = await transaction.request().query(`
-                        UPDATE saSerie
-                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                        OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                        WHERE co_serie = (
-                            SELECT TOP 1 co_serie
-                            FROM saConsecutivo
-                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = '${consecName}'
-                              AND co_serie IS NOT NULL
-                        )
-                    `);
-                    let corrDiff = resCorrDiff.recordset[0];
-                    if (!corrDiff || !corrDiff.prox_n) {
-                        throw new Error(`No se pudo obtener el correlativo para la Nota de ${isDebit ? 'Débito' : 'Crédito'} de diferencial cambiario.`);
-                    }
-                    const proxDiff = Number(corrDiff.prox_n || 0);
-                    const diffDocNum = proxDiff.toString().padStart(10, '0');
+                    // Obtener correlativo con prefijo de saSerieTipo
+                    const corrDiff = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: tipoSerieDiff,
+                        co_consecutivos: [consecName],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoVenta',
+                        col: 'nro_doc'
+                    });
+                    const diffDocNum = corrDiff.docNum;
 
                     // Insertar N/DB o N/CR en saDocumentoVenta
                     await transaction.request()
@@ -1026,22 +1009,15 @@ router.post('/', async (req, res) => {
 
                     if (finalMontoCaja > 0) {
                         // Generar correlativo de movimiento de Caja (MOVC_NUM)
-                        const resCorrCaja = await transaction.request().query(`
-                            UPDATE saSerie
-                            SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                            OUTPUT INSERTED.prox_n
-                            WHERE co_serie = (
-                                SELECT TOP 1 co_serie
-                                FROM saConsecutivo
-                                WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVC_NUM'
-                                  AND co_serie IS NOT NULL
-                            )
-                        `);
-                        let corrCaja = resCorrCaja.recordset[0];
-                        if (!corrCaja || !corrCaja.prox_n) {
-                            throw new Error("No se pudo obtener el correlativo de movimiento de caja.");
-                        }
-                        movNumC = Number(corrCaja.prox_n).toString().padStart(10, '0');
+                        const corrCaja = await getProximoConsecutivo({
+                            runner: transaction,
+                            co_tipo_serie: 'B001',
+                            co_consecutivos: ['MOVC_NUM', 'B001'],
+                            co_sucur: sucuCode,
+                            table: 'saMovimientoCaja',
+                            col: 'mov_num'
+                        });
+                        movNumC = corrCaja.docNum;
 
                         // Crear Movimiento de Caja
                         const rMovC = new sql.Request(transaction);
@@ -1089,23 +1065,16 @@ router.post('/', async (req, res) => {
                     const finalMontoBanco = isUSDcuenta ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
 
                     if (finalMontoBanco > 0) {
-                        // Generar correlativo de movimiento de Banco (MOVB_NUM)
-                        const resCorrBanco = await transaction.request().query(`
-                            UPDATE saSerie
-                            SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                            OUTPUT INSERTED.prox_n
-                            WHERE co_serie = (
-                                SELECT TOP 1 co_serie
-                                FROM saConsecutivo
-                                WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVB_NUM'
-                                  AND co_serie IS NOT NULL
-                            )
-                        `);
-                        let corrBanco = resCorrBanco.recordset[0];
-                        if (!corrBanco || !corrBanco.prox_n) {
-                            throw new Error("No se pudo obtener el correlativo de movimiento de banco.");
-                        }
-                        movNumB = Number(corrBanco.prox_n).toString().padStart(10, '0');
+                        // Generar correlativo de movimiento de Banco (MOVB_NUM / B002)
+                        const corrBanco = await getProximoConsecutivo({
+                            runner: transaction,
+                            co_tipo_serie: 'B002',
+                            co_consecutivos: ['MOVB_NUM', 'B002'],
+                            co_sucur: sucuCode,
+                            table: 'saMovimientoBanco',
+                            col: 'mov_num'
+                        });
+                        movNumB = corrBanco.docNum;
 
                         // Tipo de operación para el banco
                         let tipoOp = 'TR'; // Transferencia
@@ -1792,24 +1761,17 @@ router.put('/:cob_num', async (req, res) => {
                     const isDebit = diffBs > 0;
                     const diffDocType = isDebit ? 'N/DB' : 'N/CR';
                     const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
+                    const tipoSerieDiff = isDebit ? 'V022' : 'V020';
 
-                    const resCorrDiff = await transaction.request().query(`
-                        UPDATE saSerie
-                        SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                        OUTPUT INSERTED.prox_n, RTRIM(INSERTED.desde_a) as prefijo
-                        WHERE co_serie = (
-                            SELECT TOP 1 co_serie
-                            FROM saConsecutivo
-                            WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = '${consecName}'
-                              AND co_serie IS NOT NULL
-                        )
-                    `);
-                    let corrDiff = resCorrDiff.recordset[0];
-                    if (!corrDiff || !corrDiff.prox_n) {
-                        throw new Error(`No se pudo obtener el correlativo para la Nota de ${isDebit ? 'Débito' : 'Crédito'} de diferencial cambiario.`);
-                    }
-                    const proxDiff = Number(corrDiff.prox_n || 0);
-                    const diffDocNum = proxDiff.toString().padStart(10, '0');
+                    const corrDiff = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: tipoSerieDiff,
+                        co_consecutivos: [consecName],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoVenta',
+                        col: 'nro_doc'
+                    });
+                    const diffDocNum = corrDiff.docNum;
 
                     // Insertar N/DB o N/CR en saDocumentoVenta
                     await transaction.request()
@@ -1913,22 +1875,15 @@ router.put('/:cob_num', async (req, res) => {
                     const finalMontoCaja = isUSDcaja ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
 
                     if (finalMontoCaja > 0) {
-                        const resCorrCaja = await transaction.request().query(`
-                            UPDATE saSerie
-                            SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                            OUTPUT INSERTED.prox_n
-                            WHERE co_serie = (
-                                SELECT TOP 1 co_serie
-                                FROM saConsecutivo
-                                WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVC_NUM'
-                                  AND co_serie IS NOT NULL
-                            )
-                        `);
-                        let corrCaja = resCorrCaja.recordset[0];
-                        if (!corrCaja || !corrCaja.prox_n) {
-                            throw new Error("No se pudo obtener el correlativo de movimiento de caja.");
-                        }
-                        movNumC = Number(corrCaja.prox_n).toString().padStart(10, '0');
+                        const corrCaja = await getProximoConsecutivo({
+                            runner: transaction,
+                            co_tipo_serie: 'B001',
+                            co_consecutivos: ['MOVC_NUM', 'B001'],
+                            co_sucur: sucuCode,
+                            table: 'saMovimientoCaja',
+                            col: 'mov_num'
+                        });
+                        movNumC = corrCaja.docNum;
 
                         const rMovC = new sql.Request(transaction);
                         rMovC.input('sMov_Num', sql.Char(20), padProfit(movNumC, 20));
@@ -1974,22 +1929,15 @@ router.put('/:cob_num', async (req, res) => {
                     const finalMontoBanco = isUSDcuenta ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
 
                     if (finalMontoBanco > 0) {
-                        const resCorrBanco = await transaction.request().query(`
-                            UPDATE saSerie
-                            SET prox_n = prox_n + 1, fe_us_mo = GETDATE()
-                            OUTPUT INSERTED.prox_n
-                            WHERE co_serie = (
-                                SELECT TOP 1 co_serie
-                                FROM saConsecutivo
-                                WHERE UPPER(LTRIM(RTRIM(co_consecutivo))) = 'MOVB_NUM'
-                                  AND co_serie IS NOT NULL
-                            )
-                        `);
-                        let corrBanco = resCorrBanco.recordset[0];
-                        if (!corrBanco || !corrBanco.prox_n) {
-                            throw new Error("No se pudo obtener el correlativo de movimiento de banco.");
-                        }
-                        movNumB = Number(corrBanco.prox_n).toString().padStart(10, '0');
+                        const corrBanco = await getProximoConsecutivo({
+                            runner: transaction,
+                            co_tipo_serie: 'B002',
+                            co_consecutivos: ['MOVB_NUM', 'B002'],
+                            co_sucur: sucuCode,
+                            table: 'saMovimientoBanco',
+                            col: 'mov_num'
+                        });
+                        movNumB = corrBanco.docNum;
 
                         let tipoOp = 'TR';
                         if (tp.forma_pag === 'DP') tipoOp = 'DP';

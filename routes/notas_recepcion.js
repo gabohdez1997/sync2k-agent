@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
+const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
 console.log("📦 [AGENT] Iniciando Módulo de Notas de Recepción de Compra (saNotaRecepcionCompra)");
 
@@ -616,26 +617,13 @@ router.post('/', async (req, res) => {
                         .input('doc_num', sql.Char(20), padProfit(docNum, 20))
                         .query(`DELETE FROM saNotaRecepcionCompraReng WHERE doc_num = @doc_num`);
                 } else if (!docNum) {
-                    try {
-                        const seqRes = await transaction.request()
-                            .input('co_consec', sql.Char(8), 'NREC')
-                            .execute('pConsecutivoProximo');
-                        if (seqRes.recordset && seqRes.recordset.length > 0) {
-                            docNum = String(seqRes.recordset[0].con_num || seqRes.recordset[0].proximo || '').trim();
-                        }
-                    } catch (e) {
-                        console.warn("⚠️ [AGENT] pConsecutivoProximo no disponible para NREC. Usando fallback MAX(doc_num)...");
-                    }
-
-                    if (!docNum) {
-                        const fallbackRes = await transaction.request().query(`
-                            SELECT ISNULL(MAX(CAST(RIGHT(LTRIM(RTRIM(doc_num)), 10) AS BIGINT)), 0) + 1 AS prox_n
-                            FROM saNotaRecepcionCompra
-                            WHERE TRY_CAST(RIGHT(LTRIM(RTRIM(doc_num)), 10) AS BIGINT) IS NOT NULL
-                        `);
-                        const proxN = Number(fallbackRes.recordset[0]?.prox_n || 1);
-                        docNum = proxN.toString().padStart(10, '0');
-                    }
+                    const corrRes = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: 'NOTA_RECEPCION',
+                        co_sucur: defSucu
+                    });
+                    docNum = corrRes.docNum;
+                    console.log(`✨ [AGENT] Nuevo número generado para Nota de Recepción: ${docNum} (Prefijo: '${corrRes.prefijo}', ProxN: ${corrRes.proxN})`);
                 }
 
                 console.log(`✨ [AGENT] ${isUpdate ? 'Actualizando' : 'Generando'} Nota de Recepción N°: ${docNum} en sede ${srv.name || srv.id}`);
