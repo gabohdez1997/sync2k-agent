@@ -92,7 +92,10 @@ router.get('/', async (req, res) => {
                 LEFT JOIN saOrdenCompra oc ON nrr.num_doc = oc.doc_num AND oc.anulado = 0
                 WHERE nr.anulado = 0
                 UNION ALL
-                SELECT 'STOCK', GETDATE(), co_art, 0, 0, SUM(ISNULL(stock, 0)), 0, ''
+                SELECT 'STOCK', GETDATE(), co_art, 0, 0, 
+                       SUM(ISNULL(CASE WHEN RTRIM(tipo) = 'ACT' THEN stock ELSE 0 END, 0)) -
+                       SUM(ISNULL(CASE WHEN RTRIM(tipo) = 'COM' THEN stock ELSE 0 END, 0)), 
+                       0, ''
                 FROM saStockAlmacen GROUP BY co_art
                 UNION ALL
                 SELECT 'TRANSITO', GETDATE(), r.co_art, 0, 0, 0, SUM(ISNULL(r.pendiente, 0)), ''
@@ -462,7 +465,7 @@ router.get('/article-history', async (req, res) => {
         if (tipoAgrupacion === 'diario') {
             query = `
                 ;WITH CurrentStock AS (
-                    SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                    SELECT ISNULL(SUM(CASE WHEN RTRIM(tipo) = 'ACT' THEN stock ELSE 0 END) - SUM(CASE WHEN RTRIM(tipo) = 'COM' THEN stock ELSE 0 END), 0) AS stock_actual
                     FROM saStockAlmacen
                     WHERE co_art = @co_art
                 ),
@@ -535,7 +538,7 @@ router.get('/article-history', async (req, res) => {
         } else if (tipoAgrupacion === 'semanal') {
             query = `
                 ;WITH CurrentStock AS (
-                    SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                    SELECT ISNULL(SUM(CASE WHEN RTRIM(tipo) = 'ACT' THEN stock ELSE 0 END) - SUM(CASE WHEN RTRIM(tipo) = 'COM' THEN stock ELSE 0 END), 0) AS stock_actual
                     FROM saStockAlmacen
                     WHERE co_art = @co_art
                 ),
@@ -620,7 +623,7 @@ router.get('/article-history', async (req, res) => {
             // Mensual
             query = `
                 ;WITH CurrentStock AS (
-                    SELECT ISNULL(SUM(stock), 0) AS stock_actual
+                    SELECT ISNULL(SUM(CASE WHEN RTRIM(tipo) = 'ACT' THEN stock ELSE 0 END) - SUM(CASE WHEN RTRIM(tipo) = 'COM' THEN stock ELSE 0 END), 0) AS stock_actual
                     FROM saStockAlmacen
                     WHERE co_art = @co_art
                 ),
