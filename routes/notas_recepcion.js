@@ -979,7 +979,7 @@ router.post('/', async (req, res) => {
                 console.log(`✅ [AGENT] Nota de Recepción ${docNum} creada con éxito en sede ${srv.name || srv.id}`);
 
                 return {
-                    doc_num: docNum,
+                    doc_num: String(docNum || '').trim(),
                     co_prov: data.co_prov,
                     total_neto: totalNetoBs,
                     total_art: validRenglones.reduce((acc, it) => acc + it.qty, 0),

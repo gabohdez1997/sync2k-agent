@@ -621,7 +621,7 @@ router.post('/', async (req, res) => {
             }
 
             return {
-                doc_num: docNum,
+                doc_num: String(docNum || '').trim(),
                 total_art: validLines.reduce((acc, l) => acc + (Number(l.cant_despachada || l.cant_recibida || l.total_art) || 0), 0),
                 total_neto: Number(payload.total_neto) || 0
             };
