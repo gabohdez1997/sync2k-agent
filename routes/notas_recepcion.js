@@ -492,9 +492,9 @@ router.post('/', async (req, res) => {
             await transaction.begin();
 
             try {
-                // 1. Obtener sucursal y almacén por defecto de la sede
+                // 1. Obtener sucursal y almacenes válidos de la sede
                 let defSucu = '01';
-                let defAlma = '01';
+                let validAlmacenes = [];
 
                 try {
                     const sucuRes = await transaction.request().query('SELECT TOP 1 RTRIM(co_sucu) as co_sucu FROM saSucursal');
@@ -502,12 +502,20 @@ router.post('/', async (req, res) => {
                 } catch (e) {}
 
                 try {
-                    const almaRes = await transaction.request().query("SELECT TOP 1 RTRIM(co_alma) as co_alma FROM saAlmacen WHERE campo1 = 'DEFAULT' OR co_alma = '01' ORDER BY co_alma ASC");
-                    if (almaRes.recordset?.length > 0) defAlma = almaRes.recordset[0].co_alma;
+                    const almaListRes = await transaction.request().query("SELECT RTRIM(co_alma) as co_alma, campo1 FROM saAlmacen ORDER BY co_alma ASC");
+                    validAlmacenes = (almaListRes.recordset || []).map(r => r.co_alma.trim());
                 } catch (e) {}
 
                 const sucuCode = data.co_sucu_in || defSucu;
-                const almaDestino = data.co_alma_defecto || defAlma;
+                const requestedDefAlma = (data.defaultWarehouse || data.co_alma_defecto || '').trim();
+                
+                let defAlma = validAlmacenes.find(a => a === requestedDefAlma)
+                    || validAlmacenes.find(a => a === sucuCode)
+                    || validAlmacenes.find(a => a === (srv.co_sucu || '').trim())
+                    || validAlmacenes[0]
+                    || '01';
+
+                const almaDestino = defAlma;
 
                 // 2. Configurar Moneda y Tasa
                 const resTasa = await transaction.request().query(`
@@ -791,7 +799,11 @@ router.post('/', async (req, res) => {
 
                 for (let i = 0; i < validRenglones.length; i++) {
                     const item = validRenglones[i];
-                    const targetAlma = item.co_alma || almaDestino;
+                    let targetAlma = (item.co_alma || almaDestino || '').trim();
+                    if (!validAlmacenes.includes(targetAlma)) {
+                        console.warn(`⚠️ [AGENT] Almacén '${targetAlma}' no existe en sede ${srv.name}. Reasignando automáticamente a '${defAlma}'.`);
+                        targetAlma = defAlma;
+                    }
                     const originDocNum = (item.num_doc || data.doc_num_oc || '').trim();
 
                     let finalUni = String(item.co_uni || '').trim();

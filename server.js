@@ -130,6 +130,8 @@ app.use('/api/v1/rendimiento-vendedores', require('./routes/rendimiento_vendedor
 app.use('/api/v1/vendor-performance', require('./routes/rendimiento_vendedores'));
 app.use('/api/v1/notas-recepcion', require('./routes/notas_recepcion'));
 app.use('/api/v1/receiving-notes', require('./routes/notas_recepcion'));
+app.use('/api/v1/notas-despacho',  require('./routes/notas_despacho'));
+app.use('/api/v1/dispatches',      require('./routes/notas_despacho'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

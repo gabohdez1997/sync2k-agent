@@ -61,6 +61,12 @@ const DOC_TYPE_CONFIG = {
         co_consecutivos: ['OCOM_NUM', 'OCOM', 'ORD_NUM'],
         table: 'saOrdenCompra',
         col: 'doc_num'
+    },
+    NOTA_DESPACHO: {
+        co_tipo_serie: 'V009',
+        co_consecutivos: ['NDES_NUM', 'NDES', 'DESP_NUM', 'DESP'],
+        table: 'saNotaDespachoVenta',
+        col: 'doc_num'
     }
 };
 
