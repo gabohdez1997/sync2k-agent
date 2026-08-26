@@ -199,22 +199,52 @@ async function loadDefaults(pool, srv = null) {
 }
 
 /**
- * Valida que el usuario esté registrado como vendedor en saVendedor.
- * Si existe, retorna su código. Si NO existe, lanza un error que bloquea la operación.
- * Esto garantiza integridad: toda modificación de clientes debe ser trazable a un vendedor válido.
+ * Resuelve un código de vendedor válido y ACTIVO en la base de datos de la sede.
+ * Prioridad:
+ * 1. Vendedor solicitado explícitamente en el payload (data.co_ven, ej: el configurado por la sede).
+ * 2. Vendedor previo o default de la base de datos (defaults.co_ven).
+ * 3. Vendedor '01' si existe y está activo.
+ * 4. El primer vendedor activo encontrado en saVendedor.
+ * 5. auditUser si es válido.
  */
-async function requireCoVen(pool, profitUser) {
-    if (!profitUser) {
-        throw new Error('No se recibió código de usuario (x-profit-user). Inicie sesión nuevamente.');
+async function resolveActiveCoVen(pool, requestedVen, defaultVen, auditUser) {
+    if (requestedVen && typeof requestedVen === 'string') {
+        const clean = requestedVen.trim().toUpperCase();
+        if (clean) {
+            const check = await pool.request()
+                .input('co_ven', sql.VarChar, clean)
+                .query("SELECT RTRIM(co_ven) as co_ven FROM saVendedor WHERE RTRIM(co_ven) = @co_ven AND inactivo = 0");
+            if (check.recordset.length > 0) {
+                return check.recordset[0].co_ven;
+            }
+        }
     }
-    const check = await pool.request()
-        .input('co_ven', sql.VarChar, profitUser)
-        .query("SELECT 1 FROM saVendedor WHERE RTRIM(co_ven) = @co_ven");
-    if (check.recordset.length === 0) {
-        throw new Error(`El usuario "${profitUser}" no está registrado como vendedor en Profit Plus. Contacte al administrador para que lo agregue a la tabla saVendedor.`);
+
+    if (defaultVen && typeof defaultVen === 'string') {
+        const cleanDef = defaultVen.trim().toUpperCase();
+        if (cleanDef) {
+            const checkDef = await pool.request()
+                .input('co_ven', sql.VarChar, cleanDef)
+                .query("SELECT RTRIM(co_ven) as co_ven FROM saVendedor WHERE RTRIM(co_ven) = @co_ven AND inactivo = 0");
+            if (checkDef.recordset.length > 0) {
+                return checkDef.recordset[0].co_ven;
+            }
+        }
     }
-    console.log(`[requireCoVen] ✅ Usuario "${profitUser}" es vendedor válido.`);
-    return profitUser;
+
+    const check01 = await pool.request()
+        .query("SELECT RTRIM(co_ven) as co_ven FROM saVendedor WHERE RTRIM(co_ven) = '01' AND inactivo = 0");
+    if (check01.recordset.length > 0) {
+        return check01.recordset[0].co_ven;
+    }
+
+    const checkAny = await pool.request()
+        .query("SELECT TOP 1 RTRIM(co_ven) as co_ven FROM saVendedor WHERE inactivo = 0 ORDER BY co_ven ASC");
+    if (checkAny.recordset.length > 0) {
+        return checkAny.recordset[0].co_ven;
+    }
+
+    return (auditUser || '01').substring(0, 6);
 }
 
 /**
@@ -605,8 +635,8 @@ router.post('/', async (req, res) => {
             const r = new sql.Request(pool);
             let auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
-            // Validar que el usuario sea vendedor registrado (obligatorio por FK)
-            data.co_ven = await requireCoVen(pool, auditUser);
+            // Resolver vendedor activo: prioridad al configurado por sede, fallback a default/'01'
+            data.co_ven = await resolveActiveCoVen(pool, data.co_ven, defaults.co_ven, auditUser);
 
             bindClienteInsert(r, data, defaults, new Date(), auditUser);
             await r.execute('pInsertarCliente');
@@ -666,13 +696,13 @@ router.put('/:co_cli', async (req, res) => {
             const r = new sql.Request(pool);
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
-            // Validar que el usuario sea vendedor registrado (obligatorio por FK)
-            data.co_ven = await requireCoVen(pool, auditUser);
+            // Resolver vendedor activo: prioridad al configurado por sede, luego al previo si está activo, fallback a default/'01'
+            data.co_ven = await resolveActiveCoVen(pool, data.co_ven, row.co_ven || defaults.co_ven, auditUser);
 
             // ── DIAGNÓSTICO COMPLETO DEL PAYLOAD ────────────────────────────
             console.log('[PUT DEBUG] ══ INICIO ACTUALIZACIÓN CLIENTE ══');
             console.log('[PUT DEBUG] co_cli:', co_cli);
-            console.log('[PUT DEBUG] row.co_ven:', JSON.stringify(row.co_ven), '| defaults.co_ven:', JSON.stringify(defaults.co_ven));
+            console.log('[PUT DEBUG] row.co_ven:', JSON.stringify(row.co_ven), '| resolved co_ven:', JSON.stringify(data.co_ven));
             console.log('[PUT DEBUG] validador:', Buffer.isBuffer(row.validador) ? `Buffer(${row.validador.length})` : row.validador);
             console.log('[PUT DEBUG] PAYLOAD COMPLETO (data):', JSON.stringify({
                 cli_des: data.cli_des || data.descripcion,
@@ -684,36 +714,11 @@ router.put('/:co_cli', async (req, res) => {
                 co_ven: data.co_ven,
                 contribuyente: data.contribuyente,
                 contribu_e: data.contribu_e,
-                tipo_per: data.tipo_per,
-                porc_esp: data.porc_esp,
-                co_mone: data.co_mone,
-                tip_cli: data.tip_cli,
-            }));
-            console.log('[PUT DEBUG] VALORES RESUELTOS (data vs row):', JSON.stringify({
-                sCo_Ven: data.co_ven || row.co_ven,
-                sCo_Zon: data.co_zon || row.co_zon,
-                bContrib: data.contribuyente === false ? 0 : 1,
-                sTipo_Per: data.tipo_per || row.tipo_per || '1',
-                bContribu_E: data.contribu_e ? 1 : 0,
-                dePorc_Esp: data.porc_esp || 0,
-                sCo_Mone: data.co_mone || row.co_mone,
-                sTip_Cli: data.tip_cli || row.tip_cli,
+                porc_esp: data.porc_esp
             }));
 
             bindClienteUpdate(r, data, row, new Date(), auditUser, defaults);
-            const spResult = await r.execute('pActualizarCliente');
-
-            console.log('[PUT DEBUG] SP returnValue:', spResult.returnValue);
-            console.log('[PUT DEBUG] SP output:', spResult.output);
-            console.log('[PUT DEBUG] SP recordsets count:', spResult.recordsets?.length);
-            if (spResult.recordsets?.length) {
-                spResult.recordsets.forEach((rs, i) => console.log(`[PUT DEBUG] recordset[${i}]:`, JSON.stringify(rs)));
-            }
-
-            // Validar returnValue del SP (0 = éxito, otro = falla)
-            if (spResult.returnValue !== 0 && spResult.returnValue !== undefined) {
-                throw new Error(`pActualizarCliente retornó código ${spResult.returnValue}. Verifique los datos enviados.`);
-            }
+            await r.execute('pActualizarCliente');
         });
 
         return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada.`);
@@ -754,13 +759,13 @@ router.delete('/:co_cli', async (req, res) => {
 
         const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
-            // Validar que el usuario sea vendedor registrado
-            await requireCoVen(pool, auditUser);
 
             const check = await pool.request().input('co_cli', sql.VarChar, co_cli).query(
                 `SELECT validador FROM saCliente WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))`
             );
-            if (!check.recordset.length) throw new Error('El cliente no existe en esta sede.');
+            if (!check.recordset.length) {
+                return { skipped: true, message: 'El cliente no existe en esta sede' };
+            }
 
             const r = new sql.Request(pool);
             r.input('sCo_CliOri', sql.Char(16), co_cli);
