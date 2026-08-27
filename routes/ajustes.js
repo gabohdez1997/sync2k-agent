@@ -90,8 +90,17 @@ async function resolveAndEnsureArtUnidad(pool, co_art, requestedUni, auditUser, 
             .query(`
                 IF NOT EXISTS (SELECT 1 FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@uni)))
                 BEGIN
-                    INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
-                    VALUES (@art, @uni, 1, 1, 1, 1, 1, @user, GETDATE(), @sucu, 'SYNC2K')
+                    INSERT INTO saArtUnidad (
+                        co_art, co_uni, relacion, equivalencia, uso_venta, uso_compra,
+                        uni_principal, uso_principal, uni_secundaria, uso_secundaria,
+                        uso_numDecimales, num_decimales,
+                        co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo, rowguid
+                    ) VALUES (
+                        @art, @uni, 0, 1.00000, 1, 1,
+                        1, 1, 0, 0,
+                        0, 0,
+                        @user, @sucu, GETDATE(), @user, @sucu, GETDATE(), NEWID()
+                    )
                 END
             `);
     } catch (eInsert) {

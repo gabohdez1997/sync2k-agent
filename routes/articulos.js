@@ -841,7 +841,7 @@ async function ensureArticleUnits(pool, co_art, unidadesList, defaultUni, auditU
             await pool.request()
                 .input('art', sql.Char(30), padProfit(cleanArt, 30))
                 .input('uni', sql.Char(6), padProfit(cleanUni, 6))
-                .input('relacion', sql.Decimal(18, 5), Number(u.relacion != null ? u.relacion : 1))
+                .input('relacion', sql.Bit, u.relacion ? 1 : 0)
                 .input('equivalencia', sql.Decimal(18, 5), Number(u.equivalencia != null ? u.equivalencia : 1))
                 .input('uni_princ', sql.Bit, u.uni_principal ? 1 : 0)
                 .input('uso_vta', sql.Bit, u.uso_venta != null ? (u.uso_venta ? 1 : 0) : 1)
@@ -851,8 +851,17 @@ async function ensureArticleUnits(pool, co_art, unidadesList, defaultUni, auditU
                 .query(`
                     IF NOT EXISTS (SELECT 1 FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@uni)))
                     BEGIN
-                        INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
-                        VALUES (@art, @uni, @relacion, @equivalencia, @uni_princ, @uso_vta, @uso_cmp, @user, GETDATE(), @sucu, 'SYNC2K')
+                        INSERT INTO saArtUnidad (
+                            co_art, co_uni, relacion, equivalencia, uso_venta, uso_compra,
+                            uni_principal, uso_principal, uni_secundaria, uso_secundaria,
+                            uso_numDecimales, num_decimales,
+                            co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo, rowguid
+                        ) VALUES (
+                            @art, @uni, @relacion, @equivalencia, @uso_vta, @uso_cmp,
+                            @uni_princ, 1, 0, 0,
+                            0, 0,
+                            @user, @sucu, GETDATE(), @user, @sucu, GETDATE(), NEWID()
+                        )
                     END
                 `);
         } catch (eArtUni) {
