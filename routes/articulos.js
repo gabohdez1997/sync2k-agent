@@ -617,28 +617,249 @@ router.get('/export-all', async (req, res) => {
         if (!srv) return res.status(404).json({ success: false, message: 'No hay sede disponible.' });
 
         const pool = await getPool(srv.id, req.sqlAuth);
-        const result = await pool.request().query(
-            `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS art_des, RTRIM(a.tipo) AS tipo,
-                    RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(a.co_cat) AS co_cat,
-                    RTRIM(a.co_color) AS co_color, RTRIM(a.co_ubicacion) AS co_ubicacion,
-                    RTRIM(a.item) AS item, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref,
-                    a.anulado, a.tipo_imp, a.peso, a.volumen, a.stock_min, a.stock_max,
-                    RTRIM(a.campo1) AS campo1, RTRIM(a.campo7) AS campo7
-             FROM saArticulo a`
-        );
+        
+        // Consultar artículos con todas sus unidades y datos de catálogos asociados
+        const [artRes, artUniRes, linRes, sublRes, catRes, colRes, ubiRes, uniRes] = await Promise.all([
+            pool.request().query(
+                `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS art_des, RTRIM(a.tipo) AS tipo,
+                        RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(a.co_cat) AS co_cat,
+                        RTRIM(a.co_color) AS co_color, RTRIM(a.co_ubicacion) AS co_ubicacion,
+                        RTRIM(a.item) AS item, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref,
+                        a.anulado, a.tipo_imp, a.peso, a.volumen, a.stock_min, a.stock_max,
+                        RTRIM(a.campo1) AS campo1, RTRIM(a.campo7) AS campo7
+                 FROM saArticulo a`
+            ),
+            pool.request().query(
+                `SELECT RTRIM(au.co_art) AS co_art, RTRIM(au.co_uni) AS co_uni, au.relacion, au.equivalencia,
+                        au.uni_principal, au.uso_venta, au.uso_compra, au.uni_secundaria, au.uso_secundaria,
+                        RTRIM(u.des_uni) AS des_uni
+                 FROM saArtUnidad au
+                 LEFT JOIN saUnidad u ON au.co_uni = u.co_uni`
+            ),
+            pool.request().query('SELECT RTRIM(co_lin) AS co_lin, RTRIM(lin_des) AS lin_des FROM saLineaArticulo'),
+            pool.request().query('SELECT RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl, RTRIM(subl_des) AS subl_des FROM saSubLinea'),
+            pool.request().query('SELECT RTRIM(co_cat) AS co_cat, RTRIM(cat_des) AS cat_des FROM saCatArticulo'),
+            pool.request().query('SELECT RTRIM(co_color) AS co_color, RTRIM(des_color) AS des_color FROM saColor'),
+            pool.request().query('SELECT RTRIM(co_ubicacion) AS co_ubicacion, RTRIM(des_ubicacion) AS des_ubicacion FROM saUbicacion'),
+            pool.request().query('SELECT RTRIM(co_uni) AS co_uni, RTRIM(des_uni) AS des_uni FROM saUnidad')
+        ]);
+
+        // Mapear unidades por artículo
+        const unitsByArt = new Map();
+        for (const u of artUniRes.recordset) {
+            const key = (u.co_art || '').trim().toUpperCase();
+            if (!unitsByArt.has(key)) unitsByArt.set(key, []);
+            unitsByArt.get(key).push(u);
+        }
+
+        const linMap = new Map(linRes.recordset.map(l => [(l.co_lin || '').trim().toUpperCase(), l]));
+        const sublMap = new Map(sublRes.recordset.map(s => [`${(s.co_lin || '').trim().toUpperCase()}__${(s.co_subl || '').trim().toUpperCase()}`, s]));
+        const catMap = new Map(catRes.recordset.map(c => [(c.co_cat || '').trim().toUpperCase(), c]));
+        const colMap = new Map(colRes.recordset.map(c => [(c.co_color || '').trim().toUpperCase(), c]));
+        const ubiMap = new Map(ubiRes.recordset.map(u => [(u.co_ubicacion || '').trim().toUpperCase(), u]));
+
+        const enrichedArticles = artRes.recordset.map(a => {
+            const co_art_key = (a.co_art || '').trim().toUpperCase();
+            const co_lin_key = (a.co_lin || '').trim().toUpperCase();
+            const co_subl_key = `${co_lin_key}__${(a.co_subl || '').trim().toUpperCase()}`;
+            const co_cat_key = (a.co_cat || '').trim().toUpperCase();
+            const co_col_key = (a.co_color || '').trim().toUpperCase();
+            const co_ubi_key = (a.co_ubicacion || '').trim().toUpperCase();
+
+            return {
+                ...a,
+                unidades: unitsByArt.get(co_art_key) || [],
+                _linea: linMap.get(co_lin_key) || null,
+                _sublinea: sublMap.get(co_subl_key) || null,
+                _categoria: catMap.get(co_cat_key) || null,
+                _color: colMap.get(co_col_key) || null,
+                _ubicacion: ubiMap.get(co_ubi_key) || null
+            };
+        });
 
         return res.status(200).json({
             success: true,
             sede_id: srv.id,
             sede_nombre: srv.name,
-            count: result.recordset.length,
-            data: result.recordset
+            count: enrichedArticles.length,
+            data: enrichedArticles
         });
     } catch (error) {
         console.error('[ARTICULOS EXPORT ERROR]:', error);
         res.status(500).json({ success: false, message: 'Error exportando artículos', error: error.message });
     }
 });
+
+/**
+ * Asegura que las tablas maestras (Líneas, Sublíneas, Categorías, Unidades, Colores, Ubicaciones)
+ * tengan creados los registros que requiere el artículo a insertar.
+ */
+async function ensureCatalogDependencies(pool, item, auditUser, defaultAlmacen) {
+    const co_lin = (item.co_lin || '').trim();
+    if (co_lin) {
+        const linDes = (item._linea?.lin_des || item.lin_des || `LINEA ${co_lin}`).trim();
+        try {
+            await pool.request()
+                .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
+                .input('lin_des', sql.VarChar(60), linDes)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saLineaArticulo WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@co_lin)))
+                    BEGIN
+                        INSERT INTO saLineaArticulo (co_lin, lin_des, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                        VALUES (@co_lin, @lin_des, @user, GETDATE(), @sucu, NEWID())
+                    END
+                `);
+        } catch (eLin) {
+            console.warn(`[SYNC] No se pudo asegurar saLineaArticulo ${co_lin}:`, eLin.message);
+        }
+    }
+
+    const co_subl = (item.co_subl || '').trim();
+    if (co_lin && co_subl) {
+        const sublDes = (item._sublinea?.subl_des || item.subl_des || `SUBLINEA ${co_subl}`).trim();
+        try {
+            await pool.request()
+                .input('co_lin', sql.Char(6), padProfit(co_lin, 6))
+                .input('co_subl', sql.Char(6), padProfit(co_subl, 6))
+                .input('subl_des', sql.VarChar(60), sublDes)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@co_lin)) AND LTRIM(RTRIM(co_subl)) = LTRIM(RTRIM(@co_subl)))
+                    BEGIN
+                        INSERT INTO saSubLinea (co_lin, co_subl, subl_des, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                        VALUES (@co_lin, @co_subl, @subl_des, @user, GETDATE(), @sucu, NEWID())
+                    END
+                `);
+        } catch (eSubl) {
+            console.warn(`[SYNC] No se pudo asegurar saSubLinea ${co_subl}:`, eSubl.message);
+        }
+    }
+
+    const co_cat = (item.co_cat || '').trim();
+    if (co_cat) {
+        const catDes = (item._categoria?.cat_des || item.cat_des || `CATEGORIA ${co_cat}`).trim();
+        try {
+            await pool.request()
+                .input('co_cat', sql.Char(6), padProfit(co_cat, 6))
+                .input('cat_des', sql.VarChar(60), catDes)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saCatArticulo WHERE LTRIM(RTRIM(co_cat)) = LTRIM(RTRIM(@co_cat)))
+                    BEGIN
+                        INSERT INTO saCatArticulo (co_cat, cat_des, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                        VALUES (@co_cat, @cat_des, @user, GETDATE(), @sucu, NEWID())
+                    END
+                `);
+        } catch (eCat) {
+            console.warn(`[SYNC] No se pudo asegurar saCatArticulo ${co_cat}:`, eCat.message);
+        }
+    }
+
+    const co_color = (item.co_color || '').trim();
+    if (co_color) {
+        const colDes = (item._color?.des_color || item.des_color || `COLOR ${co_color}`).trim();
+        try {
+            await pool.request()
+                .input('co_color', sql.Char(6), padProfit(co_color, 6))
+                .input('des_color', sql.VarChar(60), colDes)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saColor WHERE LTRIM(RTRIM(co_color)) = LTRIM(RTRIM(@co_color)))
+                    BEGIN
+                        INSERT INTO saColor (co_color, des_color, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                        VALUES (@co_color, @des_color, @user, GETDATE(), @sucu, NEWID())
+                    END
+                `);
+        } catch (eCol) {
+            console.warn(`[SYNC] No se pudo asegurar saColor ${co_color}:`, eCol.message);
+        }
+    }
+
+    const co_ubi = (item.co_ubicacion || '').trim();
+    if (co_ubi) {
+        const ubiDes = (item._ubicacion?.des_ubicacion || item.des_ubicacion || `UBICACION ${co_ubi}`).trim();
+        try {
+            await pool.request()
+                .input('co_ubi', sql.Char(6), padProfit(co_ubi, 6))
+                .input('des_ubi', sql.VarChar(60), ubiDes)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@co_ubi)))
+                    BEGIN
+                        INSERT INTO saUbicacion (co_ubicacion, des_ubicacion, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                        VALUES (@co_ubi, @des_ubi, @user, GETDATE(), @sucu, NEWID())
+                    END
+                `);
+        } catch (eUbi) {
+            console.warn(`[SYNC] No se pudo asegurar saUbicacion ${co_ubi}:`, eUbi.message);
+        }
+    }
+}
+
+/**
+ * Asegura que todas las unidades de medida (saUnidad) y sus asociaciones (saArtUnidad) existan.
+ */
+async function ensureArticleUnits(pool, co_art, unidadesList, defaultUni, auditUser, defaultAlmacen) {
+    const cleanArt = String(co_art || '').trim();
+    if (!cleanArt) return;
+
+    const unitsToProcess = (Array.isArray(unidadesList) && unidadesList.length > 0)
+        ? unidadesList
+        : [{ co_uni: defaultUni || '01', uni_principal: 1, relacion: 1, equivalencia: 1, uso_venta: 1, uso_compra: 1 }];
+
+    for (const u of unitsToProcess) {
+        const cleanUni = String(u.co_uni || defaultUni || '01').trim();
+        if (!cleanUni) continue;
+
+        // 1. Asegurar en saUnidad
+        const desUni = (u.des_uni || cleanUni).trim();
+        try {
+            await pool.request()
+                .input('co_uni', sql.Char(6), padProfit(cleanUni, 6))
+                .input('des_uni', sql.VarChar(60), desUni)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saUnidad WHERE LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni)))
+                    BEGIN
+                        INSERT INTO saUnidad (co_uni, des_uni, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                        VALUES (@co_uni, @des_uni, @user, GETDATE(), @sucu, NEWID())
+                    END
+                `);
+        } catch (eUni) {
+            console.warn(`[SYNC] No se pudo asegurar saUnidad ${cleanUni}:`, eUni.message);
+        }
+
+        // 2. Asegurar en saArtUnidad
+        try {
+            await pool.request()
+                .input('art', sql.Char(30), padProfit(cleanArt, 30))
+                .input('uni', sql.Char(6), padProfit(cleanUni, 6))
+                .input('relacion', sql.Decimal(18, 5), Number(u.relacion != null ? u.relacion : 1))
+                .input('equivalencia', sql.Decimal(18, 5), Number(u.equivalencia != null ? u.equivalencia : 1))
+                .input('uni_princ', sql.Bit, u.uni_principal ? 1 : 0)
+                .input('uso_vta', sql.Bit, u.uso_venta != null ? (u.uso_venta ? 1 : 0) : 1)
+                .input('uso_cmp', sql.Bit, u.uso_compra != null ? (u.uso_compra ? 1 : 0) : 1)
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(defaultAlmacen || '01', 6))
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@uni)))
+                    BEGIN
+                        INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
+                        VALUES (@art, @uni, @relacion, @equivalencia, @uni_princ, @uso_vta, @uso_cmp, @user, GETDATE(), @sucu, 'SYNC2K')
+                    END
+                `);
+        } catch (eArtUni) {
+            console.warn(`[SYNC] No se pudo asegurar saArtUnidad para ${cleanArt} (${cleanUni}):`, eArtUni.message);
+        }
+    }
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // 2.4 POST /api/v1/articulos/import-batch — Importar lote de artículos faltantes
@@ -662,7 +883,7 @@ router.post('/import-batch', async (req, res) => {
             pool.request().query('SELECT RTRIM(co_color) AS id FROM saColor'),
             pool.request().query('SELECT RTRIM(co_ubicacion) AS id FROM saUbicacion'),
             pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur"),
-            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni")
+            pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = '01' THEN 0 WHEN RTRIM(co_uni) = 'UND' THEN 1 ELSE 2 END, co_uni")
         ]);
 
         const existingSet = new Set(existingRes.recordset.map(r => (r.co_art || '').trim().toUpperCase()));
@@ -686,7 +907,7 @@ router.post('/import-batch', async (req, res) => {
         const defaultCat = catRes.recordset[0]?.id || '01';
         const defaultCol = colRes.recordset[0]?.id || '01';
         const defaultUbi = ubiRes.recordset[0]?.id || '01';
-        const defaultUni = resUni.recordset[0]?.co_uni || 'UND';
+        const defaultUni = resUni.recordset[0]?.co_uni || '01';
         const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
         let migratedCount = 0;
@@ -694,30 +915,39 @@ router.post('/import-batch', async (req, res) => {
 
         for (const item of items) {
             const co_art = (item.co_art || '').trim().toUpperCase();
-            if (!co_art || existingSet.has(co_art)) continue;
+            if (!co_art) continue;
 
             try {
+                // 1. Asegurar dependencias de catálogos (Líneas, Sublíneas, Categorías, Colores, Ubicaciones)
+                await ensureCatalogDependencies(pool, item, auditUser, defaultAlmacen);
+
+                // 2. Si el artículo ya existe, asegurar que sus unidades en saArtUnidad estén presentes
+                if (existingSet.has(co_art)) {
+                    await ensureArticleUnits(pool, co_art, item.unidades, defaultUni, auditUser, defaultAlmacen);
+                    continue;
+                }
+
                 const dataToInsert = { ...item };
 
                 const cleanLin = (dataToInsert.co_lin || '').trim().toUpperCase();
-                dataToInsert.co_lin = linSet.has(cleanLin) ? dataToInsert.co_lin : defaultLin;
+                dataToInsert.co_lin = linSet.has(cleanLin) || (cleanLin && item._linea) ? dataToInsert.co_lin : defaultLin;
 
                 const targetLin = (dataToInsert.co_lin || '').trim().toUpperCase();
                 const targetSubl = (dataToInsert.co_subl || '').trim().toUpperCase();
-                if (sublSet.has(`${targetLin}__${targetSubl}`)) {
+                if (sublSet.has(`${targetLin}__${targetSubl}`) || (targetSubl && item._sublinea)) {
                     dataToInsert.co_subl = dataToInsert.co_subl;
                 } else {
                     dataToInsert.co_subl = sublByLin.get(targetLin) || '01';
                 }
 
                 const cleanCat = (dataToInsert.co_cat || '').trim().toUpperCase();
-                dataToInsert.co_cat = catSet.has(cleanCat) ? dataToInsert.co_cat : defaultCat;
+                dataToInsert.co_cat = catSet.has(cleanCat) || (cleanCat && item._categoria) ? dataToInsert.co_cat : defaultCat;
 
                 const cleanCol = (dataToInsert.co_color || '').trim().toUpperCase();
-                dataToInsert.co_color = colSet.has(cleanCol) ? dataToInsert.co_color : defaultCol;
+                dataToInsert.co_color = colSet.has(cleanCol) || (cleanCol && item._color) ? dataToInsert.co_color : defaultCol;
 
                 const cleanUbi = (dataToInsert.co_ubicacion || '').trim().toUpperCase();
-                dataToInsert.co_ubicacion = ubiSet.has(cleanUbi) ? dataToInsert.co_ubicacion : defaultUbi;
+                dataToInsert.co_ubicacion = ubiSet.has(cleanUbi) || (cleanUbi && item._ubicacion) ? dataToInsert.co_ubicacion : defaultUbi;
 
                 const f = new Date();
                 const r = new sql.Request(pool);
@@ -785,21 +1015,8 @@ router.post('/import-batch', async (req, res) => {
 
                 await r.execute('pInsertarArticulo');
 
-                const checkUnit = await pool.request()
-                    .input('art', sql.VarChar, dataToInsert.co_art)
-                    .query('SELECT TOP 1 co_art FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
-                
-                if (!checkUnit.recordset.length) {
-                    await pool.request()
-                        .input('art', sql.Char(30), dataToInsert.co_art)
-                        .input('uni', sql.Char(6), defaultUni)
-                        .input('user', sql.Char(6), auditUser)
-                        .input('sucu', sql.Char(6), defaultAlmacen)
-                        .query(`
-                            INSERT INTO saArtUnidad (co_art, co_uni, relacion, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
-                            VALUES (@art, @uni, 1, 1, 1, 1, @user, GETDATE(), @sucu, 'SYNC2K')
-                        `);
-                }
+                // 3. Asegurar unidades del artículo en saArtUnidad
+                await ensureArticleUnits(pool, dataToInsert.co_art, item.unidades, defaultUni, auditUser, defaultAlmacen);
 
                 if (dataToInsert.campo7) {
                     await pool.request()
@@ -1977,30 +2194,75 @@ router.post('/sync', async (req, res) => {
             });
         }
 
-        // 1. Obtener todos los artículos de cada servidor
+        // 1. Obtener todos los artículos, unidades y catálogos de cada servidor
         const serverArticles = {};
         const allUniqueArticles = new Map();
 
         for (const srv of servers) {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
-                const result = await pool.request().query(
-                    `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS art_des, RTRIM(a.tipo) AS tipo,
-                            RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(a.co_cat) AS co_cat,
-                            RTRIM(a.co_color) AS co_color, RTRIM(a.co_ubicacion) AS co_ubicacion,
-                            RTRIM(a.item) AS item, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref,
-                            a.anulado, a.tipo_imp, a.peso, a.volumen, a.stock_min, a.stock_max,
-                            RTRIM(a.campo1) AS campo1, RTRIM(a.campo7) AS campo7
-                     FROM saArticulo a`
-                );
+                const [artRes, artUniRes, linRes, sublRes, catRes, colRes, ubiRes] = await Promise.all([
+                    pool.request().query(
+                        `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS art_des, RTRIM(a.tipo) AS tipo,
+                                RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(a.co_cat) AS co_cat,
+                                RTRIM(a.co_color) AS co_color, RTRIM(a.co_ubicacion) AS co_ubicacion,
+                                RTRIM(a.item) AS item, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS ref,
+                                a.anulado, a.tipo_imp, a.peso, a.volumen, a.stock_min, a.stock_max,
+                                RTRIM(a.campo1) AS campo1, RTRIM(a.campo7) AS campo7
+                         FROM saArticulo a`
+                    ),
+                    pool.request().query(
+                        `SELECT RTRIM(au.co_art) AS co_art, RTRIM(au.co_uni) AS co_uni, au.relacion, au.equivalencia,
+                                au.uni_principal, au.uso_venta, au.uso_compra, au.uni_secundaria, au.uso_secundaria,
+                                RTRIM(u.des_uni) AS des_uni
+                         FROM saArtUnidad au
+                         LEFT JOIN saUnidad u ON au.co_uni = u.co_uni`
+                    ),
+                    pool.request().query('SELECT RTRIM(co_lin) AS co_lin, RTRIM(lin_des) AS lin_des FROM saLineaArticulo'),
+                    pool.request().query('SELECT RTRIM(co_lin) AS co_lin, RTRIM(co_subl) AS co_subl, RTRIM(subl_des) AS subl_des FROM saSubLinea'),
+                    pool.request().query('SELECT RTRIM(co_cat) AS co_cat, RTRIM(cat_des) AS cat_des FROM saCatArticulo'),
+                    pool.request().query('SELECT RTRIM(co_color) AS co_color, RTRIM(des_color) AS des_color FROM saColor'),
+                    pool.request().query('SELECT RTRIM(co_ubicacion) AS co_ubicacion, RTRIM(des_ubicacion) AS des_ubicacion FROM saUbicacion')
+                ]);
+
+                const unitsByArt = new Map();
+                for (const u of artUniRes.recordset) {
+                    const key = (u.co_art || '').trim().toUpperCase();
+                    if (!unitsByArt.has(key)) unitsByArt.set(key, []);
+                    unitsByArt.get(key).push(u);
+                }
+
+                const linMap = new Map(linRes.recordset.map(l => [(l.co_lin || '').trim().toUpperCase(), l]));
+                const sublMap = new Map(sublRes.recordset.map(s => [`${(s.co_lin || '').trim().toUpperCase()}__${(s.co_subl || '').trim().toUpperCase()}`, s]));
+                const catMap = new Map(catRes.recordset.map(c => [(c.co_cat || '').trim().toUpperCase(), c]));
+                const colMap = new Map(colRes.recordset.map(c => [(c.co_color || '').trim().toUpperCase(), c]));
+                const ubiMap = new Map(ubiRes.recordset.map(u => [(u.co_ubicacion || '').trim().toUpperCase(), u]));
 
                 const artMap = new Map();
-                for (const row of result.recordset) {
+                for (const row of artRes.recordset) {
                     const key = (row.co_art || '').trim().toUpperCase();
                     if (key) {
-                        artMap.set(key, row);
+                        const co_lin_key = (row.co_lin || '').trim().toUpperCase();
+                        const co_subl_key = `${co_lin_key}__${(row.co_subl || '').trim().toUpperCase()}`;
+                        const co_cat_key = (row.co_cat || '').trim().toUpperCase();
+                        const co_col_key = (row.co_color || '').trim().toUpperCase();
+                        const co_ubi_key = (row.co_ubicacion || '').trim().toUpperCase();
+
+                        const fullItem = {
+                            ...row,
+                            unidades: unitsByArt.get(key) || [],
+                            _linea: linMap.get(co_lin_key) || null,
+                            _sublinea: sublMap.get(co_subl_key) || null,
+                            _categoria: catMap.get(co_cat_key) || null,
+                            _color: colMap.get(co_col_key) || null,
+                            _ubicacion: ubiMap.get(co_ubi_key) || null
+                        };
+
+                        artMap.set(key, fullItem);
                         if (!allUniqueArticles.has(key)) {
-                            allUniqueArticles.set(key, row);
+                            allUniqueArticles.set(key, fullItem);
+                        } else if (fullItem.unidades.length > 0 && (allUniqueArticles.get(key).unidades || []).length === 0) {
+                            allUniqueArticles.set(key, fullItem);
                         }
                     }
                 }
@@ -2030,172 +2292,165 @@ router.post('/sync', async (req, res) => {
             const { pool, map } = srvData;
             const defaultAlmacen = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
 
-            // Cargar defaults de líneas, categorías, colores, ubicaciones del servidor destino
+            // Cargar defaults del servidor destino
             const [resLin, resCat, resCol, resUbi, resUni] = await Promise.all([
                 pool.request().query("SELECT TOP 1 RTRIM(co_lin) AS co_lin FROM saLineaArticulo ORDER BY CASE WHEN RTRIM(co_lin) = '01' THEN 0 ELSE 1 END, co_lin"),
                 pool.request().query("SELECT TOP 1 RTRIM(co_cat) AS co_cat FROM saCatArticulo ORDER BY CASE WHEN RTRIM(co_cat) = '01' THEN 0 ELSE 1 END, co_cat"),
                 pool.request().query("SELECT TOP 1 RTRIM(co_color) AS co_color FROM saColor ORDER BY CASE WHEN RTRIM(co_color) = '01' THEN 0 ELSE 1 END, co_color"),
                 pool.request().query("SELECT TOP 1 RTRIM(co_ubicacion) AS co_ubicacion FROM saUbicacion ORDER BY CASE WHEN RTRIM(co_ubicacion) = '01' THEN 0 ELSE 1 END, co_ubicacion"),
-                pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = 'UND' THEN 0 ELSE 1 END, co_uni")
+                pool.request().query("SELECT TOP 1 RTRIM(co_uni) AS co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = '01' THEN 0 WHEN RTRIM(co_uni) = 'UND' THEN 1 ELSE 2 END, co_uni")
             ]);
 
             const defaultLin = resLin.recordset[0]?.co_lin || '01';
             const defaultCat = resCat.recordset[0]?.co_cat || '01';
             const defaultCol = resCol.recordset[0]?.co_color || '01';
             const defaultUbi = resUbi.recordset[0]?.co_ubicacion || '01';
-            const defaultUni = resUni.recordset[0]?.co_uni || 'UND';
+            const defaultUni = resUni.recordset[0]?.co_uni || '01';
 
             let migratedCount = 0;
             const errors = [];
 
             for (const [co_art, article] of allUniqueArticles.entries()) {
-                if (!map.has(co_art)) {
-                    try {
-                        const dataToInsert = { ...article };
+                try {
+                    // Asegurar dependencias de catálogos
+                    await ensureCatalogDependencies(pool, article, auditUser, defaultAlmacen);
 
-                        // 1. Validar co_lin en destino
-                        const linCheck = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin || '').query(
-                            'SELECT TOP 1 co_lin FROM saLineaArticulo WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin))'
-                        );
-                        dataToInsert.co_lin = linCheck.recordset.length ? dataToInsert.co_lin : defaultLin;
-
-                        // 2. Validar co_subl correspondiente a la línea en destino
-                        const sublCheck = await pool.request()
-                            .input('lin', sql.VarChar, dataToInsert.co_lin)
-                            .input('subl', sql.VarChar, dataToInsert.co_subl || '')
-                            .query('SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin)) AND LTRIM(RTRIM(co_subl)) = LTRIM(RTRIM(@subl))');
-                        
-                        if (sublCheck.recordset.length) {
-                            dataToInsert.co_subl = sublCheck.recordset[0].co_subl;
-                        } else {
-                            const firstSubl = await pool.request()
-                                .input('lin', sql.VarChar, dataToInsert.co_lin)
-                                .query('SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin))');
-                            dataToInsert.co_subl = firstSubl.recordset[0]?.co_subl || '01';
-                        }
-
-                        // 3. Validar co_cat en destino
-                        const catCheck = await pool.request().input('cat', sql.VarChar, dataToInsert.co_cat || '').query(
-                            'SELECT TOP 1 co_cat FROM saCatArticulo WHERE LTRIM(RTRIM(co_cat)) = LTRIM(RTRIM(@cat))'
-                        );
-                        dataToInsert.co_cat = catCheck.recordset.length ? dataToInsert.co_cat : defaultCat;
-
-                        // 4. Validar co_color en destino
-                        const colCheck = await pool.request().input('col', sql.VarChar, dataToInsert.co_color || '').query(
-                            'SELECT TOP 1 co_color FROM saColor WHERE LTRIM(RTRIM(co_color)) = LTRIM(RTRIM(@col))'
-                        );
-                        dataToInsert.co_color = colCheck.recordset.length ? dataToInsert.co_color : defaultCol;
-
-                        // 5. Validar co_ubicacion en destino
-                        const ubiCheck = await pool.request().input('ubi', sql.VarChar, dataToInsert.co_ubicacion || '').query(
-                            'SELECT TOP 1 co_ubicacion FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@ubi))'
-                        );
-                        dataToInsert.co_ubicacion = ubiCheck.recordset.length ? dataToInsert.co_ubicacion : defaultUbi;
-
-                        const f = new Date();
-                        const r = new sql.Request(pool);
-                        r.input('sCo_Art', sql.Char(30), dataToInsert.co_art);
-                        r.input('sdFecha_Reg', sql.SmallDateTime, f);
-                        r.input('sArt_Des', sql.VarChar(120), dataToInsert.art_des || 'NUEVO ARTÍCULO');
-                        r.input('sTipo', sql.Char(1), dataToInsert.tipo || 'V');
-                        r.input('bAnulado', sql.Bit, dataToInsert.anulado ? 1 : 0);
-                        r.input('sdFecha_Inac', sql.SmallDateTime, f);
-                        r.input('sCo_Lin', sql.Char(6), dataToInsert.co_lin);
-                        r.input('sCo_Subl', sql.Char(6), dataToInsert.co_subl);
-                        r.input('sCo_Cat', sql.Char(6), dataToInsert.co_cat);
-                        r.input('sCo_Color', sql.Char(6), dataToInsert.co_color);
-                        r.input('sCo_Ubicacion', sql.Char(6), dataToInsert.co_ubicacion);
-                        r.input('sItem', sql.VarChar(10), dataToInsert.item || null);
-                        r.input('sModelo', sql.VarChar(20), dataToInsert.modelo || '');
-                        r.input('sRef', sql.VarChar(20), dataToInsert.ref || null);
-                        r.input('bGenerico', sql.Bit, 0);
-                        r.input('bManeja_Serial', sql.Bit, 0);
-                        r.input('bManeja_Lote', sql.Bit, 0);
-                        r.input('bManeja_Lote_Venc', sql.Bit, 0);
-                        r.input('deMargen_Min', sql.Decimal(18, 5), 0);
-                        r.input('deMargen_Max', sql.Decimal(18, 5), 0);
-                        r.input('sTipo_Imp', sql.Char(1), dataToInsert.tipo_imp || '1');
-                        r.input('sTipo_Imp2', sql.Char(1), null);
-                        r.input('sTipo_Imp3', sql.Char(1), null);
-                        r.input('sCo_Reten', sql.Char(6), null);
-                        r.input('sCod_Proc', sql.Char(6), null);
-                        r.input('sGarantia', sql.VarChar(30), '');
-                        r.input('deVolumen', sql.Decimal(18, 5), Number(dataToInsert.volumen) || 0);
-                        r.input('dePeso', sql.Decimal(18, 5), Number(dataToInsert.peso) || 0);
-                        r.input('deStock_Min', sql.Decimal(18, 5), Number(dataToInsert.stock_min) || 0);
-                        r.input('deStock_Max', sql.Decimal(18, 5), Number(dataToInsert.stock_max) || 0);
-                        r.input('deStock_Pedido', sql.Decimal(18, 5), 0);
-                        r.input('iRelac_Unidad', sql.Int, 1);
-                        r.input('dePunt_Ven', sql.Decimal(18, 5), 0);
-                        r.input('dePunt_Cli', sql.Decimal(18, 5), 0);
-                        r.input('deLic_Mon_Ilc', sql.Decimal(18, 5), 0);
-                        r.input('deLic_Capacidad', sql.Decimal(18, 5), 0);
-                        r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
-                        r.input('sLic_Tipo', sql.Char(1), null);
-                        r.input('bPrec_Om', sql.Bit, 0);
-                        r.input('sComentario', sql.VarChar(sql.MAX), 'Migrado vía Sincronización');
-                        r.input('sTipo_Cos', sql.Char(4), '1');
-                        r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
-                        r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
-                        r.input('deMont_Comi', sql.Decimal(18, 5), 0);
-                        r.input('dePorc_Arancel', sql.Decimal(18, 5), 0);
-                        r.input('sI_Art_Des', sql.VarChar(120), null);
-                        r.input('sDis_Cen', sql.VarChar(sql.MAX), null);
-                        r.input('sReten_Iva_Tercero', sql.Char(16), null);
-                        r.input('sCampo1', sql.VarChar(60), dataToInsert.campo1 || null);
-                        r.input('sCampo2', sql.VarChar(60), null);
-                        r.input('sCampo3', sql.VarChar(60), null);
-                        r.input('sCampo4', sql.VarChar(60), null);
-                        r.input('sCampo5', sql.VarChar(60), null);
-                        r.input('sCampo6', sql.VarChar(60), null);
-                        r.input('sCampo7', sql.VarChar(60), dataToInsert.campo7 || null);
-                        r.input('sCampo8', sql.VarChar(60), null);
-                        r.input('sCo_Us_In', sql.Char(6), auditUser);
-                        r.input('sCo_Sucu_In', sql.Char(6), defaultAlmacen);
-                        r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
-                        r.input('sRevisado', sql.Char(1), null);
-                        r.input('sTrasnfe', sql.Char(1), null);
-
-                        await r.execute('pInsertarArticulo');
-
-                        // Asegurar unidad principal en saArtUnidad si no existe
-                        const checkUnit = await pool.request()
-                            .input('art', sql.VarChar, dataToInsert.co_art)
-                            .query('SELECT TOP 1 co_art FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
-                        
-                        if (!checkUnit.recordset.length) {
-                            await pool.request()
-                                .input('art', sql.Char(30), dataToInsert.co_art)
-                                .input('uni', sql.Char(6), defaultUni)
-                                .input('user', sql.Char(6), auditUser)
-                                .input('sucu', sql.Char(6), defaultAlmacen)
-                                .query(`
-                                    INSERT INTO saArtUnidad (co_art, co_uni, relacion, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
-                                    VALUES (@art, @uni, 1, 1, 1, 1, @user, GETDATE(), @sucu, 'SYNC2K')
-                                `);
-                        }
-
-                        // Preservar imagen si la tenía
-                        if (dataToInsert.campo7) {
-                            await pool.request()
-                                .input('art', sql.Char(30), dataToInsert.co_art)
-                                .input('img', sql.VarChar(250), dataToInsert.campo7)
-                                .query('UPDATE saArticulo SET campo7 = @img WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
-                        }
-
-                        // Si el artículo original estaba anulado, asegurar su estado anulado en destino
-                        if (dataToInsert.anulado) {
-                            await pool.request()
-                                .input('art', sql.Char(30), dataToInsert.co_art)
-                                .query('UPDATE saArticulo SET anulado = 1, fecha_inac = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
-                        }
-
-                        migratedCount++;
-                        totalSynced++;
-                        map.set(co_art, dataToInsert);
-                    } catch (err) {
-                        errors.push(`Artículo ${co_art} (${article.art_des}): ${err.message}`);
+                    if (map.has(co_art)) {
+                        // El artículo ya existe, asegurar que sus unidades estén en saArtUnidad
+                        await ensureArticleUnits(pool, co_art, article.unidades, defaultUni, auditUser, defaultAlmacen);
+                        continue;
                     }
+
+                    const dataToInsert = { ...article };
+
+                    // 1. Validar co_lin en destino
+                    const linCheck = await pool.request().input('lin', sql.VarChar, dataToInsert.co_lin || '').query(
+                        'SELECT TOP 1 co_lin FROM saLineaArticulo WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin))'
+                    );
+                    dataToInsert.co_lin = linCheck.recordset.length ? dataToInsert.co_lin : defaultLin;
+
+                    // 2. Validar co_subl correspondiente a la línea en destino
+                    const sublCheck = await pool.request()
+                        .input('lin', sql.VarChar, dataToInsert.co_lin)
+                        .input('subl', sql.VarChar, dataToInsert.co_subl || '')
+                        .query('SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin)) AND LTRIM(RTRIM(co_subl)) = LTRIM(RTRIM(@subl))');
+                    
+                    if (sublCheck.recordset.length) {
+                        dataToInsert.co_subl = sublCheck.recordset[0].co_subl;
+                    } else {
+                        const firstSubl = await pool.request()
+                            .input('lin', sql.VarChar, dataToInsert.co_lin)
+                            .query('SELECT TOP 1 co_subl FROM saSubLinea WHERE LTRIM(RTRIM(co_lin)) = LTRIM(RTRIM(@lin))');
+                        dataToInsert.co_subl = firstSubl.recordset[0]?.co_subl || '01';
+                    }
+
+                    // 3. Validar co_cat en destino
+                    const catCheck = await pool.request().input('cat', sql.VarChar, dataToInsert.co_cat || '').query(
+                        'SELECT TOP 1 co_cat FROM saCatArticulo WHERE LTRIM(RTRIM(co_cat)) = LTRIM(RTRIM(@cat))'
+                    );
+                    dataToInsert.co_cat = catCheck.recordset.length ? dataToInsert.co_cat : defaultCat;
+
+                    // 4. Validar co_color en destino
+                    const colCheck = await pool.request().input('col', sql.VarChar, dataToInsert.co_color || '').query(
+                        'SELECT TOP 1 co_color FROM saColor WHERE LTRIM(RTRIM(co_color)) = LTRIM(RTRIM(@col))'
+                    );
+                    dataToInsert.co_color = colCheck.recordset.length ? dataToInsert.co_color : defaultCol;
+
+                    // 5. Validar co_ubicacion en destino
+                    const ubiCheck = await pool.request().input('ubi', sql.VarChar, dataToInsert.co_ubicacion || '').query(
+                        'SELECT TOP 1 co_ubicacion FROM saUbicacion WHERE LTRIM(RTRIM(co_ubicacion)) = LTRIM(RTRIM(@ubi))'
+                    );
+                    dataToInsert.co_ubicacion = ubiCheck.recordset.length ? dataToInsert.co_ubicacion : defaultUbi;
+
+                    const f = new Date();
+                    const r = new sql.Request(pool);
+                    r.input('sCo_Art', sql.Char(30), dataToInsert.co_art);
+                    r.input('sdFecha_Reg', sql.SmallDateTime, f);
+                    r.input('sArt_Des', sql.VarChar(120), dataToInsert.art_des || 'NUEVO ARTÍCULO');
+                    r.input('sTipo', sql.Char(1), dataToInsert.tipo || 'V');
+                    r.input('bAnulado', sql.Bit, dataToInsert.anulado ? 1 : 0);
+                    r.input('sdFecha_Inac', sql.SmallDateTime, f);
+                    r.input('sCo_Lin', sql.Char(6), dataToInsert.co_lin);
+                    r.input('sCo_Subl', sql.Char(6), dataToInsert.co_subl);
+                    r.input('sCo_Cat', sql.Char(6), dataToInsert.co_cat);
+                    r.input('sCo_Color', sql.Char(6), dataToInsert.co_color);
+                    r.input('sCo_Ubicacion', sql.Char(6), dataToInsert.co_ubicacion);
+                    r.input('sItem', sql.VarChar(10), dataToInsert.item || null);
+                    r.input('sModelo', sql.VarChar(20), dataToInsert.modelo || '');
+                    r.input('sRef', sql.VarChar(20), dataToInsert.ref || null);
+                    r.input('bGenerico', sql.Bit, 0);
+                    r.input('bManeja_Serial', sql.Bit, 0);
+                    r.input('bManeja_Lote', sql.Bit, 0);
+                    r.input('bManeja_Lote_Venc', sql.Bit, 0);
+                    r.input('deMargen_Min', sql.Decimal(18, 5), 0);
+                    r.input('deMargen_Max', sql.Decimal(18, 5), 0);
+                    r.input('sTipo_Imp', sql.Char(1), dataToInsert.tipo_imp || '1');
+                    r.input('sTipo_Imp2', sql.Char(1), null);
+                    r.input('sTipo_Imp3', sql.Char(1), null);
+                    r.input('sCo_Reten', sql.Char(6), null);
+                    r.input('sCod_Proc', sql.Char(6), null);
+                    r.input('sGarantia', sql.VarChar(30), '');
+                    r.input('deVolumen', sql.Decimal(18, 5), Number(dataToInsert.volumen) || 0);
+                    r.input('dePeso', sql.Decimal(18, 5), Number(dataToInsert.peso) || 0);
+                    r.input('deStock_Min', sql.Decimal(18, 5), Number(dataToInsert.stock_min) || 0);
+                    r.input('deStock_Max', sql.Decimal(18, 5), Number(dataToInsert.stock_max) || 0);
+                    r.input('deStock_Pedido', sql.Decimal(18, 5), 0);
+                    r.input('iRelac_Unidad', sql.Int, 1);
+                    r.input('dePunt_Ven', sql.Decimal(18, 5), 0);
+                    r.input('dePunt_Cli', sql.Decimal(18, 5), 0);
+                    r.input('deLic_Mon_Ilc', sql.Decimal(18, 5), 0);
+                    r.input('deLic_Capacidad', sql.Decimal(18, 5), 0);
+                    r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
+                    r.input('sLic_Tipo', sql.Char(1), null);
+                    r.input('bPrec_Om', sql.Bit, 0);
+                    r.input('sComentario', sql.VarChar(sql.MAX), 'Migrado vía Sincronización');
+                    r.input('sTipo_Cos', sql.Char(4), '1');
+                    r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
+                    r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
+                    r.input('deMont_Comi', sql.Decimal(18, 5), 0);
+                    r.input('dePorc_Arancel', sql.Decimal(18, 5), 0);
+                    r.input('sI_Art_Des', sql.VarChar(120), null);
+                    r.input('sDis_Cen', sql.VarChar(sql.MAX), null);
+                    r.input('sReten_Iva_Tercero', sql.Char(16), null);
+                    r.input('sCampo1', sql.VarChar(60), dataToInsert.campo1 || null);
+                    r.input('sCampo2', sql.VarChar(60), null);
+                    r.input('sCampo3', sql.VarChar(60), null);
+                    r.input('sCampo4', sql.VarChar(60), null);
+                    r.input('sCampo5', sql.VarChar(60), null);
+                    r.input('sCampo6', sql.VarChar(60), null);
+                    r.input('sCampo7', sql.VarChar(60), dataToInsert.campo7 || null);
+                    r.input('sCampo8', sql.VarChar(60), null);
+                    r.input('sCo_Us_In', sql.Char(6), auditUser);
+                    r.input('sCo_Sucu_In', sql.Char(6), defaultAlmacen);
+                    r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
+                    r.input('sRevisado', sql.Char(1), null);
+                    r.input('sTrasnfe', sql.Char(1), null);
+
+                    await r.execute('pInsertarArticulo');
+
+                    // Asegurar todas las unidades en saArtUnidad
+                    await ensureArticleUnits(pool, dataToInsert.co_art, article.unidades, defaultUni, auditUser, defaultAlmacen);
+
+                    // Preservar imagen si la tenía
+                    if (dataToInsert.campo7) {
+                        await pool.request()
+                            .input('art', sql.Char(30), dataToInsert.co_art)
+                            .input('img', sql.VarChar(250), dataToInsert.campo7)
+                            .query('UPDATE saArticulo SET campo7 = @img WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
+                    }
+
+                    // Si el artículo original estaba anulado, asegurar su estado anulado en destino
+                    if (dataToInsert.anulado) {
+                        await pool.request()
+                            .input('art', sql.Char(30), dataToInsert.co_art)
+                            .query('UPDATE saArticulo SET anulado = 1, fecha_inac = GETDATE() WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art))');
+                    }
+
+                    migratedCount++;
+                    totalSynced++;
+                    map.set(co_art, dataToInsert);
+                } catch (err) {
+                    errors.push(`Artículo ${co_art} (${article.art_des}): ${err.message}`);
                 }
             }
 
@@ -2212,8 +2467,8 @@ router.post('/sync', async (req, res) => {
             total_synced: totalSynced,
             summary,
             message: totalSynced > 0
-                ? `Sincronización de artículos completada. Se migraron ${totalSynced} artículos.`
-                : 'Todas las sucursales ya tienen los artículos sincronizados.'
+                ? `Sincronización de artículos completada. Se migraron ${totalSynced} artículos con sus unidades y catálogos asociados.`
+                : 'Todas las sucursales ya tienen los artículos y dependencias sincronizadas.'
         });
     } catch (error) {
         console.error('[SYNC ARTICULOS FATAL ERROR]:', error);

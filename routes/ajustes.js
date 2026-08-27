@@ -10,6 +10,98 @@ function padProfit(str, length) {
 }
 
 /**
+ * Valida y asegura que la unidad de medida y la asociación saArtUnidad existan en la BD
+ * para evitar el error FK_saAjusteReng_saArtUnidad.
+ */
+async function resolveAndEnsureArtUnidad(pool, co_art, requestedUni, auditUser, sucuCode) {
+    const cleanArt = String(co_art || '').trim();
+    if (!cleanArt) return '01';
+
+    // 1. Si enviaron una unidad, comprobar si existe directamente en saArtUnidad para ese artículo
+    if (requestedUni) {
+        const cleanUni = String(requestedUni).trim();
+        try {
+            const directCheck = await pool.request()
+                .input('art', sql.Char(30), padProfit(cleanArt, 30))
+                .input('uni', sql.Char(6), padProfit(cleanUni, 6))
+                .query('SELECT TOP 1 RTRIM(co_uni) as co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@uni))');
+            if (directCheck.recordset && directCheck.recordset.length > 0 && directCheck.recordset[0].co_uni) {
+                return directCheck.recordset[0].co_uni.trim();
+            }
+        } catch (e) {}
+
+        // 1.1 Si no coincidió por código (ej. enviaron 'UND' pero el código es '01'), buscar si requestedUni coincide con des_uni en saUnidad
+        try {
+            const desUniCheck = await pool.request()
+                .input('des', sql.VarChar(60), cleanUni)
+                .query('SELECT TOP 1 RTRIM(co_uni) as co_uni FROM saUnidad WHERE LTRIM(RTRIM(des_uni)) = LTRIM(RTRIM(@des)) OR LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@des))');
+            if (desUniCheck.recordset && desUniCheck.recordset.length > 0 && desUniCheck.recordset[0].co_uni) {
+                const codeFromDes = desUniCheck.recordset[0].co_uni.trim();
+                const checkWithCode = await pool.request()
+                    .input('art', sql.Char(30), padProfit(cleanArt, 30))
+                    .input('uni', sql.Char(6), padProfit(codeFromDes, 6))
+                    .query('SELECT TOP 1 RTRIM(co_uni) as co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@uni))');
+                if (checkWithCode.recordset && checkWithCode.recordset.length > 0 && checkWithCode.recordset[0].co_uni) {
+                    return checkWithCode.recordset[0].co_uni.trim();
+                }
+            }
+        } catch (e) {}
+    }
+
+    // 2. Buscar si el artículo tiene CUALQUIER unidad configurada en saArtUnidad (preferir principal)
+    try {
+        const artUniRes = await pool.request()
+            .input('art', sql.Char(30), padProfit(cleanArt, 30))
+            .query('SELECT TOP 1 RTRIM(co_uni) as co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) ORDER BY uni_principal DESC');
+        if (artUniRes.recordset && artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
+            return artUniRes.recordset[0].co_uni.trim();
+        }
+    } catch (e) {}
+
+    // 3. Si el artículo NO tiene NINGUNA unidad registrada en saArtUnidad:
+    // Determinar la unidad válida desde saUnidad para auto-crear la relación
+    let targetUni = '01';
+    try {
+        const defUniRes = await pool.request().query("SELECT TOP 1 RTRIM(co_uni) as co_uni FROM saUnidad ORDER BY CASE WHEN RTRIM(co_uni) = '01' THEN 0 WHEN RTRIM(co_uni) = 'UND' THEN 1 ELSE 2 END, co_uni");
+        if (defUniRes.recordset && defUniRes.recordset.length > 0 && defUniRes.recordset[0].co_uni) {
+            targetUni = defUniRes.recordset[0].co_uni.trim();
+        } else {
+            // Crear unidad 01 en saUnidad si la tabla estuviera vacía
+            await pool.request()
+                .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+                .input('sucu', sql.Char(6), padProfit(sucuCode || '01', 6))
+                .query(`
+                    INSERT INTO saUnidad (co_uni, des_uni, co_us_in, fe_us_in, co_sucu_in, rowguid)
+                    VALUES ('01', 'UNIDAD', @user, GETDATE(), @sucu, NEWID())
+                `);
+            targetUni = '01';
+        }
+    } catch (e) {
+        targetUni = '01';
+    }
+
+    // Auto-crear la entrada en saArtUnidad para que el INSERT no viole FK_saAjusteReng_saArtUnidad
+    try {
+        await pool.request()
+            .input('art', sql.Char(30), padProfit(cleanArt, 30))
+            .input('uni', sql.Char(6), padProfit(targetUni, 6))
+            .input('user', sql.Char(6), padProfit(auditUser || 'PROFIT', 6))
+            .input('sucu', sql.Char(6), padProfit(sucuCode || '01', 6))
+            .query(`
+                IF NOT EXISTS (SELECT 1 FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@art)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@uni)))
+                BEGIN
+                    INSERT INTO saArtUnidad (co_art, co_uni, relacion, equivalencia, uni_principal, uso_venta, uso_compra, co_us_in, fe_us_in, co_sucu_in, maquina)
+                    VALUES (@art, @uni, 1, 1, 1, 1, 1, @user, GETDATE(), @sucu, 'SYNC2K')
+                END
+            `);
+    } catch (eInsert) {
+        console.warn(`[AJUSTES] No se pudo auto-insertar saArtUnidad para ${cleanArt}:`, eInsert.message);
+    }
+
+    return targetUni;
+}
+
+/**
  * POST /api/v1/ajustes
  * Registra un Ajuste de Inventario en Profit Plus (Salida '02' o Entrada '01')
  */
@@ -190,32 +282,7 @@ router.post('/', async (req, res) => {
 
         // Pre-consultar y validar unidades de medida contra saArtUnidad para evitar FK_saAjusteReng_saArtUnidad
         for (const reng of data.renglones) {
-            let validCoUni = null;
-            if (reng.co_uni) {
-                try {
-                    const checkUniRes = await pool.request()
-                        .input('co_art_chk', sql.Char(30), padProfit(reng.co_art, 30))
-                        .input('co_uni_chk', sql.Char(6), padProfit(reng.co_uni, 6))
-                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_chk)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni_chk))');
-                    if (checkUniRes.recordset && checkUniRes.recordset.length > 0) {
-                        validCoUni = checkUniRes.recordset[0].co_uni.trim();
-                    }
-                } catch (e) {}
-            }
-
-            if (!validCoUni) {
-                try {
-                    const artUniRes = await pool.request()
-                        .input('co_art_check', sql.Char(30), padProfit(reng.co_art, 30))
-                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_check)) ORDER BY uni_principal DESC');
-                    if (artUniRes.recordset && artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
-                        validCoUni = artUniRes.recordset[0].co_uni.trim();
-                    }
-                } catch (e) {}
-            }
-
-            if (!validCoUni) validCoUni = 'UND';
-            reng.co_uni = validCoUni;
+            reng.co_uni = await resolveAndEnsureArtUnidad(pool, reng.co_art, reng.co_uni, auditUser, sucuCode);
         }
 
         // 3. INICIAR LA TRANSACCIÓN SOLO PARA LAS INSERCIONES DE ESCRITURA
@@ -556,32 +623,7 @@ router.put('/:ajue_num', async (req, res) => {
 
         // Pre-consultar y validar unidades de medida contra saArtUnidad para evitar FK_saAjusteReng_saArtUnidad
         for (const reng of data.renglones) {
-            let validCoUni = null;
-            if (reng.co_uni) {
-                try {
-                    const checkUniRes = await pool.request()
-                        .input('co_art_chk', sql.Char(30), padProfit(reng.co_art, 30))
-                        .input('co_uni_chk', sql.Char(6), padProfit(reng.co_uni, 6))
-                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_chk)) AND LTRIM(RTRIM(co_uni)) = LTRIM(RTRIM(@co_uni_chk))');
-                    if (checkUniRes.recordset && checkUniRes.recordset.length > 0) {
-                        validCoUni = checkUniRes.recordset[0].co_uni.trim();
-                    }
-                } catch (e) {}
-            }
-
-            if (!validCoUni) {
-                try {
-                    const artUniRes = await pool.request()
-                        .input('co_art_check', sql.Char(30), padProfit(reng.co_art, 30))
-                        .query('SELECT TOP 1 co_uni FROM saArtUnidad WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art_check)) ORDER BY uni_principal DESC');
-                    if (artUniRes.recordset && artUniRes.recordset.length > 0 && artUniRes.recordset[0].co_uni) {
-                        validCoUni = artUniRes.recordset[0].co_uni.trim();
-                    }
-                } catch (e) {}
-            }
-
-            if (!validCoUni) validCoUni = 'UND';
-            reng.co_uni = validCoUni;
+            reng.co_uni = await resolveAndEnsureArtUnidad(pool, reng.co_art, reng.co_uni, auditUser, sucuCode);
         }
 
         const isSalida = String(data.tipo || '').toUpperCase() === 'SAL' || String(data.co_tipo || '').trim() === '02';
