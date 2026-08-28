@@ -15,7 +15,7 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         if (list) authCondition = ` AND s.co_alma IN (${list})`;
     }
 
-    const [resStock, resPrecios, resCostos] = await Promise.all([
+    const [resStock, resPrecios, resCostos, resUbicaciones] = await Promise.all([
         pool.request().query(`
             SELECT RTRIM(s.co_art) AS co_art, RTRIM(s.co_alma) AS co_alma,
                    RTRIM(a.des_alma) AS des_alma,
@@ -47,8 +47,8 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
             FROM (
                 SELECT RTRIM(fr.co_art) AS co_art,
                        CASE 
-                           WHEN RTRIM(fn.co_mone) = 'BS' THEN (fr.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= fn.fec_emis ORDER BY fecha DESC), 0)) 
-                           ELSE fr.cost_unit_om 
+                            WHEN RTRIM(fn.co_mone) = 'BS' THEN (fr.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= fn.fec_emis ORDER BY fecha DESC), 0)) 
+                            ELSE fr.cost_unit_om 
                        END AS cost_unit_om,
                        fr.cost_unit,
                        fn.fec_emis,
@@ -61,6 +61,17 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
             WHERE r.rn = 1
         `).catch(err => {
             console.error('[enrichArticulos] Error fetching last purchase cost:', err.message);
+            return { recordset: [] };
+        }),
+        pool.request().query(`
+            SELECT RTRIM(co_art) AS co_art, RTRIM(co_alma) AS co_alma,
+                   RTRIM(ISNULL(co_ubicacion, '')) AS co_ubicacion,
+                   RTRIM(ISNULL(co_ubicacion2, '')) AS co_ubicacion2,
+                   RTRIM(ISNULL(co_ubicacion3, '')) AS co_ubicacion3
+            FROM saArtUbicacion
+            WHERE LTRIM(RTRIM(co_art)) IN (${ids})
+        `).catch(err => {
+            console.error('[enrichArticulos] Error fetching ubicaciones:', err.message);
             return { recordset: [] };
         })
     ]);
@@ -93,6 +104,19 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         });
     }
 
+    const ubicacionesMap = {};
+    if (resUbicaciones && resUbicaciones.recordset) {
+        resUbicaciones.recordset.forEach(u => {
+            if (!ubicacionesMap[u.co_art]) ubicacionesMap[u.co_art] = {};
+            ubicacionesMap[u.co_art][u.co_alma] = {
+                co_alma: u.co_alma,
+                co_ubicacion: u.co_ubicacion || '',
+                co_ubicacion2: u.co_ubicacion2 || '',
+                co_ubicacion3: u.co_ubicacion3 || ''
+            };
+        });
+    }
+
     return articulos.map(a => {
         const pList = precioMap[a.co_art] || [];
         const p2Obj = pList.find(p => p.id_precio === '02' || p.id_precio === '2') || pList[1] || pList[0];
@@ -108,6 +132,9 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
         const ultCosto = costInfo.ultimo_costo_om || 0;
         const finalCosto = ultCosto > 0 ? ultCosto : (costo_estimado > 0 ? costo_estimado : (p2 > 0 ? p2 : 0));
 
+        const artUbicacionesMap = ubicacionesMap[a.co_art] || {};
+        const artUbicacionesList = Object.values(artUbicacionesMap);
+
         return {
             ...a,
             tasa_bcv: tasa,
@@ -117,7 +144,9 @@ async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null
             fecha_ultima_compra: costInfo.fecha_ultima_compra || null,
             costo_estimado: costo_estimado,
             costo_sugerido_usd: finalCosto,
-            costo_sugerido_ves: Number((finalCosto * tasa).toFixed(2))
+            costo_sugerido_ves: Number((finalCosto * tasa).toFixed(2)),
+            ubicaciones_map: artUbicacionesMap,
+            ubicaciones: artUbicacionesList
         };
     });
 }
@@ -519,7 +548,12 @@ router.get('/search', async (req, res) => {
                      LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
                      LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl
                      LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
-                     LEFT JOIN saArtUbicacion au ON a.co_art = au.co_art ${co_alma ? "AND au.co_alma = @co_alma" : ""}
+                      LEFT JOIN (
+                          SELECT co_art, co_alma, co_ubicacion, co_ubicacion2, co_ubicacion3,
+                                 ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY co_alma ASC) as rn
+                          FROM saArtUbicacion
+                          ${co_alma ? "WHERE co_alma = @co_alma" : ""}
+                      ) au ON a.co_art = au.co_art AND au.rn = 1
                      LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
                      LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
                      LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
