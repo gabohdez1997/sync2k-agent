@@ -686,13 +686,21 @@ router.post('/', async (req, res) => {
 
                 const tsVenc = new Date(tsDate.getTime() + (diasCred * 24 * 60 * 60 * 1000));
 
+                const nroFactVal = String(data.nro_fact || '').trim();
+                if (!nroFactVal) {
+                    throw new Error("El N° de Factura / Guía del Proveedor (N° NDR) es obligatorio.");
+                }
+
+                const finalDescrip = String(data.descrip || data.observaciones || (data.doc_num_oc ? `RECEPCION OC ${data.doc_num_oc}` : 'RECEPCION')).trim().substring(0, 60);
+                const finalComentario = String(data.comentario || (data.doc_num_oc ? `Recepción de OC ${data.doc_num_oc}` : 'Recepción de Mercancía')).trim().substring(0, 500);
+
                 // 5. Insertar o Actualizar Cabecera de Nota de Recepción
                 if (isUpdate) {
                     const rH = new sql.Request(transaction);
                     rH.input('sDoc_Num',          sql.Char(20),         padProfit(docNum, 20));
                     rH.input('sDoc_NumOri',       sql.Char(20),         padProfit(docNum, 20));
-                    rH.input('sNro_Fact',         sql.Char(20),         padProfit(data.nro_fact || data.n_control || docNum, 20));
-                    rH.input('sDescrip',          sql.VarChar(60),      (data.descrip || `RECEPCION OC ${data.doc_num_oc || ''}`).substring(0, 60));
+                    rH.input('sNro_Fact',         sql.Char(20),         padProfit(nroFactVal, 20));
+                    rH.input('sDescrip',          sql.VarChar(60),      finalDescrip);
                     rH.input('sCo_Prov',          sql.Char(16),         padProfit(data.co_prov, 16));
                     rH.input('sCo_Cta_Ingr_Egr',  sql.Char(20),         null);
                     rH.input('sCo_Mone',          sql.Char(6),          padProfit(docMone, 6));
@@ -700,7 +708,7 @@ router.post('/', async (req, res) => {
                     rH.input('sPorc_Desc_Glob',   sql.Char(15),         '0');
                     rH.input('sPorc_Reca',        sql.Char(15),         null);
                     rH.input('sStatus',           sql.Char(1),          '0');
-                    rH.input('sN_Control',        sql.Char(20),         padProfit(data.n_control || docNum, 20));
+                    rH.input('sN_Control',        sql.Char(20),         data.n_control ? padProfit(data.n_control, 20) : (existingHeader.n_control ? padProfit(existingHeader.n_control, 20) : null));
                     rH.input('sdFec_Emis',        sql.SmallDateTime,    existingHeader.fec_emis || tsDate);
                     rH.input('sdFec_Venc',        sql.SmallDateTime,    tsVenc);
                     rH.input('sdFec_Reg',         sql.SmallDateTime,    existingHeader.fec_reg || tsDate);
@@ -721,7 +729,7 @@ router.post('/', async (req, res) => {
                     rH.input('sSalestax',         sql.Char(8),          null);
                     rH.input('sDis_Cen',          sql.VarChar(sql.MAX), null);
                     rH.input('sDir_Ent',          sql.VarChar(sql.MAX), data.dir_ent || null);
-                    rH.input('sComentario',       sql.VarChar(sql.MAX), (data.comentario || '').trim().substring(0, 500) || null);
+                    rH.input('sComentario',       sql.VarChar(sql.MAX), finalComentario || null);
                     rH.input('sCampo1',           sql.VarChar(60),      data.campo1 || null);
                     rH.input('sCampo2',           sql.VarChar(60),      data.campo2 || null);
                     rH.input('sCampo3',           sql.VarChar(60),      data.campo3 || null);
@@ -744,13 +752,13 @@ router.post('/', async (req, res) => {
                 } else {
                     const rH = new sql.Request(transaction);
                     rH.input('sDoc_Num',          sql.Char(20),         padProfit(docNum, 20));
-                    rH.input('sNro_Fact',         sql.Char(20),         padProfit(data.nro_fact || data.n_control || docNum, 20));
-                    rH.input('sDescrip',          sql.VarChar(60),      (data.descrip || `RECEPCION OC ${data.doc_num_oc || ''}`).substring(0, 60));
+                    rH.input('sNro_Fact',         sql.Char(20),         padProfit(nroFactVal, 20));
+                    rH.input('sDescrip',          sql.VarChar(60),      finalDescrip);
                     rH.input('sCo_Prov',          sql.Char(16),         padProfit(data.co_prov, 16));
                     rH.input('sCo_Cta_Ingr_Egr',  sql.Char(20),         null);
                     rH.input('sCo_Mone',          sql.Char(6),          padProfit(docMone, 6));
                     rH.input('sCo_Cond',          sql.Char(6),          padProfit(data.co_cond || 'CONT', 6));
-                    rH.input('sN_Control',        sql.Char(20),         padProfit(data.n_control || docNum, 20));
+                    rH.input('sN_Control',        sql.Char(20),         data.n_control ? padProfit(data.n_control, 20) : null);
                     rH.input('sPorc_Desc_Glob',   sql.Char(15),         '0');
                     rH.input('sdFec_Emis',        sql.SmallDateTime,    tsDate);
                     rH.input('sdFec_Venc',        sql.SmallDateTime,    tsVenc);
@@ -771,7 +779,7 @@ router.post('/', async (req, res) => {
                     rH.input('deMonto_Imp2',      sql.Decimal(18, 2),   0);
                     rH.input('deMonto_Imp3',      sql.Decimal(18, 2),   0);
                     rH.input('sDir_Ent',          sql.VarChar(sql.MAX), data.dir_ent || null);
-                    rH.input('sComentario',       sql.VarChar(sql.MAX), (data.comentario || '').trim().substring(0, 500) || null);
+                    rH.input('sComentario',       sql.VarChar(sql.MAX), finalComentario || null);
                     rH.input('bImpresa',          sql.Bit,              0);
                     rH.input('sSalestax',         sql.Char(8),          null);
                     rH.input('sDis_Cen',          sql.VarChar(sql.MAX), null);
