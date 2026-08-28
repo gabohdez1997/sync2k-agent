@@ -82,15 +82,15 @@ router.get('/', async (req, res) => {
         const query = `
             ;WITH v_compras_inventario AS (
                 SELECT 'VENTA' AS tipo_transaccion, f.fec_emis AS fecha, r.co_art, r.total_art AS cantidad, 0 AS dias_reposicion, 0 AS stock_actual, 0 AS en_transito, f.doc_num
-                FROM saFacturaVenta f JOIN saFacturaVentaReng r ON f.doc_num = r.doc_num WHERE f.anulado = 0
+                FROM saFacturaVenta f JOIN saFacturaVentaReng r ON f.doc_num = r.doc_num WHERE f.anulado = 0 AND f.fec_emis >= @start AND f.fec_emis <= @end
                 UNION ALL
                 SELECT 'DEVOLUCION', d.fec_emis, r.co_art, r.total_art, 0, 0, 0, d.doc_num
-                FROM saDevolucionCliente d JOIN saDevolucionClienteReng r ON d.doc_num = r.doc_num WHERE d.anulado = 0
+                FROM saDevolucionCliente d JOIN saDevolucionClienteReng r ON d.doc_num = r.doc_num WHERE d.anulado = 0 AND d.fec_emis >= @start AND d.fec_emis <= @end
                 UNION ALL
                 SELECT 'RECEPCION', nr.fec_emis, nrr.co_art, nrr.total_art, ISNULL(DATEDIFF(day, oc.fec_emis, nr.fec_emis), 0), 0, 0, nr.doc_num
                 FROM saNotaRecepcionCompra nr JOIN saNotaRecepcionCompraReng nrr ON nr.doc_num = nrr.doc_num
                 LEFT JOIN saOrdenCompra oc ON nrr.num_doc = oc.doc_num AND oc.anulado = 0
-                WHERE nr.anulado = 0
+                WHERE nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
                 UNION ALL
                 SELECT 'STOCK', GETDATE(), co_art, 0, 0, 
                        SUM(ISNULL(CASE WHEN RTRIM(tipo) = 'ACT' THEN stock ELSE 0 END, 0)) -
@@ -485,6 +485,11 @@ router.get('/article-history', async (req, res) => {
                     INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
                     WHERE nr_r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
                     UNION ALL
+                    SELECT CAST(c.fec_emis AS DATE) AS fecha, c.doc_num, r.pendiente AS qty, 'orden_compra' AS tipo
+                    FROM saOrdenCompraReng r
+                    INNER JOIN saOrdenCompra c ON r.doc_num = c.doc_num
+                    WHERE r.co_art = @co_art AND c.anulado = 0 AND c.status IN ('0', '1') AND r.pendiente > 0 AND c.fec_emis >= @start AND c.fec_emis <= @end
+                    UNION ALL
                     SELECT CAST(a.fecha AS DATE) AS fecha, a.ajue_num AS doc_num, ar.total_art AS qty,
                            CASE WHEN ar.co_tipo = '01' OR ta.tipo_trans = '0' OR ar.co_tipo LIKE '%ENT%' OR ar.co_tipo LIKE '%IN%' THEN 'ajuste_entrada' ELSE 'ajuste_salida' END AS tipo
                     FROM saAjusteReng ar
@@ -506,6 +511,8 @@ router.get('/article-history', async (req, res) => {
                         COUNT(DISTINCT CASE WHEN tipo = 'devolucion' THEN doc_num ELSE NULL END) AS docs_devueltos,
                         SUM(CASE WHEN tipo = 'recepcion' THEN qty ELSE 0 END) AS cant_recepcionada,
                         COUNT(DISTINCT CASE WHEN tipo = 'recepcion' THEN doc_num ELSE NULL END) AS docs_recepcion,
+                        SUM(CASE WHEN tipo = 'orden_compra' THEN qty ELSE 0 END) AS cant_orden_compra,
+                        COUNT(DISTINCT CASE WHEN tipo = 'orden_compra' THEN doc_num ELSE NULL END) AS docs_orden_compra,
                         SUM(CASE WHEN tipo = 'ajuste_entrada' THEN qty ELSE 0 END) AS cant_ajuste_entrada,
                         SUM(CASE WHEN tipo = 'ajuste_salida' THEN qty ELSE 0 END) AS cant_ajuste_salida
                     FROM Movimientos
@@ -558,6 +565,11 @@ router.get('/article-history', async (req, res) => {
                     INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
                     WHERE nr_r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
                     UNION ALL
+                    SELECT CAST(c.fec_emis AS DATE) AS fecha, c.doc_num, r.pendiente AS qty, 'orden_compra' AS tipo
+                    FROM saOrdenCompraReng r
+                    INNER JOIN saOrdenCompra c ON r.doc_num = c.doc_num
+                    WHERE r.co_art = @co_art AND c.anulado = 0 AND c.status IN ('0', '1') AND r.pendiente > 0 AND c.fec_emis >= @start AND c.fec_emis <= @end
+                    UNION ALL
                     SELECT CAST(a.fecha AS DATE) AS fecha, a.ajue_num AS doc_num, ar.total_art AS qty,
                            CASE WHEN ar.co_tipo = '01' OR ta.tipo_trans = '0' OR ar.co_tipo LIKE '%ENT%' OR ar.co_tipo LIKE '%IN%' THEN 'ajuste_entrada' ELSE 'ajuste_salida' END AS tipo
                     FROM saAjusteReng ar
@@ -590,6 +602,8 @@ router.get('/article-history', async (req, res) => {
                         COUNT(DISTINCT CASE WHEN tipo = 'devolucion' THEN doc_num ELSE NULL END) AS docs_devueltos,
                         SUM(CASE WHEN tipo = 'recepcion' THEN qty ELSE 0 END) AS cant_recepcionada,
                         COUNT(DISTINCT CASE WHEN tipo = 'recepcion' THEN doc_num ELSE NULL END) AS docs_recepcion,
+                        SUM(CASE WHEN tipo = 'orden_compra' THEN qty ELSE 0 END) AS cant_orden_compra,
+                        COUNT(DISTINCT CASE WHEN tipo = 'orden_compra' THEN doc_num ELSE NULL END) AS docs_orden_compra,
                         SUM(CASE WHEN tipo = 'ajuste_entrada' THEN qty ELSE 0 END) AS cant_ajuste_entrada,
                         SUM(CASE WHEN tipo = 'ajuste_salida' THEN qty ELSE 0 END) AS cant_ajuste_salida
                     FROM DocSemana
@@ -643,6 +657,11 @@ router.get('/article-history', async (req, res) => {
                     INNER JOIN saNotaRecepcionCompra nr ON nr_r.doc_num = nr.doc_num
                     WHERE nr_r.co_art = @co_art AND nr.anulado = 0 AND nr.fec_emis >= @start AND nr.fec_emis <= @end
                     UNION ALL
+                    SELECT CAST(c.fec_emis AS DATE) AS fecha, c.doc_num, r.pendiente AS qty, 'orden_compra' AS tipo
+                    FROM saOrdenCompraReng r
+                    INNER JOIN saOrdenCompra c ON r.doc_num = c.doc_num
+                    WHERE r.co_art = @co_art AND c.anulado = 0 AND c.status IN ('0', '1') AND r.pendiente > 0 AND c.fec_emis >= @start AND c.fec_emis <= @end
+                    UNION ALL
                     SELECT CAST(a.fecha AS DATE) AS fecha, a.ajue_num AS doc_num, ar.total_art AS qty,
                            CASE WHEN ar.co_tipo = '01' OR ta.tipo_trans = '0' OR ar.co_tipo LIKE '%ENT%' OR ar.co_tipo LIKE '%IN%' THEN 'ajuste_entrada' ELSE 'ajuste_salida' END AS tipo
                     FROM saAjusteReng ar
@@ -663,6 +682,8 @@ router.get('/article-history', async (req, res) => {
                         COUNT(DISTINCT CASE WHEN tipo = 'devolucion' THEN doc_num ELSE NULL END) AS docs_devueltos,
                         SUM(CASE WHEN tipo = 'recepcion' THEN qty ELSE 0 END) AS cant_recepcionada,
                         COUNT(DISTINCT CASE WHEN tipo = 'recepcion' THEN doc_num ELSE NULL END) AS docs_recepcion,
+                        SUM(CASE WHEN tipo = 'orden_compra' THEN qty ELSE 0 END) AS cant_orden_compra,
+                        COUNT(DISTINCT CASE WHEN tipo = 'orden_compra' THEN doc_num ELSE NULL END) AS docs_orden_compra,
                         SUM(CASE WHEN tipo = 'ajuste_entrada' THEN qty ELSE 0 END) AS cant_ajuste_entrada,
                         SUM(CASE WHEN tipo = 'ajuste_salida' THEN qty ELSE 0 END) AS cant_ajuste_salida
                     FROM Movimientos
@@ -700,6 +721,49 @@ router.get('/article-history', async (req, res) => {
         request.input('end', endDate + ' 23:59:59');
 
         const result = await request.query(query);
+
+        // Consultar órdenes de compras activas pendientes para este artículo
+        const ocQuery = `
+            SELECT 
+                RTRIM(c.doc_num) AS doc_num,
+                c.fec_emis,
+                c.fec_venc,
+                RTRIM(c.co_prov) AS co_prov,
+                RTRIM(prov.prov_des) AS prov_des,
+                r.reng_num,
+                r.total_art AS cant_total,
+                r.pendiente AS cant_pendiente,
+                RTRIM(r.co_uni) AS co_uni,
+                RTRIM(c.status) AS status,
+                CASE 
+                    WHEN RTRIM(c.status) = '0' THEN 'Abierta'
+                    WHEN RTRIM(c.status) = '1' THEN 'Parcial'
+                    ELSE 'Pendiente'
+                END AS status_des
+            FROM saOrdenCompra c
+            INNER JOIN saOrdenCompraReng r ON c.doc_num = r.doc_num
+            LEFT JOIN saProveedor prov ON c.co_prov = prov.co_prov
+            WHERE r.co_art = @co_art 
+              AND c.anulado = 0 
+              AND c.status IN ('0', '1') 
+              AND r.pendiente > 0
+            ORDER BY c.fec_emis DESC
+        `;
+        const ocResult = await pool.request().input('co_art', co_art).query(ocQuery);
+        const ordenesCompraActivas = (ocResult.recordset || []).map(oc => ({
+            doc_num: oc.doc_num,
+            fec_emis: oc.fec_emis,
+            fec_venc: oc.fec_venc,
+            co_prov: oc.co_prov,
+            prov_des: oc.prov_des || oc.co_prov || 'Sin Proveedor',
+            reng_num: oc.reng_num,
+            cant_total: Number(oc.cant_total) || 0,
+            cant_pendiente: Number(oc.cant_pendiente) || 0,
+            co_uni: oc.co_uni || 'UND',
+            status: oc.status,
+            status_des: oc.status_des
+        }));
+
         const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 
         const history = result.recordset.map(row => {
@@ -733,6 +797,8 @@ router.get('/article-history', async (req, res) => {
                 docs_exitosos: Math.max(0, Number(row.docs_exitosos) || 0),
                 cant_recepcionada: Number(row.cant_recepcionada) || 0,
                 docs_recepcion: Number(row.docs_recepcion) || 0,
+                cant_orden_compra: Number(row.cant_orden_compra) || 0,
+                docs_orden_compra: Number(row.docs_orden_compra) || 0,
                 cant_ajuste_entrada: Number(row.cant_ajuste_entrada) || 0,
                 cant_ajuste_salida: Number(row.cant_ajuste_salida) || 0,
                 stock_inicial: Math.max(0, Math.round(Number(row.stock_inicial_calculado) || 0))
@@ -744,7 +810,8 @@ router.get('/article-history', async (req, res) => {
             co_art,
             server: sede,
             tipoAgrupacion,
-            history
+            history,
+            ordenes_compra: ordenesCompraActivas
         });
     } catch (error) {
         console.error(`[GET /analisis-compras/article-history]`, error);
