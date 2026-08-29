@@ -38,29 +38,103 @@ function centerCol(text, width) {
     return ' '.repeat(leftPad) + text + ' '.repeat(rightPad);
 }
 
-// POST /api/v1/impresion/probar — Probar conexión con la impresora
+// POST /api/v1/impresion/probar — Probar conexión con la impresora (Térmica, Matricial o Fiscal)
 router.post('/probar', async (req, res) => {
-    const { ip, port } = req.body;
-    const printerPort = parseInt(port || '9100');
+    const { ip, port, printer_type, serial_port } = req.body;
+    const printerPort = parseInt(port || (printer_type === 'fiscal' ? '8088' : '9100'));
 
     if (!ip) {
-        return res.status(400).json({ success: false, message: 'La IP de la impresora es requerida.' });
+        return res.status(400).json({ success: false, message: 'La IP de la impresora o equipo es requerida.' });
     }
 
-    console.log(`[IMPRESION] Probando conexión a ${ip}:${printerPort}...`);
+    // Limpiar host si el usuario ingresó barras UNC (ej. \\caja02 o \\192.168.1.50\LX350)
+    let cleanHost = ip.trim();
+    let shareName = '';
+    if (cleanHost.includes('\\') || cleanHost.includes('/')) {
+        const parts = cleanHost.replace(/^[\\\/]+/, '').split(/[\\\/]/);
+        cleanHost = parts[0];
+        if (parts.length > 1) shareName = parts[1];
+    }
+
+    // 1. Caso Impresora Fiscal (Micro-servicio HTTP en PC de caja)
+    if (printer_type === 'fiscal') {
+        console.log(`[IMPRESION FISCAL] Probando micro-servicio fiscal en http://${cleanHost}:${printerPort}/status (Puerto Serial: ${serial_port || 'COM4'})...`);
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
+            const httpRes = await fetch(`http://${cleanHost}:${printerPort}/status`, {
+                method: 'GET',
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            if (httpRes.ok) {
+                const data = await httpRes.json();
+                return res.status(200).json({
+                    success: true,
+                    message: `Micro-servicio fiscal en línea en ${cleanHost}:${printerPort}. Impresora: ${data.model || 'Tally Dascom'} (${data.port || serial_port || 'COM4'}).`,
+                    data
+                });
+            } else {
+                return res.status(200).json({
+                    success: false,
+                    message: `El micro-servicio fiscal en ${cleanHost}:${printerPort} respondió con código ${httpRes.status}.`
+                });
+            }
+        } catch (err) {
+            return res.status(200).json({
+                success: false,
+                message: `No se pudo conectar con el micro-servicio fiscal en http://${cleanHost}:${printerPort}. Verifique que esté iniciado en la PC de caja.`
+            });
+        }
+    }
+
+    // 2. Caso Impresora Matricial (Windows Compartida o Red Directa)
+    if (printer_type === 'matrix_network') {
+        console.log(`[IMPRESION MATRICIAL] Probando conexión a ${cleanHost}:${printerPort}...`);
+        const socket = new net.Socket();
+        socket.setTimeout(4000);
+
+        socket.connect(printerPort, cleanHost, () => {
+            console.log(`[IMPRESION MATRICIAL] Conexión establecida con ${cleanHost}:${printerPort}.`);
+            socket.destroy();
+            const typeLabel = printerPort === 445 
+                ? `PC '${cleanHost}' accesible en red (Recurso Windows SMB Compartido en puerto 445)` 
+                : `Impresora matricial en ${cleanHost}:${printerPort} responde correctamente`;
+            res.status(200).json({ success: true, message: typeLabel });
+        });
+
+        socket.on('error', (err) => {
+            console.error(`[IMPRESION MATRICIAL] Error conectando a ${cleanHost}:${printerPort}:`, err.message);
+            socket.destroy();
+            res.status(200).json({ 
+                success: false, 
+                message: `No se pudo conectar a ${cleanHost}:${printerPort}. (${err.message}). Si usaste el nombre del equipo, prueba ingresando su Dirección IP directa (ej. 192.168.1.X).` 
+            });
+        });
+
+        socket.on('timeout', () => {
+            console.error(`[IMPRESION MATRICIAL] Tiempo de espera agotado para ${cleanHost}:${printerPort}`);
+            socket.destroy();
+            res.status(200).json({ success: false, message: `Tiempo de espera agotado al conectar a ${cleanHost}:${printerPort}` });
+        });
+        return;
+    }
+
+    // 3. Caso Impresora Térmica (ESC/POS)
+    console.log(`[IMPRESION TERMICA] Probando conexión a ${cleanHost}:${printerPort}...`);
 
     const socket = new net.Socket();
     socket.setTimeout(4000); // 4 seconds timeout
 
-    socket.connect(printerPort, ip, () => {
-        console.log(`[IMPRESION] Conexión establecida con ${ip}:${printerPort}. Enviando inicialización...`);
+    socket.connect(printerPort, cleanHost, () => {
+        console.log(`[IMPRESION TERMICA] Conexión establecida con ${cleanHost}:${printerPort}. Enviando inicialización...`);
 
         // Enviar inicialización y un texto corto de prueba
         const testPayload = CMD_INIT + CMD_CENTER + CMD_BOLD_ON +
             "PRUEBA DE CONEXION\n" +
             "SYNC2K / PROFIT PLUS\n" +
             CMD_BOLD_OFF +
-            `IP: ${ip}:${printerPort}\n` +
+            `IP: ${cleanHost}:${printerPort}\n` +
             new Date().toLocaleString() + "\n\n\n\n" +
             CMD_CUT;
 
@@ -71,15 +145,15 @@ router.post('/probar', async (req, res) => {
     });
 
     socket.on('error', (err) => {
-        console.error(`[IMPRESION] Error conectando a ${ip}:${printerPort}:`, err.message);
+        console.error(`[IMPRESION TERMICA] Error conectando a ${cleanHost}:${printerPort}:`, err.message);
         socket.destroy();
-        res.status(200).json({ success: false, message: `No se pudo conectar a ${ip}:${printerPort}: ${err.message}` });
+        res.status(200).json({ success: false, message: `No se pudo conectar a ${cleanHost}:${printerPort}: ${err.message}` });
     });
 
     socket.on('timeout', () => {
-        console.error(`[IMPRESION] Tiempo de espera agotado para ${ip}:${printerPort}`);
+        console.error(`[IMPRESION TERMICA] Tiempo de espera agotado para ${cleanHost}:${printerPort}`);
         socket.destroy();
-        res.status(200).json({ success: false, message: `Tiempo de espera agotado al conectar a ${ip}:${printerPort}` });
+        res.status(200).json({ success: false, message: `Tiempo de espera agotado al conectar a ${cleanHost}:${printerPort}` });
     });
 });
 

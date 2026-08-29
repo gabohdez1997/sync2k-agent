@@ -7,6 +7,7 @@ tmp/
 dist/
 build/
 SQL/
+crystal_reports/
 config/servers.json
 
 # Local scratch and logs
