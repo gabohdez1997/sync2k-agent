@@ -645,8 +645,8 @@ router.post('/sync/import-master', async (req, res) => {
             try {
                 const reqU = pool.request();
                 reqU.input('Cod_Usuario', sql.Char(6), u.Cod_Usuario.padEnd(6, ' '));
-                reqU.input('Desc_Usuario', sql.VarChar(60), u.Desc_Usuario || '');
-
+                const bufPass = u.Password ? Buffer.from(String(u.Password).replace(/^0x/, ''), 'hex') : null;
+                reqU.input('Password', sql.VarBinary, bufPass);
                 reqU.input('Prioridad', sql.Decimal(18, 0), u.Prioridad || 0);
                 const sEstado = (u.Estado !== undefined && u.Estado !== null && String(u.Estado).trim() !== '') ? String(u.Estado).trim() : 'A';
                 reqU.input('Estado', sql.Char(1), sEstado);
