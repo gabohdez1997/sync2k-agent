@@ -116,17 +116,79 @@ async function getPool(serverId, sqlAuth = null) {
 }
 
 /**
- * Obtiene o crea el pool de conexión para MasterProfitPro (usado en contadas excepciones)
+ * Obtiene o crea el pool de conexión para MasterProfitPro
+ * Soporta conexión por branchId o fallback al masterConfig local
  */
 let masterPool = null;
-async function getMasterPool() {
-    if (masterPool) return masterPool;
+const masterPools = new Map();
 
-    console.log(`Conectando a MasterProfitPro (${masterConfig.server})...`);
-    const pool = new sql.ConnectionPool(masterConfig);
-    masterPool = await pool.connect();
-    console.log(`✅ Conexión MasterProfitPro establecida.`);
-    return masterPool;
+async function getMasterPool(serverId = null) {
+    if (!serverId) {
+        if (masterPool) return masterPool;
+        console.log(`Conectando a MasterProfitPro local (${masterConfig.server})...`);
+        const pool = new sql.ConnectionPool(masterConfig);
+        masterPool = await pool.connect();
+        console.log(`✅ Conexión MasterProfitPro local establecida.`);
+        return masterPool;
+    }
+
+    const poolId = String(serverId).trim();
+    if (!masterPools.has(poolId)) {
+        console.log(`🔍 [Agente DB] Buscando sql_config para MasterProfitPro en nodo: ${poolId}...`);
+        
+        let config = null;
+        let branchName = poolId;
+
+        // 1. Buscar en caché de sedes
+        const foundServer = cachedServers.find(s => 
+            String(s.id).toLowerCase() === poolId.toLowerCase() ||
+            String(s.name || '').toLowerCase() === poolId.toLowerCase() ||
+            (s.profit_server_id && String(s.profit_server_id).toLowerCase() === poolId.toLowerCase())
+        );
+
+        if (foundServer && foundServer.sql_config) {
+            config = foundServer.sql_config;
+            branchName = foundServer.name || poolId;
+        } else {
+            // 2. Consultar PostgreSQL
+            const { rows } = await pgPool.query(`SELECT name, sql_config FROM branches WHERE id = $1 AND active = true`, [poolId]);
+            if (rows.length > 0) {
+                config = rows[0].sql_config || {};
+                branchName = rows[0].name || poolId;
+            }
+        }
+
+        if (!config || (!config.host && !config.server)) {
+            throw new Error(`Nodo "${branchName}" carece de los parámetros obligatorios sql_config.host para MasterProfitPro.`);
+        }
+
+        const dbConfig = {
+            user: config.user || 'sa',
+            password: config.password,
+            server: config.host || config.server,
+            database: 'MasterProfitPro',
+            options: {
+                useUTC: false,
+                encrypt: false, 
+                trustServerCertificate: true,
+                enableArithAbort: true,
+                connectionTimeout: 10000,
+                requestTimeout: 30000
+            },
+            pool: { 
+                max: 10, 
+                min: 0, 
+                idleTimeoutMillis: 30000 
+            }
+        };
+
+        console.log(`🚀 Preparando pool SQL MasterProfitPro a -> Host: ${config.host || config.server}`);
+        const pool = new sql.ConnectionPool(dbConfig);
+        const connectedPool = await pool.connect();
+        console.log(`✅ [SQL] Conexión MasterProfitPro abierta con éxito a nodo: ${branchName}`);
+        masterPools.set(poolId, connectedPool);
+    }
+    return masterPools.get(poolId);
 }
 
 /**
@@ -136,6 +198,10 @@ async function closeAllPools() {
     for (const [id, pool] of pools.entries()) {
         await pool.close();
         pools.delete(id);
+    }
+    for (const [id, pool] of masterPools.entries()) {
+        await pool.close();
+        masterPools.delete(id);
     }
     if (masterPool) { await masterPool.close(); masterPool = null; }
     await pgPool.end();

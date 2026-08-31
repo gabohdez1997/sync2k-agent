@@ -97,8 +97,8 @@ router.post('/probar', async (req, res) => {
         socket.connect(printerPort, cleanHost, () => {
             console.log(`[IMPRESION MATRICIAL] Conexión establecida con ${cleanHost}:${printerPort}.`);
             socket.destroy();
-            const typeLabel = printerPort === 445 
-                ? `PC '${cleanHost}' accesible en red (Recurso Windows SMB Compartido en puerto 445)` 
+            const typeLabel = printerPort === 445
+                ? `PC '${cleanHost}' accesible en red (Recurso Windows SMB Compartido en puerto 445)`
                 : `Impresora matricial en ${cleanHost}:${printerPort} responde correctamente`;
             res.status(200).json({ success: true, message: typeLabel });
         });
@@ -106,9 +106,9 @@ router.post('/probar', async (req, res) => {
         socket.on('error', (err) => {
             console.error(`[IMPRESION MATRICIAL] Error conectando a ${cleanHost}:${printerPort}:`, err.message);
             socket.destroy();
-            res.status(200).json({ 
-                success: false, 
-                message: `No se pudo conectar a ${cleanHost}:${printerPort}. (${err.message}). Si usaste el nombre del equipo, prueba ingresando su Dirección IP directa (ej. 192.168.1.X).` 
+            res.status(200).json({
+                success: false,
+                message: `No se pudo conectar a ${cleanHost}:${printerPort}. (${err.message}). Si usaste el nombre del equipo, prueba ingresando su Dirección IP directa (ej. 192.168.1.X).`
             });
         });
 
@@ -349,4 +349,223 @@ router.post('/imprimir', async (req, res) => {
     }
 });
 
+// Helper para limpiar acentos, tildes y caracteres especiales para impresoras ESC/P matriciales y termicas
+function cleanAscii(str) {
+    if (!str) return '';
+    return String(str)
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // Quita tildes / diacriticos
+        .replace(/[ñ]/g, 'n')
+        .replace(/[Ñ]/g, 'N')
+        .replace(/[º°]/g, ' ')
+        .replace(/[^\x20-\x7E\n\r\t\x1b\x1d\x0c\x0f\x12]/g, '');
+}
+
+// Helper para construir el flujo de bytes ESC/P de Media Pagina (5.5" / 33 lineas) segun formato original Galpe
+function buildEscpNotaEntrega(doc) {
+    const ESC = '\x1b';
+    const INIT = ESC + '@';
+    const PAGE_LEN_33 = ESC + 'C\x21'; // 33 lineas (5.5 pulgadas a 6 LPI)
+    const CONDENSED_ON = '\x0f';
+    const CONDENSED_OFF = '\x12';
+    const BOLD_ON = ESC + 'E\x01';
+    const BOLD_OFF = ESC + 'E\x00';
+    const DRAFT = ESC + 'x\x00'; // Draft high speed
+    const FORM_FEED = '\x0c';
+
+    const W = 80; // 80 columnas estandar a 10 CPI
+
+    let out = '';
+    out += INIT + DRAFT + PAGE_LEN_33 + CONDENSED_OFF;
+
+    // Linea 1: Empresa + RIF + Nro de Pedido
+    const company = cleanAscii(doc.branch_name || 'Inversiones Galpe 2021 C.A.').toUpperCase();
+    const rif = 'R.I.F.: ' + cleanAscii(doc.branch_rif || 'J-40175035-4').toUpperCase();
+    const pedidoNum = doc.pedido_num || doc.origin_doc || doc.num_doc || '---';
+    const pedidoStr = 'PEDIDO: ' + cleanAscii(pedidoNum).toUpperCase();
+    
+    // Distribuir en 3 columnas: [Empresa] [RIF] [PEDIDO]
+    const leftPart = company.padEnd(30);
+    const midPart = rif.padEnd(25);
+    const rightPart = pedidoStr.padStart(25);
+    out += BOLD_ON + leftPart + midPart + rightPart + BOLD_OFF + '\n';
+
+    // Linea 2: Direccion Fiscal de la Empresa (Modo condensado para que quepa en 1 sola linea)
+    const fiscalDir = cleanAscii(doc.branch_address || 'CTRA NACIONAL LOS GUAYOS GUACARA CRUCE CON CLL LISBOA Y CALLE PAMPERO LOCAL GALPON NRO 13-01 SECTOR LOS GUAYOS LOS GUAYOS CARABOBO').toUpperCase();
+    out += CONDENSED_ON + fiscalDir.substring(0, 136) + CONDENSED_OFF + '\n';
+    out += '-'.repeat(W) + '\n';
+
+    // Bloque 3: Datos de Cliente (Izq) y Datos de Documento (Der)
+    const isUSD = doc.is_usd !== false;
+    const monedaStr = isUSD ? 'DOLAR' : 'BOLIVARES';
+    const condStr = cleanAscii(doc.cond_des || doc.co_cond || 'CONTADO').toUpperCase();
+    const vendStr = cleanAscii(doc.vendedor || '---').toUpperCase();
+    const fechaStr = cleanAscii(doc.fecha_emision || doc.fecha || dayjs().format('DD/MM/YYYY')).toUpperCase();
+    const docNumStr = cleanAscii(doc.doc_num || '00000000').toUpperCase();
+
+    // Renglones combinados Izq (48 chars) / Der (32 chars)
+    // L1: Cliente                                | NOTA DE ENTREGA
+    const l1_left = ('Cliente:    ' + cleanAscii(doc.cli_des || 'CLIENTE DE CONTADO')).substring(0, 48).padEnd(48);
+    const l1_right = BOLD_ON + 'NOTA DE ENTREGA'.padStart(32) + BOLD_OFF;
+    out += l1_left + l1_right + '\n';
+
+    // L2: R.I.F.                                 | 0000015925
+    const l2_left = ('R.I.F.:     ' + cleanAscii(doc.rif || '---')).substring(0, 48).padEnd(48);
+    const l2_right = BOLD_ON + docNumStr.padStart(32) + BOLD_OFF;
+    out += l2_left + l2_right + '\n';
+
+    // L3: Telefonos                              | CREDITO 15 DIAS / CONTADO
+    const l3_left = ('Telefonos:  ' + cleanAscii(doc.telefonos || '---')).substring(0, 48).padEnd(48);
+    const l3_right = condStr.padStart(32);
+    out += l3_left + l3_right + '\n';
+
+    // L4: Direccion                              | Fecha Emision: 30/05/2026
+    const l4_left = ('Direccion:  ' + cleanAscii(doc.direc1 || '---')).substring(0, 48).padEnd(48);
+    const l4_right = ('Fecha Emision: ' + fechaStr).padStart(32);
+    out += l4_left + l4_right + '\n';
+
+    // L5: Dir. Ent.                              | Vendedor: DANILUS GUTIERREZ
+    const l5_left = ('Dir. Ent.:  ' + cleanAscii(doc.dir_entrega || doc.direc1 || '---')).substring(0, 48).padEnd(48);
+    const l5_right = ('Vendedor: ' + vendStr.substring(0, 22)).padStart(32);
+    out += l5_left + l5_right + '\n';
+
+    // L6: Transporte                             | Moneda: DOLAR
+    const l6_left = ('Transporte: ' + cleanAscii(doc.transporte || 'INTERNO')).substring(0, 48).padEnd(48);
+    const l6_right = ('Moneda:   ' + monedaStr).padStart(32);
+    out += l6_left + l6_right + '\n';
+
+    out += '='.repeat(W) + '\n';
+
+    // 4. Cabecera de Articulos: [Codigo (13)] [Descripcion (37)] [Cantidad (8)] [Precio (10)] [Neto (12)] = 80
+    out += BOLD_ON;
+    out += 'Codigo'.padEnd(13) + 
+           'Descripcion'.padEnd(37) + 
+           'Cantidad'.padStart(8) + ' ' + 
+           'Precio'.padStart(9) + ' ' + 
+           'Neto'.padStart(11) + '\n';
+    out += BOLD_OFF;
+    out += '-'.repeat(W) + '\n';
+
+    // 5. Detalle de Renglones
+    const items = doc.renglones || [];
+    let totalCant = 0;
+    items.forEach(it => {
+        const cod = cleanAscii(String(it.co_art || '')).substring(0, 12).padEnd(13);
+        const desc = cleanAscii(String(it.art_des || it.des_art || '')).substring(0, 36).padEnd(37);
+        const cant = Number(it.cantidad || it.total_art || 0);
+        totalCant += cant;
+        const cantStr = cant.toFixed(2).replace('.', ',').padStart(8);
+        const precVal = Number(it.precio || it.prec_vta || it.cost_unit || 0);
+        const totVal = Number(it.total || it.reng_neto || (cant * precVal));
+        const prec = precVal.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).padStart(9);
+        const tot = totVal.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).padStart(11);
+
+        out += cod + desc + cantStr + ' ' + prec + ' ' + tot + '\n';
+    });
+
+    out += '-'.repeat(W) + '\n';
+
+    // 6. Pie de Documento y Totales
+    const totalVal = Number(doc.total_neto || doc.total || doc.total_bruto || 0);
+    const totalNeto = totalVal.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const tasa = Number(doc.tasa || 1);
+
+    // L1 Pie: Condicion / Origen a la izq | Neto a la der
+    const pieNota = condStr.includes('CREDITO') ? 'NOTA A CREDITO' : 'NOTA A CONTADO';
+    const netoRight = BOLD_ON + 'Neto: ' + totalNeto.padStart(16) + BOLD_OFF;
+    out += rowText(pieNota, netoRight, W) + '\n';
+
+    // L2 Pie: Pagina 1 de 1 a la izq | SIN DERECHO A CREDITO FISCAL a la der
+    const refBcv = (isUSD && tasa > 1) ? ` (REF. BCV: BS. ${(totalVal * tasa).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : '';
+    const legalText = 'SIN DERECHO A CREDITO FISCAL' + refBcv;
+    out += rowText('Pagina 1 de 1', legalText, W) + '\n';
+
+    // 7. Salto de media pagina fisica (5.5")
+    out += FORM_FEED;
+
+    return out;
+}
+
+// POST /api/v1/impresion/imprimir-nota-entrega — Enviar formato ESC/P a la impresora matricial
+router.post('/imprimir-nota-entrega', async (req, res) => {
+    const { printer, doc } = req.body;
+
+    if (!doc) {
+        return res.status(400).json({ success: false, message: 'Datos del documento requeridos.' });
+    }
+
+    console.log(`[IMPRESION ESC/P] Generando Nota de Entrega para N° ${doc.doc_num || 'PREVIEW'}...`);
+
+    try {
+        const escpData = buildEscpNotaEntrega(doc);
+
+        const targetIp = (printer && printer.ip_address) ? printer.ip_address.trim() : '192.168.90.207';
+        const targetPort = (printer && printer.port) ? parseInt(printer.port) : 445;
+        const targetShare = (printer && printer.share_name) ? printer.share_name.trim() : 'EPSON LX-350 ESCP-1';
+
+        // Si es Windows SMB Share (puerto 445 o contiene share_name)
+        if (targetPort === 445 || targetShare) {
+            const fs = require('fs');
+            const path = require('path');
+            const { exec } = require('child_process');
+
+            const cleanHost = targetIp.replace(/^[\\\/]+/, '').split(/[\\\/]/)[0];
+            const uncPath = `\\\\${cleanHost}\\${targetShare}`;
+            const tempFile = path.join(__dirname, `temp_ne_${Date.now()}.prn`);
+
+            fs.writeFileSync(tempFile, escpData, 'latin1');
+
+            const cmd = `cmd.exe /c copy /b "${tempFile}" "${uncPath}"`;
+            console.log(`[IMPRESION SMB] Ejecutando: ${cmd}`);
+
+            exec(cmd, (error, stdout, stderr) => {
+                try { fs.unlinkSync(tempFile); } catch (e) { }
+                if (error) {
+                    console.warn(`[IMPRESION SMB] Error en copy /b: ${error.message}. Intentando socket TCP...`);
+                    // Fallback a socket TCP
+                    sendViaSocket(cleanHost, 9100, escpData, res);
+                } else {
+                    console.log(`[IMPRESION SMB] Copiado exitoso a ${uncPath}`);
+                    return res.status(200).json({
+                        success: true,
+                        message: `Nota de Entrega enviada a impresora matricial (${uncPath}).`,
+                        stdout
+                    });
+                }
+            });
+            return;
+        }
+
+        // Si es TCP RAW directo (puerto 9100)
+        sendViaSocket(targetIp, targetPort, escpData, res);
+
+    } catch (err) {
+        console.error('[IMPRESION NOTA ENTREGA ERROR]:', err);
+        res.status(500).json({ success: false, message: 'Error procesando impresión de nota de entrega: ' + err.message });
+    }
+});
+
+function sendViaSocket(ip, port, data, res) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+
+    socket.connect(port, ip, () => {
+        socket.write(data, 'latin1', () => {
+            socket.destroy();
+            res.status(200).json({ success: true, message: `Nota de Entrega enviada por red a ${ip}:${port}.` });
+        });
+    });
+
+    socket.on('error', (err) => {
+        socket.destroy();
+        res.status(200).json({ success: false, message: `No se pudo conectar a la impresora ${ip}:${port} (${err.message}).` });
+    });
+
+    socket.on('timeout', () => {
+        socket.destroy();
+        res.status(200).json({ success: false, message: `Tiempo de espera agotado al conectar a ${ip}:${port}.` });
+    });
+}
+
 module.exports = router;
+

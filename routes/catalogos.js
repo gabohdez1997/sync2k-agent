@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers } = require('../db');
+const { sql, getPool, getMasterPool, getServers } = require('../db');
 const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse, padProfit, resolveServer } = require('../helpers/multiSede');
 
 /**
@@ -1009,6 +1009,15 @@ router.get('/stats', async (req, res) => {
         const stats = await Promise.all(servers.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
+                let userCount = 0;
+                try {
+                    const mPool = await getMasterPool(srv.id);
+                    const userRes = await mPool.request().query("SELECT COUNT(*) AS total FROM MpUsuario");
+                    userCount = Number(userRes.recordset[0]?.total) || 0;
+                } catch (eUser) {
+                    console.warn(`[STATS] No se pudo consultar MpUsuario en ${srv.name}: ${eUser.message}`);
+                }
+
                 const [artRes, cliRes, provRes, condRes] = await Promise.all([
                     pool.request().query('SELECT COUNT(*) AS total FROM saArticulo'),
                     pool.request().query('SELECT COUNT(*) AS total FROM saCliente'),
@@ -1022,6 +1031,7 @@ router.get('/stats', async (req, res) => {
                     clientes: Number(cliRes.recordset[0]?.total) || 0,
                     proveedores: Number(provRes.recordset[0]?.total) || 0,
                     condiciones_pago: Number(condRes.recordset[0]?.total) || 0,
+                    usuarios: userCount,
                     online: true
                 };
             } catch (e) {
@@ -1032,6 +1042,7 @@ router.get('/stats', async (req, res) => {
                     clientes: 0,
                     proveedores: 0,
                     condiciones_pago: 0,
+                    usuarios: 0,
                     online: false,
                     error: e.message
                 };
