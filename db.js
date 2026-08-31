@@ -124,6 +124,9 @@ const masterPools = new Map();
 
 async function getMasterPool(serverId = null) {
     if (!serverId) {
+        if (cachedServers && cachedServers.length > 0 && cachedServers[0].id) {
+            return getMasterPool(cachedServers[0].id);
+        }
         if (masterPool) return masterPool;
         console.log(`Conectando a MasterProfitPro local (${masterConfig.server})...`);
         const pool = new sql.ConnectionPool(masterConfig);

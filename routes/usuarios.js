@@ -602,12 +602,12 @@ router.post('/sync/import-master', async (req, res) => {
             try {
                 const reqM = pool.request();
                 reqM.input('co_mapa', sql.Char(6), m.co_mapa.padEnd(6, ' '));
-                reqM.input('des_mapa', sql.VarChar(60), m.des_mapa || '');
+                reqM.input('des_mapa', sql.VarChar(40), (m.des_mapa || '').slice(0, 40));
                 reqM.input('producto', sql.Char(6), (m.producto || 'ADMI').padEnd(6, ' '));
                 
-                const bufPantallas = m.pantallas ? Buffer.from(String(m.pantallas).replace(/^0x/, ''), 'hex') : null;
-                const bufReportes  = m.reportes  ? Buffer.from(String(m.reportes).replace(/^0x/, ''), 'hex') : null;
-                const bufModulos   = m.modulos   ? Buffer.from(String(m.modulos).replace(/^0x/, ''), 'hex') : null;
+                const bufPantallas = m.pantallas ? Buffer.from(String(m.pantallas).replace(/^0x/, ''), 'hex') : Buffer.alloc(0);
+                const bufReportes  = m.reportes  ? Buffer.from(String(m.reportes).replace(/^0x/, ''), 'hex')  : Buffer.alloc(0);
+                const bufModulos   = m.modulos   ? Buffer.from(String(m.modulos).replace(/^0x/, ''), 'hex')   : Buffer.alloc(0);
 
                 reqM.input('pantallas', sql.VarBinary, bufPantallas);
                 reqM.input('reportes',  sql.VarBinary, bufReportes);
@@ -624,13 +624,20 @@ router.post('/sync/import-master', async (req, res) => {
                             reportes = COALESCE(@reportes, reportes),
                             modulos = COALESCE(@modulos, modulos),
                             co_idioma = @co_idioma,
-                            liquidar = @liquidar
+                            liquidar = @liquidar,
+                            co_us_mo = 'PROFIT',
+                            fe_us_mo = GETDATE()
                         WHERE RTRIM(co_mapa) = RTRIM(@co_mapa) AND RTRIM(producto) = RTRIM(@producto)
                     END
                     ELSE
                     BEGIN
-                        INSERT INTO MpMapa (co_mapa, des_mapa, producto, pantallas, reportes, modulos, co_idioma, liquidar)
-                        VALUES (@co_mapa, @des_mapa, @producto, @pantallas, @reportes, @modulos, @co_idioma, @liquidar)
+                        INSERT INTO MpMapa (
+                            co_mapa, des_mapa, producto, pantallas, reportes, modulos, co_idioma, liquidar,
+                            co_us_in, fe_us_in, co_us_mo, fe_us_mo
+                        ) VALUES (
+                            @co_mapa, @des_mapa, @producto, @pantallas, @reportes, @modulos, @co_idioma, @liquidar,
+                            'PROFIT', GETDATE(), 'PROFIT', GETDATE()
+                        )
                     END
                 `);
                 migratedMapas++;
@@ -645,9 +652,13 @@ router.post('/sync/import-master', async (req, res) => {
             try {
                 const reqU = pool.request();
                 reqU.input('Cod_Usuario', sql.Char(6), u.Cod_Usuario.padEnd(6, ' '));
+                reqU.input('Desc_Usuario', sql.VarChar(60), (u.Desc_Usuario || '').slice(0, 60));
                 const bufPass = u.Password ? Buffer.from(String(u.Password).replace(/^0x/, ''), 'hex') : null;
                 reqU.input('Password', sql.VarBinary, bufPass);
                 reqU.input('Prioridad', sql.Decimal(18, 0), u.Prioridad || 0);
+                reqU.input('Id_Grupo', sql.VarChar(6), (u.Id_Grupo ? String(u.Id_Grupo).trim() : 'ADMIN').slice(0, 6));
+                reqU.input('Id_Idioma', sql.Char(1), (u.Id_Idioma ? String(u.Id_Idioma).trim() : 'E').slice(0, 1));
+                reqU.input('Veces', sql.Int, typeof u.Veces === 'number' ? u.Veces : 0);
                 const sEstado = (u.Estado !== undefined && u.Estado !== null && String(u.Estado).trim() !== '') ? String(u.Estado).trim() : 'A';
                 reqU.input('Estado', sql.Char(1), sEstado);
 
@@ -674,6 +685,8 @@ router.post('/sync/import-master', async (req, res) => {
                             Desc_Usuario = @Desc_Usuario,
                             Password = COALESCE(@Password, Password),
                             Prioridad = @Prioridad,
+                            Id_Grupo = COALESCE(@Id_Grupo, Id_Grupo, 'ADMIN'),
+                            Id_Idioma = COALESCE(@Id_Idioma, Id_Idioma, 'E'),
                             Estado = @Estado,
                             co_mapa = @co_mapa,
                             co_mapa_nomi = @co_mapa_nomi,
@@ -686,23 +699,29 @@ router.post('/sync/import-master', async (req, res) => {
                             Cod_Empresa_Admi = @Cod_Empresa_Admi,
                             Sucursal = @Sucursal,
                             Camb_Sucu = @Camb_Sucu,
-                            Pide_Sucu = @Pide_Sucu
+                            Pide_Sucu = @Pide_Sucu,
+                            co_us_mo = 'PROFIT',
+                            fe_us_mo = GETDATE()
                         WHERE RTRIM(Cod_Usuario) = RTRIM(@Cod_Usuario)
                     END
                     ELSE
                     BEGIN
                         INSERT INTO MpUsuario (
-                            Cod_Usuario, Desc_Usuario, Password, Prioridad, Estado,
+                            Cod_Usuario, Desc_Usuario, Password, Prioridad,
+                            Id_Grupo, Id_Idioma, Fec_Ult, Veces, Estado,
                             co_mapa, co_mapa_nomi, co_mapa_admi,
                             Acceso_Todas_Empresa, Acceso_Todas_Empresa_Nomi, Acceso_Todas_Empresa_Admi,
                             Cod_Empresa, Cod_Empresa_Nomi, Cod_Empresa_Admi,
-                            Sucursal, Camb_Sucu, Pide_Sucu
+                            Sucursal, Camb_Sucu, Pide_Sucu,
+                            co_us_in, fe_us_in, co_us_mo, fe_us_mo
                         ) VALUES (
-                            @Cod_Usuario, @Desc_Usuario, @Password, @Prioridad, @Estado,
+                            @Cod_Usuario, @Desc_Usuario, @Password, @Prioridad,
+                            COALESCE(@Id_Grupo, 'ADMIN'), COALESCE(@Id_Idioma, 'E'), GETDATE(), COALESCE(@Veces, 0), @Estado,
                             @co_mapa, @co_mapa_nomi, @co_mapa_admi,
                             @Acceso_Todas_Empresa, @Acceso_Todas_Empresa_Nomi, @Acceso_Todas_Empresa_Admi,
                             @Cod_Empresa, @Cod_Empresa_Nomi, @Cod_Empresa_Admi,
-                            @Sucursal, @Camb_Sucu, @Pide_Sucu
+                            @Sucursal, @Camb_Sucu, @Pide_Sucu,
+                            'PROFIT', GETDATE(), 'PROFIT', GETDATE()
                         )
                     END
                 `);
@@ -861,13 +880,20 @@ router.post('/sync', async (req, res) => {
                                     reportes = COALESCE(@reportes, reportes),
                                     modulos = COALESCE(@modulos, modulos),
                                     co_idioma = @co_idioma,
-                                    liquidar = @liquidar
+                                    liquidar = @liquidar,
+                                    co_us_mo = 'PROFIT',
+                                    fe_us_mo = GETDATE()
                                 WHERE RTRIM(co_mapa) = RTRIM(@co_mapa) AND RTRIM(producto) = RTRIM(@producto)
                             END
                             ELSE
                             BEGIN
-                                INSERT INTO MpMapa (co_mapa, des_mapa, producto, pantallas, reportes, modulos, co_idioma, liquidar)
-                                VALUES (@co_mapa, @des_mapa, @producto, @pantallas, @reportes, @modulos, @co_idioma, @liquidar)
+                                INSERT INTO MpMapa (
+                                    co_mapa, des_mapa, producto, pantallas, reportes, modulos, co_idioma, liquidar,
+                                    co_us_in, fe_us_in, co_us_mo, fe_us_mo
+                                ) VALUES (
+                                    @co_mapa, @des_mapa, @producto, @pantallas, @reportes, @modulos, @co_idioma, @liquidar,
+                                    'PROFIT', GETDATE(), 'PROFIT', GETDATE()
+                                )
                             END
                         `);
                         migMapas++;
@@ -879,9 +905,12 @@ router.post('/sync', async (req, res) => {
                     try {
                         const reqU = pool.request();
                         reqU.input('Cod_Usuario', sql.Char(6), u.Cod_Usuario.padEnd(6, ' '));
-                        reqU.input('Desc_Usuario', sql.VarChar(60), u.Desc_Usuario || '');
+                        reqU.input('Desc_Usuario', sql.VarChar(60), (u.Desc_Usuario || '').slice(0, 60));
                         reqU.input('Password', sql.VarBinary, u.Password);
                         reqU.input('Prioridad', sql.Decimal(18, 0), u.Prioridad || 0);
+                        reqU.input('Id_Grupo', sql.VarChar(6), (u.Id_Grupo ? String(u.Id_Grupo).trim() : 'ADMIN').slice(0, 6));
+                        reqU.input('Id_Idioma', sql.Char(1), (u.Id_Idioma ? String(u.Id_Idioma).trim() : 'E').slice(0, 1));
+                        reqU.input('Veces', sql.Int, typeof u.Veces === 'number' ? u.Veces : 0);
                         const sEstado = (u.Estado !== undefined && u.Estado !== null && String(u.Estado).trim() !== '') ? String(u.Estado).trim() : 'A';
                         reqU.input('Estado', sql.Char(1), sEstado);
 
@@ -908,6 +937,8 @@ router.post('/sync', async (req, res) => {
                                     Desc_Usuario = @Desc_Usuario,
                                     Password = COALESCE(@Password, Password),
                                     Prioridad = @Prioridad,
+                                    Id_Grupo = COALESCE(@Id_Grupo, Id_Grupo, 'ADMIN'),
+                                    Id_Idioma = COALESCE(@Id_Idioma, Id_Idioma, 'E'),
                                     Estado = @Estado,
                                     co_mapa = @co_mapa,
                                     co_mapa_nomi = @co_mapa_nomi,
@@ -920,23 +951,29 @@ router.post('/sync', async (req, res) => {
                                     Cod_Empresa_Admi = @Cod_Empresa_Admi,
                                     Sucursal = @Sucursal,
                                     Camb_Sucu = @Camb_Sucu,
-                                    Pide_Sucu = @Pide_Sucu
+                                    Pide_Sucu = @Pide_Sucu,
+                                    co_us_mo = 'PROFIT',
+                                    fe_us_mo = GETDATE()
                                 WHERE RTRIM(Cod_Usuario) = RTRIM(@Cod_Usuario)
                             END
                             ELSE
                             BEGIN
                                 INSERT INTO MpUsuario (
-                                    Cod_Usuario, Desc_Usuario, Password, Prioridad, Estado,
+                                    Cod_Usuario, Desc_Usuario, Password, Prioridad,
+                                    Id_Grupo, Id_Idioma, Fec_Ult, Veces, Estado,
                                     co_mapa, co_mapa_nomi, co_mapa_admi,
                                     Acceso_Todas_Empresa, Acceso_Todas_Empresa_Nomi, Acceso_Todas_Empresa_Admi,
                                     Cod_Empresa, Cod_Empresa_Nomi, Cod_Empresa_Admi,
-                                    Sucursal, Camb_Sucu, Pide_Sucu
+                                    Sucursal, Camb_Sucu, Pide_Sucu,
+                                    co_us_in, fe_us_in, co_us_mo, fe_us_mo
                                 ) VALUES (
-                                    @Cod_Usuario, @Desc_Usuario, @Password, @Prioridad, @Estado,
+                                    @Cod_Usuario, @Desc_Usuario, @Password, @Prioridad,
+                                    COALESCE(@Id_Grupo, 'ADMIN'), COALESCE(@Id_Idioma, 'E'), GETDATE(), COALESCE(@Veces, 0), @Estado,
                                     @co_mapa, @co_mapa_nomi, @co_mapa_admi,
                                     @Acceso_Todas_Empresa, @Acceso_Todas_Empresa_Nomi, @Acceso_Todas_Empresa_Admi,
                                     @Cod_Empresa, @Cod_Empresa_Nomi, @Cod_Empresa_Admi,
-                                    @Sucursal, @Camb_Sucu, @Pide_Sucu
+                                    @Sucursal, @Camb_Sucu, @Pide_Sucu,
+                                    'PROFIT', GETDATE(), 'PROFIT', GETDATE()
                                 )
                             END
                         `);
