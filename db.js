@@ -151,10 +151,25 @@ async function getMasterPool(serverId = null) {
             branchName = foundServer.name || poolId;
         } else {
             // 2. Consultar PostgreSQL
-            const { rows } = await pgPool.query(`SELECT name, sql_config FROM branches WHERE id = $1 AND active = true`, [poolId]);
-            if (rows.length > 0) {
-                config = rows[0].sql_config || {};
-                branchName = rows[0].name || poolId;
+            try {
+                const { rows } = await pgPool.query(`SELECT name, sql_config FROM branches WHERE id = $1 AND active = true`, [poolId]);
+                if (rows.length > 0) {
+                    config = rows[0].sql_config || {};
+                    branchName = rows[0].name || poolId;
+                }
+            } catch (ePg) {
+                console.warn(`[getMasterPool] No se pudo buscar en PG local: ${ePg.message}`);
+            }
+        }
+
+        // 3. Fallback al primer servidor configurado en este agente si no se encontró
+        if (!config || (!config.host && !config.server)) {
+            if (cachedServers && cachedServers.length > 0 && cachedServers[0].sql_config) {
+                config = cachedServers[0].sql_config;
+                branchName = cachedServers[0].name || poolId;
+            } else if (masterConfig && (masterConfig.server || masterConfig.host)) {
+                config = masterConfig;
+                branchName = masterConfig.server || poolId;
             }
         }
 
