@@ -815,7 +815,8 @@ router.get('/:co_cli/documentos', async (req, res) => {
                                FROM saFacturaVentaReng r
                                WHERE LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
                                  AND LTRIM(RTRIM(r.co_art)) LIKE '09%'
-                           ) ELSE 0 END, 0) AS base_islr_default
+                           ) ELSE 0 END, 0) AS base_islr_default,
+                            ISNULL(RTRIM(f.co_ven), RTRIM(d.co_ven)) AS co_ven
                     FROM saDocumentoVenta d
                     LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
                     WHERE LTRIM(RTRIM(d.co_cli)) = LTRIM(RTRIM(@co_cli))

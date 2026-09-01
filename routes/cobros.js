@@ -497,12 +497,38 @@ router.post('/', async (req, res) => {
             const cobNum = corrRes.docNum;
             console.log(`✨ [AGENT] Nuevo número de cobro generado: ${cobNum} (Prefijo: '${corrRes.prefijo}', ProxN: ${corrRes.proxN})`);
 
-            // 2. Insertar Cabecera de Cobro
+            // 2. Determinar el vendedor efectivo de la factura cobrada
+            let effectiveCoVen = (data.co_ven && data.co_ven.trim() !== '' && data.co_ven.trim() !== '01') ? data.co_ven.trim() : null;
+            if (!effectiveCoVen && data.renglones && Array.isArray(data.renglones) && data.renglones.length > 0) {
+                const targetLine = data.renglones.find(r => r.co_tipo_doc?.trim()?.toUpperCase() === 'FACT' || r.nro_doc);
+                if (targetLine && targetLine.nro_doc) {
+                    try {
+                        const rVen = await transaction.request()
+                            .input('nro_doc', sql.Char(20), padProfit(targetLine.nro_doc.trim(), 20))
+                            .query(`
+                                SELECT TOP 1 RTRIM(ISNULL(f.co_ven, dv.co_ven)) AS co_ven
+                                FROM saDocumentoVenta dv
+                                LEFT JOIN saFacturaVenta f ON RTRIM(dv.nro_doc) = RTRIM(f.doc_num) AND RTRIM(dv.co_tipo_doc) = 'FACT'
+                                WHERE RTRIM(dv.nro_doc) = RTRIM(@nro_doc)
+                            `);
+                        if (rVen.recordset[0]?.co_ven) {
+                            effectiveCoVen = rVen.recordset[0].co_ven.trim();
+                        }
+                    } catch (eVen) {
+                        console.warn('[COBROS] No se pudo obtener vendedor de la factura:', eVen.message);
+                    }
+                }
+            }
+            if (!effectiveCoVen) {
+                effectiveCoVen = data.co_ven || defVen;
+            }
+
+            // 2.1 Insertar Cabecera de Cobro
             const rH = new sql.Request(transaction);
             rH.input('sCob_Num', sql.Char(20), padProfit(cobNum, 20));
             rH.input('sRecibo', sql.Char(15), null);
             rH.input('sCo_cli', sql.Char(16), padProfit(data.co_cli, 16));
-            rH.input('sCo_ven', sql.Char(6), padProfit(data.co_ven || defVen, 6));
+            rH.input('sCo_ven', sql.Char(6), padProfit(effectiveCoVen, 6));
             let collectionMone = data.co_mone || 'USD';
             if (collectionMone.trim().toUpperCase() === 'US$') {
                 collectionMone = 'USD';
@@ -2046,6 +2072,47 @@ router.put('/:cob_num', async (req, res) => {
             if (transaction._aborted === false) await transaction.rollback();
             throw err;
         }
+    });
+
+    return writeResponse(res, outcome);
+});
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/cobros/sync-vendedores — Actualiza co_ven en saCobro para igualar al de sus facturas
+// ────────────────────────────────────────────────────────────────────────────
+router.post('/sync-vendedores', async (req, res) => {
+    const outcome = await aggregateWrite(req.sqlAuth, async (pool, srv) => {
+        const query = `
+            WITH TargetVen AS (
+                SELECT 
+                    cdr.cob_num,
+                    ISNULL(f.co_ven, dv.co_ven) AS target_co_ven,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cdr.cob_num 
+                        ORDER BY CASE WHEN RTRIM(cdr.co_tipo_doc) = 'FACT' THEN 0 ELSE 1 END, cdr.reng_num ASC
+                    ) AS rn
+                FROM saCobroDocReng cdr
+                LEFT JOIN saFacturaVenta f ON RTRIM(cdr.nro_doc) = RTRIM(f.doc_num) AND RTRIM(cdr.co_tipo_doc) = 'FACT'
+                LEFT JOIN saDocumentoVenta dv ON RTRIM(cdr.nro_doc) = RTRIM(dv.nro_doc) AND RTRIM(cdr.co_tipo_doc) = RTRIM(dv.co_tipo_doc)
+                WHERE (f.co_ven IS NOT NULL OR dv.co_ven IS NOT NULL)
+                  AND RTRIM(ISNULL(f.co_ven, dv.co_ven)) <> ''
+            )
+            UPDATE c
+            SET c.co_ven = tv.target_co_ven,
+                c.co_us_mo = 'PROFIT',
+                c.fe_us_mo = GETDATE()
+            FROM saCobro c
+            JOIN TargetVen tv ON c.cob_num = tv.cob_num AND tv.rn = 1
+            WHERE RTRIM(c.co_ven) <> RTRIM(tv.target_co_ven);
+        `;
+
+        const r = await pool.request().query(query);
+        return {
+            sede_id: srv.id,
+            sede_nombre: srv.name,
+            updated_cobros: r.rowsAffected[0] || 0
+        };
     });
 
     return writeResponse(res, outcome);
