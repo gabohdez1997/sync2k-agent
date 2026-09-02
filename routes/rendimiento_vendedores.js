@@ -136,6 +136,10 @@ router.get('/', async (req, res) => {
                     UNION ALL
                     SELECT fecha, co_ven, 'corte' AS tipo
                     FROM Cortes
+                    UNION ALL
+                    SELECT CAST(c.fecha AS DATE) AS fecha, LTRIM(RTRIM(c.co_ven)) AS co_ven, 'cobro' AS tipo
+                    FROM saCobro c
+                    WHERE c.anulado = 0 AND c.fecha >= @start AND c.fecha <= @end AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 )
                 SELECT 
                     CONVERT(VARCHAR(10), fecha, 120) AS fecha_str,
@@ -218,6 +222,10 @@ router.get('/', async (req, res) => {
                     UNION ALL
                     SELECT fecha, co_ven, 'corte' AS tipo
                     FROM Cortes
+                    UNION ALL
+                    SELECT CAST(c.fecha AS DATE) AS fecha, LTRIM(RTRIM(c.co_ven)) AS co_ven, 'cobro' AS tipo
+                    FROM saCobro c
+                    WHERE c.anulado = 0 AND c.fecha >= @start AND c.fecha <= @end AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 ),
                 DocSemana AS (
                     SELECT 
@@ -311,6 +319,10 @@ router.get('/', async (req, res) => {
                     UNION ALL
                     SELECT fecha, co_ven, 'corte' AS tipo
                     FROM Cortes
+                    UNION ALL
+                    SELECT CAST(c.fecha AS DATE) AS fecha, LTRIM(RTRIM(c.co_ven)) AS co_ven, 'cobro' AS tipo
+                    FROM saCobro c
+                    WHERE c.anulado = 0 AND c.fecha >= @start AND c.fecha <= @end AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 )
                 SELECT 
                     YEAR(fecha) AS anio,
@@ -447,6 +459,145 @@ router.get('/', async (req, res) => {
         if (coVen) artReq.input('co_ven', coVen);
         const artResult = await artReq.query(artDistintosQuery);
 
+        // Consulta de Cobros en USD y BS por Período y Vendedor
+        let cobrosQuery = '';
+        if (tipoAgrupacion === 'diario') {
+            cobrosQuery = `
+                ;WITH CobrosReng AS (
+                    SELECT 
+                        CAST(c.fecha AS DATE) AS fecha,
+                        LTRIM(RTRIM(c.co_ven)) AS co_ven,
+                        r.mont_doc,
+                        CASE 
+                            WHEN c.tasa > 1.000001 THEN c.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), c.fecha, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa,
+                        CASE 
+                            WHEN RTRIM(r.cod_caja) = '01' THEN 'USD'
+                            WHEN RTRIM(r.cod_caja) = '02' THEN 'BS'
+                            WHEN UPPER(RTRIM(ISNULL(r.cod_cta, ''))) IN ('ZELLE', 'USDT') THEN 'USD'
+                            ELSE 'BS'
+                        END AS moneda
+                    FROM saCobroTPReng r
+                    JOIN saCobro c ON r.cob_num = c.cob_num
+                    WHERE c.anulado = 0 
+                      AND c.fecha >= @start AND c.fecha <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
+                )
+                SELECT fecha, DAY(fecha) AS dia, MONTH(fecha) AS mes, YEAR(fecha) AS anio, co_ven,
+                       SUM(CASE WHEN moneda = 'USD' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_usd,
+                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs
+                FROM CobrosReng
+                GROUP BY fecha, co_ven
+            `;
+        } else if (tipoAgrupacion === 'semanal') {
+            cobrosQuery = `
+                ;WITH CobrosReng AS (
+                    SELECT 
+                        CAST(c.fecha AS DATE) AS fecha,
+                        LTRIM(RTRIM(c.co_ven)) AS co_ven,
+                        r.mont_doc,
+                        CASE 
+                            WHEN c.tasa > 1.000001 THEN c.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), c.fecha, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa,
+                        CASE 
+                            WHEN RTRIM(r.cod_caja) = '01' THEN 'USD'
+                            WHEN RTRIM(r.cod_caja) = '02' THEN 'BS'
+                            WHEN UPPER(RTRIM(ISNULL(r.cod_cta, ''))) IN ('ZELLE', 'USDT') THEN 'USD'
+                            ELSE 'BS'
+                        END AS moneda
+                    FROM saCobroTPReng r
+                    JOIN saCobro c ON r.cob_num = c.cob_num
+                    WHERE c.anulado = 0 
+                      AND c.fecha >= @start AND c.fecha <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
+                )
+                SELECT semana_inicio, DAY(semana_inicio) AS dia_inicio, MONTH(semana_inicio) AS mes_inicio, YEAR(semana_inicio) AS anio_inicio,
+                       DAY(DATEADD(day, 6, semana_inicio)) AS dia_fin, MONTH(DATEADD(day, 6, semana_inicio)) AS mes_fin, YEAR(DATEADD(day, 6, semana_inicio)) AS anio_fin,
+                       co_ven,
+                       SUM(CASE WHEN moneda = 'USD' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_usd,
+                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs
+                FROM (
+                    SELECT DATEADD(day, - ((DATEPART(weekday, fecha) + @@DATEFIRST - 2) % 7), fecha) AS semana_inicio, co_ven, mont_doc, tasa, moneda
+                    FROM CobrosReng
+                ) x
+                GROUP BY semana_inicio, co_ven
+            `;
+        } else {
+            // Mensual
+            cobrosQuery = `
+                ;WITH CobrosReng AS (
+                    SELECT 
+                        CAST(c.fecha AS DATE) AS fecha,
+                        LTRIM(RTRIM(c.co_ven)) AS co_ven,
+                        r.mont_doc,
+                        CASE 
+                            WHEN c.tasa > 1.000001 THEN c.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), c.fecha, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa,
+                        CASE 
+                            WHEN RTRIM(r.cod_caja) = '01' THEN 'USD'
+                            WHEN RTRIM(r.cod_caja) = '02' THEN 'BS'
+                            WHEN UPPER(RTRIM(ISNULL(r.cod_cta, ''))) IN ('ZELLE', 'USDT') THEN 'USD'
+                            ELSE 'BS'
+                        END AS moneda
+                    FROM saCobroTPReng r
+                    JOIN saCobro c ON r.cob_num = c.cob_num
+                    WHERE c.anulado = 0 
+                      AND c.fecha >= @start AND c.fecha <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
+                )
+                SELECT mes_inicio, YEAR(mes_inicio) AS anio, MONTH(mes_inicio) AS mes, co_ven,
+                       SUM(CASE WHEN moneda = 'USD' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_usd,
+                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs
+                FROM (
+                    SELECT DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1) AS mes_inicio, co_ven, mont_doc, tasa, moneda
+                    FROM CobrosReng
+                ) x
+                GROUP BY mes_inicio, co_ven
+            `;
+        }
+
+        const cobReq = pool.request();
+        cobReq.input('start', startDate);
+        cobReq.input('end', endDate + ' 23:59:59');
+        if (coVen) cobReq.input('co_ven', coVen);
+        const cobResult = await cobReq.query(cobrosQuery);
+
         const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 
         // Mapas de artículos distintos por (periodo + co_ven)
@@ -482,6 +633,32 @@ router.get('/', async (req, res) => {
             }
         });
 
+        // Mapas de cobros (USD y BS) por (periodo + co_ven)
+        const cobrosUsdMap = new Map();
+        const cobrosBsMap = new Map();
+
+        cobResult.recordset.forEach(row => {
+            let pStr = '';
+            if (tipoAgrupacion === 'diario') {
+                const dia = String(row.dia).padStart(2, '0');
+                const mes = monthNames[row.mes - 1];
+                pStr = `${dia} ${mes}`;
+            } else if (tipoAgrupacion === 'semanal') {
+                const dIni = String(row.dia_inicio).padStart(2, '0');
+                const dFin = String(row.dia_fin).padStart(2, '0');
+                if (row.mes_inicio === row.mes_fin) {
+                    pStr = `${dIni} - ${dFin} ${monthNames[row.mes_fin - 1]}`;
+                } else {
+                    pStr = `${dIni} ${monthNames[row.mes_inicio - 1]} - ${dFin} ${monthNames[row.mes_fin - 1]}`;
+                }
+            } else {
+                pStr = `${monthNames[row.mes - 1]} ${row.anio}`;
+            }
+            const key = `${pStr}_${(row.co_ven || '').trim()}`;
+            cobrosUsdMap.set(key, Number(row.cobros_usd) || 0);
+            cobrosBsMap.set(key, Number(row.cobros_bs) || 0);
+        });
+
         const rawRows = result.recordset.map(row => {
             let periodo = '';
             if (tipoAgrupacion === 'diario') {
@@ -506,6 +683,10 @@ router.get('/', async (req, res) => {
             const art_pedidos = artPedidosMap.get(artKey) || 0;
             const art_cotizados = artCotizadosMap.get(artKey) || 0;
 
+            const cobKey = `${periodo}_${cVen}`;
+            const cobros_usd = cobrosUsdMap.get(cobKey) || 0;
+            const cobros_bs = cobrosBsMap.get(cobKey) || 0;
+
             return {
                 periodo,
                 co_ven: cVen,
@@ -518,7 +699,9 @@ router.get('/', async (req, res) => {
                 cortes: Number(row.cortes) || 0,
                 art_distintos,
                 art_pedidos,
-                art_cotizados
+                art_cotizados,
+                cobros_usd,
+                cobros_bs
             };
         });
 
@@ -546,7 +729,9 @@ router.get('/', async (req, res) => {
                 cortes: 0,
                 art_distintos: 0,
                 art_pedidos: 0,
-                art_cotizados: 0
+                art_cotizados: 0,
+                cobros_usd: 0,
+                cobros_bs: 0
             });
         }
 
@@ -564,13 +749,15 @@ router.get('/', async (req, res) => {
                 item.art_distintos += r.art_distintos;
                 item.art_pedidos += r.art_pedidos;
                 item.art_cotizados += r.art_cotizados;
+                item.cobros_usd += r.cobros_usd;
+                item.cobros_bs += r.cobros_bs;
             }
         }
 
         // Si se filtró por un vendedor específico y es vista diaria, excluimos días donde ese vendedor tuvo 0 docs
         let timeline = Array.from(mainTimelineMap.values());
         if (coVen && tipoAgrupacion === 'diario') {
-            timeline = timeline.filter(t => (t.facturas + t.cotizaciones + t.pedidos + t.devoluciones + t.fletes + t.cortes + t.art_distintos + t.art_pedidos + t.art_cotizados) > 0);
+            timeline = timeline.filter(t => (t.facturas + t.cotizaciones + t.pedidos + t.devoluciones + t.fletes + t.cortes + t.art_distintos + t.art_pedidos + t.art_cotizados + t.cobros_usd + t.cobros_bs) > 0);
         }
 
         // Totales acumulados
@@ -585,8 +772,10 @@ router.get('/', async (req, res) => {
             acc.art_distintos += m.art_distintos;
             acc.art_pedidos += m.art_pedidos;
             acc.art_cotizados += m.art_cotizados;
+            acc.cobros_usd += m.cobros_usd;
+            acc.cobros_bs += m.cobros_bs;
             return acc;
-        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0, art_distintos: 0, art_pedidos: 0, art_cotizados: 0 });
+        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0, art_distintos: 0, art_pedidos: 0, art_cotizados: 0, cobros_usd: 0, cobros_bs: 0 });
 
         // Rankings de variedad por asesor (Facturas, Pedidos, Cotizaciones)
         let rankingVendedores = [];
@@ -777,6 +966,83 @@ router.get('/', async (req, res) => {
             console.warn('[rendimiento-vendedores] Error calculando rankings de variedad:', rankErr.message);
         }
 
+        // Rankings de Cobros en USD y BS por Asesor
+        let rankingCobrosUsd = [];
+        let rankingCobrosBs = [];
+        let totalCobrosUsdGlobal = 0;
+        let totalCobrosBsGlobal = 0;
+
+        try {
+            const rankingCobrosQuery = `
+                ;WITH CobrosTotales AS (
+                    SELECT 
+                        LTRIM(RTRIM(c.co_ven)) AS co_ven,
+                        r.mont_doc,
+                        CASE 
+                            WHEN c.tasa > 1.000001 THEN c.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), c.fecha, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa,
+                        CASE 
+                            WHEN RTRIM(r.cod_caja) = '01' THEN 'USD'
+                            WHEN RTRIM(r.cod_caja) = '02' THEN 'BS'
+                            WHEN UPPER(RTRIM(ISNULL(r.cod_cta, ''))) IN ('ZELLE', 'USDT') THEN 'USD'
+                            ELSE 'BS'
+                        END AS moneda
+                    FROM saCobroTPReng r
+                    JOIN saCobro c ON r.cob_num = c.cob_num
+                    WHERE c.anulado = 0 
+                      AND c.fecha >= @start AND c.fecha <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
+                )
+                SELECT 
+                    a.co_ven,
+                    RTRIM(ISNULL(u.desc_usuario, ISNULL(v.ven_des, a.co_ven))) AS ven_des,
+                    SUM(CASE WHEN a.moneda = 'USD' THEN (a.mont_doc / NULLIF(a.tasa, 0)) ELSE 0 END) AS total_usd,
+                    SUM(CASE WHEN a.moneda = 'BS' THEN a.mont_doc ELSE 0 END) AS total_bs,
+                    MAX(CASE 
+                        WHEN CAST(ISNULL(v.inactivo, 0) AS INT) = 1 OR LTRIM(RTRIM(CAST(ISNULL(v.inactivo, 0) AS VARCHAR(10)))) = '1' THEN 1
+                        WHEN UPPER(LTRIM(RTRIM(ISNULL(u.Estado, '')))) = 'I' THEN 1 
+                        ELSE 0 
+                    END) AS inactivo
+                FROM CobrosTotales a
+                LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(a.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
+                LEFT JOIN saVendedor v ON UPPER(LTRIM(RTRIM(a.co_ven))) = UPPER(LTRIM(RTRIM(v.co_ven)))
+                GROUP BY a.co_ven, u.desc_usuario, v.ven_des
+            `;
+            const cobRankReq = pool.request();
+            cobRankReq.input('start', startDate);
+            cobRankReq.input('end', endDate + ' 23:59:59');
+            if (coVen) cobRankReq.input('co_ven', coVen);
+            const cobRankRes = await cobRankReq.query(rankingCobrosQuery);
+
+            const allCobRows = cobRankRes.recordset.map(r => ({
+                co_ven: r.co_ven,
+                ven_des: (r.ven_des || r.co_ven || '').trim().toUpperCase(),
+                total_usd: Number(r.total_usd) || 0,
+                total_bs: Number(r.total_bs) || 0,
+                inactivo: Number(r.inactivo) === 1
+            }));
+
+            rankingCobrosUsd = [...allCobRows].sort((a, b) => b.total_usd - a.total_usd);
+            rankingCobrosBs = [...allCobRows].sort((a, b) => b.total_bs - a.total_bs);
+
+            totalCobrosUsdGlobal = allCobRows.reduce((acc, r) => acc + r.total_usd, 0);
+            totalCobrosBsGlobal = allCobRows.reduce((acc, r) => acc + r.total_bs, 0);
+        } catch (cobRankErr) {
+            console.warn('[rendimiento-vendedores] Error calculando rankings de cobros:', cobRankErr.message);
+        }
+
         // Lista de vendedores activos en el período cruzados con MasterProfitPro.dbo.MpUsuario
         let vendedores = [];
         try {
@@ -792,6 +1058,8 @@ router.get('/', async (req, res) => {
                     SELECT co_ven, doc_num FROM saPedidoVenta WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
                     UNION ALL
                     SELECT co_ven, doc_num FROM saDevolucionCliente WHERE anulado = 0 AND fec_emis >= @start AND fec_emis <= @end
+                    UNION ALL
+                    SELECT co_ven, cob_num AS doc_num FROM saCobro WHERE anulado = 0 AND fecha >= @start AND fecha <= @end
                     UNION ALL
                     SELECT co_ven, NULL AS doc_num FROM saVendedor
                 )
@@ -839,10 +1107,14 @@ router.get('/', async (req, res) => {
             rankingVendedores,
             rankingArtPedidos,
             rankingArtCotizados,
+            rankingCobrosUsd,
+            rankingCobrosBs,
             totalArticulosActivos,
             totalArticulosDistintosGlobal,
             totalArtPedidosGlobal,
-            totalArtCotizadosGlobal
+            totalArtCotizadosGlobal,
+            totalCobrosUsdGlobal,
+            totalCobrosBsGlobal
         });
 
     } catch (error) {
