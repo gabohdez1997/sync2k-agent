@@ -497,7 +497,8 @@ router.get('/', async (req, res) => {
                 )
                 SELECT fecha, DAY(fecha) AS dia, MONTH(fecha) AS mes, YEAR(fecha) AS anio, co_ven,
                        SUM(CASE WHEN moneda = 'USD' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_usd,
-                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs
+                       SUM(CASE WHEN moneda = 'BS' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_bs,
+                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs_monto
                 FROM CobrosReng
                 GROUP BY fecha, co_ven
             `;
@@ -539,7 +540,8 @@ router.get('/', async (req, res) => {
                        DAY(DATEADD(day, 6, semana_inicio)) AS dia_fin, MONTH(DATEADD(day, 6, semana_inicio)) AS mes_fin, YEAR(DATEADD(day, 6, semana_inicio)) AS anio_fin,
                        co_ven,
                        SUM(CASE WHEN moneda = 'USD' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_usd,
-                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs
+                       SUM(CASE WHEN moneda = 'BS' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_bs,
+                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs_monto
                 FROM (
                     SELECT DATEADD(day, - ((DATEPART(weekday, fecha) + @@DATEFIRST - 2) % 7), fecha) AS semana_inicio, co_ven, mont_doc, tasa, moneda
                     FROM CobrosReng
@@ -583,7 +585,8 @@ router.get('/', async (req, res) => {
                 )
                 SELECT mes_inicio, YEAR(mes_inicio) AS anio, MONTH(mes_inicio) AS mes, co_ven,
                        SUM(CASE WHEN moneda = 'USD' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_usd,
-                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs
+                       SUM(CASE WHEN moneda = 'BS' THEN (mont_doc / NULLIF(tasa, 0)) ELSE 0 END) AS cobros_bs,
+                       SUM(CASE WHEN moneda = 'BS' THEN mont_doc ELSE 0 END) AS cobros_bs_monto
                 FROM (
                     SELECT DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1) AS mes_inicio, co_ven, mont_doc, tasa, moneda
                     FROM CobrosReng
@@ -636,6 +639,7 @@ router.get('/', async (req, res) => {
         // Mapas de cobros (USD y BS) por (periodo + co_ven)
         const cobrosUsdMap = new Map();
         const cobrosBsMap = new Map();
+        const cobrosBsMontoMap = new Map();
 
         cobResult.recordset.forEach(row => {
             let pStr = '';
@@ -657,6 +661,7 @@ router.get('/', async (req, res) => {
             const key = `${pStr}_${(row.co_ven || '').trim()}`;
             cobrosUsdMap.set(key, Number(row.cobros_usd) || 0);
             cobrosBsMap.set(key, Number(row.cobros_bs) || 0);
+            cobrosBsMontoMap.set(key, Number(row.cobros_bs_monto) || 0);
         });
 
         const rawRows = result.recordset.map(row => {
@@ -686,6 +691,7 @@ router.get('/', async (req, res) => {
             const cobKey = `${periodo}_${cVen}`;
             const cobros_usd = cobrosUsdMap.get(cobKey) || 0;
             const cobros_bs = cobrosBsMap.get(cobKey) || 0;
+            const cobros_bs_monto = cobrosBsMontoMap.get(cobKey) || 0;
 
             return {
                 periodo,
@@ -701,7 +707,8 @@ router.get('/', async (req, res) => {
                 art_pedidos,
                 art_cotizados,
                 cobros_usd,
-                cobros_bs
+                cobros_bs,
+                cobros_bs_monto
             };
         });
 
@@ -731,7 +738,8 @@ router.get('/', async (req, res) => {
                 art_pedidos: 0,
                 art_cotizados: 0,
                 cobros_usd: 0,
-                cobros_bs: 0
+                cobros_bs: 0,
+                cobros_bs_monto: 0
             });
         }
 
@@ -751,6 +759,7 @@ router.get('/', async (req, res) => {
                 item.art_cotizados += r.art_cotizados;
                 item.cobros_usd += r.cobros_usd;
                 item.cobros_bs += r.cobros_bs;
+                item.cobros_bs_monto += r.cobros_bs_monto;
             }
         }
 
@@ -774,8 +783,9 @@ router.get('/', async (req, res) => {
             acc.art_cotizados += m.art_cotizados;
             acc.cobros_usd += m.cobros_usd;
             acc.cobros_bs += m.cobros_bs;
+            acc.cobros_bs_monto += m.cobros_bs_monto;
             return acc;
-        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0, art_distintos: 0, art_pedidos: 0, art_cotizados: 0, cobros_usd: 0, cobros_bs: 0 });
+        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0, art_distintos: 0, art_pedidos: 0, art_cotizados: 0, cobros_usd: 0, cobros_bs: 0, cobros_bs_monto: 0 });
 
         // Rankings de variedad por asesor (Facturas, Pedidos, Cotizaciones)
         let rankingVendedores = [];
@@ -970,6 +980,7 @@ router.get('/', async (req, res) => {
         let rankingCobrosUsd = [];
         let rankingCobrosBs = [];
         let totalCobrosUsdGlobal = 0;
+        let totalCobrosBsUsdGlobal = 0;
         let totalCobrosBsGlobal = 0;
 
         try {
@@ -1009,6 +1020,7 @@ router.get('/', async (req, res) => {
                     a.co_ven,
                     RTRIM(ISNULL(u.desc_usuario, ISNULL(v.ven_des, a.co_ven))) AS ven_des,
                     SUM(CASE WHEN a.moneda = 'USD' THEN (a.mont_doc / NULLIF(a.tasa, 0)) ELSE 0 END) AS total_usd,
+                    SUM(CASE WHEN a.moneda = 'BS' THEN (a.mont_doc / NULLIF(a.tasa, 0)) ELSE 0 END) AS total_bs_usd,
                     SUM(CASE WHEN a.moneda = 'BS' THEN a.mont_doc ELSE 0 END) AS total_bs,
                     MAX(CASE 
                         WHEN CAST(ISNULL(v.inactivo, 0) AS INT) = 1 OR LTRIM(RTRIM(CAST(ISNULL(v.inactivo, 0) AS VARCHAR(10)))) = '1' THEN 1
@@ -1030,14 +1042,18 @@ router.get('/', async (req, res) => {
                 co_ven: r.co_ven,
                 ven_des: (r.ven_des || r.co_ven || '').trim().toUpperCase(),
                 total_usd: Number(r.total_usd) || 0,
+                total_bs_usd: Number(r.total_bs_usd) || 0,
                 total_bs: Number(r.total_bs) || 0,
+                cobros_bs: Number(r.total_bs_usd) || 0,
+                cobros_bs_monto: Number(r.total_bs) || 0,
                 inactivo: Number(r.inactivo) === 1
             }));
 
             rankingCobrosUsd = [...allCobRows].sort((a, b) => b.total_usd - a.total_usd);
-            rankingCobrosBs = [...allCobRows].sort((a, b) => b.total_bs - a.total_bs);
+            rankingCobrosBs = [...allCobRows].sort((a, b) => b.total_bs_usd - a.total_bs_usd);
 
             totalCobrosUsdGlobal = allCobRows.reduce((acc, r) => acc + r.total_usd, 0);
+            totalCobrosBsUsdGlobal = allCobRows.reduce((acc, r) => acc + r.total_bs_usd, 0);
             totalCobrosBsGlobal = allCobRows.reduce((acc, r) => acc + r.total_bs, 0);
         } catch (cobRankErr) {
             console.warn('[rendimiento-vendedores] Error calculando rankings de cobros:', cobRankErr.message);
@@ -1114,6 +1130,7 @@ router.get('/', async (req, res) => {
             totalArtPedidosGlobal,
             totalArtCotizadosGlobal,
             totalCobrosUsdGlobal,
+            totalCobrosBsUsdGlobal,
             totalCobrosBsGlobal
         });
 
