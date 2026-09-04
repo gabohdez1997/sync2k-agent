@@ -1033,7 +1033,7 @@ router.post('/import-batch', async (req, res) => {
                 r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
                 r.input('sLic_Tipo', sql.Char(1), null);
                 r.input('bPrec_Om', sql.Bit, 0);
-                r.input('sComentario', sql.VarChar(sql.MAX), 'Migrado vía Sincronización');
+                r.input('sComentario', sql.VarChar(sql.MAX), null);
                 r.input('sTipo_Cos', sql.Char(4), '1');
                 r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
                 r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
@@ -1522,6 +1522,7 @@ router.post('/', async (req, res) => {
                         relac_unidad = 0,
                         revisado = NULL,
                         trasnfe = NULL,
+                        comentario = NULL,
                         campo1 = NULL, campo2 = NULL, campo3 = NULL, campo4 = NULL,
                         campo5 = NULL, campo6 = NULL, campo7 = NULL, campo8 = NULL
                     WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
@@ -1659,7 +1660,7 @@ router.put('/:co_art', async (req, res) => {
             r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
             r.input('sLic_Tipo', sql.Char(1), null);
             r.input('bPrec_Om', sql.Bit, 0);
-            r.input('sComentario', sql.VarChar(sql.MAX), isNew ? 'Creado via API' : 'Editado via API');
+            r.input('sComentario', sql.VarChar(sql.MAX), null);
             r.input('sTipo_Cos', sql.Char(4), isNew ? '1' : (data.tipo_cos || row.tipo_cos || '1'));
             r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
             r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
@@ -1717,7 +1718,6 @@ router.put('/:co_art', async (req, res) => {
                 .input('user', sql.Char(6), auditUser)
                 .input('is_new', sql.Bit, isNew ? 1 : 0)
                 .input('ubic', sql.Char(6), isNew ? defaultUbic : (data.co_ubicacion || null))
-                .input('comentario', sql.VarChar(sql.MAX), isNew ? 'Creado via API' : 'Editado via API')
                 .query(`
                     UPDATE saArticulo SET
                         revisado   = NULL,
@@ -1732,7 +1732,7 @@ router.put('/:co_art', async (req, res) => {
                         co_us_mo   = @user,
                         fe_us_mo   = GETDATE(),
                         relac_unidad = 0,
-                        comentario = @comentario,
+                        comentario = NULL,
                         campo1 = NULL, campo2 = NULL, campo3 = NULL, campo4 = NULL,
                         campo5 = NULL, campo6 = NULL, campo7 = NULL, campo8 = NULL,
                         co_ubicacion = CASE 
@@ -2446,7 +2446,7 @@ router.post('/sync', async (req, res) => {
                     r.input('deLic_Grado_Al', sql.Decimal(18, 5), 0);
                     r.input('sLic_Tipo', sql.Char(1), null);
                     r.input('bPrec_Om', sql.Bit, 0);
-                    r.input('sComentario', sql.VarChar(sql.MAX), 'Migrado vía Sincronización');
+                    r.input('sComentario', sql.VarChar(sql.MAX), null);
                     r.input('sTipo_Cos', sql.Char(4), '1');
                     r.input('dePorc_Margen_Minimo', sql.Decimal(18, 5), 0);
                     r.input('dePorc_Margen_Maximo', sql.Decimal(18, 5), 0);
