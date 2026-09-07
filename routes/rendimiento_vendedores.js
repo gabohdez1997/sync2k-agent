@@ -29,6 +29,7 @@ router.get('/', async (req, res) => {
         const startDate = req.query.startDate || new Date(new Date().setDate(new Date().getDate() - 30)).toISOString().split('T')[0];
         const endDate = req.query.endDate || new Date().toISOString().split('T')[0];
         const coVen = (req.query.co_ven || '').trim();
+        const coSucu = (req.query.co_sucu || '').trim();
 
         const servers = getServers();
         if (sede === 'default') {
@@ -40,6 +41,22 @@ router.get('/', async (req, res) => {
         }
 
         const pool = await getPool(sede, req.sqlAuth);
+
+        // Consultar sucursales de la sede activa
+        let sucursales = [];
+        try {
+            const sucuRes = await pool.request().query(`
+                SELECT LTRIM(RTRIM(co_sucur)) AS co_sucu, LTRIM(RTRIM(sucur_des)) AS sucur_des 
+                FROM saSucursal
+                ORDER BY co_sucur
+            `);
+            sucursales = sucuRes.recordset.map(s => ({
+                co_sucu: (s.co_sucu || '').trim(),
+                sucur_des: (s.sucur_des || '').trim()
+            }));
+        } catch (sucuErr) {
+            console.warn('[rendimiento-vendedores] Error consultando saSucursal:', sucuErr.message);
+        }
 
         // Extraer año, mes y día para calcular la granularidad
         const sParts = startDate.split('-').map(Number);
@@ -493,6 +510,7 @@ router.get('/', async (req, res) => {
                     WHERE c.anulado = 0 
                       AND c.fecha >= @start AND c.fecha <= @end
                       ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(c.co_sucu_in)) = @co_sucu' : ''}
                       AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 )
                 SELECT fecha, DAY(fecha) AS dia, MONTH(fecha) AS mes, YEAR(fecha) AS anio, co_ven,
@@ -534,6 +552,7 @@ router.get('/', async (req, res) => {
                     WHERE c.anulado = 0 
                       AND c.fecha >= @start AND c.fecha <= @end
                       ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(c.co_sucu_in)) = @co_sucu' : ''}
                       AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 )
                 SELECT semana_inicio, DAY(semana_inicio) AS dia_inicio, MONTH(semana_inicio) AS mes_inicio, YEAR(semana_inicio) AS anio_inicio,
@@ -581,6 +600,7 @@ router.get('/', async (req, res) => {
                     WHERE c.anulado = 0 
                       AND c.fecha >= @start AND c.fecha <= @end
                       ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(c.co_sucu_in)) = @co_sucu' : ''}
                       AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 )
                 SELECT mes_inicio, YEAR(mes_inicio) AS anio, MONTH(mes_inicio) AS mes, co_ven,
@@ -599,7 +619,151 @@ router.get('/', async (req, res) => {
         cobReq.input('start', startDate);
         cobReq.input('end', endDate + ' 23:59:59');
         if (coVen) cobReq.input('co_ven', coVen);
+        if (coSucu) cobReq.input('co_sucu', coSucu);
         const cobResult = await cobReq.query(cobrosQuery);
+
+        // Consulta de Facturación en USD por Período y Vendedor (facturas exitosas: anulado = 0 y sin devoluciones)
+        let facturadoQuery = '';
+        if (tipoAgrupacion === 'diario') {
+            facturadoQuery = `
+                ;WITH FacturasReng AS (
+                    SELECT 
+                        CAST(f.fec_emis AS DATE) AS fecha,
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven,
+                        f.total_neto,
+                        CASE 
+                            WHEN f.tasa > 1.000001 THEN f.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), f.fec_emis, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa
+                    FROM saFacturaVenta f
+                    WHERE f.anulado = 0 
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(f.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(f.co_sucu_in)) = @co_sucu' : ''}
+                      AND f.co_ven IS NOT NULL AND RTRIM(f.co_ven) <> ''
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                )
+                SELECT fecha, DAY(fecha) AS dia, MONTH(fecha) AS mes, YEAR(fecha) AS anio, co_ven,
+                       SUM(total_neto / NULLIF(tasa, 0)) AS facturado_usd
+                FROM FacturasReng
+                GROUP BY fecha, co_ven
+            `;
+        } else if (tipoAgrupacion === 'semanal') {
+            facturadoQuery = `
+                ;WITH FacturasReng AS (
+                    SELECT 
+                        CAST(f.fec_emis AS DATE) AS fecha,
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven,
+                        f.total_neto,
+                        CASE 
+                            WHEN f.tasa > 1.000001 THEN f.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), f.fec_emis, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa
+                    FROM saFacturaVenta f
+                    WHERE f.anulado = 0 
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(f.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(f.co_sucu_in)) = @co_sucu' : ''}
+                      AND f.co_ven IS NOT NULL AND RTRIM(f.co_ven) <> ''
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                )
+                SELECT semana_inicio, DAY(semana_inicio) AS dia_inicio, MONTH(semana_inicio) AS mes_inicio, YEAR(semana_inicio) AS anio_inicio,
+                       DAY(DATEADD(day, 6, semana_inicio)) AS dia_fin, MONTH(DATEADD(day, 6, semana_inicio)) AS mes_fin, YEAR(DATEADD(day, 6, semana_inicio)) AS anio_fin,
+                       co_ven,
+                       SUM(total_neto / NULLIF(tasa, 0)) AS facturado_usd
+                FROM (
+                    SELECT DATEADD(day, - ((DATEPART(weekday, fecha) + @@DATEFIRST - 2) % 7), fecha) AS semana_inicio, co_ven, total_neto, tasa
+                    FROM FacturasReng
+                ) x
+                GROUP BY semana_inicio, co_ven
+            `;
+        } else {
+            // Mensual
+            facturadoQuery = `
+                ;WITH FacturasReng AS (
+                    SELECT 
+                        CAST(f.fec_emis AS DATE) AS fecha,
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven,
+                        f.total_neto,
+                        CASE 
+                            WHEN f.tasa > 1.000001 THEN f.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), f.fec_emis, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa
+                    FROM saFacturaVenta f
+                    WHERE f.anulado = 0 
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(f.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(f.co_sucu_in)) = @co_sucu' : ''}
+                      AND f.co_ven IS NOT NULL AND RTRIM(f.co_ven) <> ''
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                )
+                SELECT mes_inicio, YEAR(mes_inicio) AS anio, MONTH(mes_inicio) AS mes, co_ven,
+                       SUM(total_neto / NULLIF(tasa, 0)) AS facturado_usd
+                FROM (
+                    SELECT DATEFROMPARTS(YEAR(fecha), MONTH(fecha), 1) AS mes_inicio, co_ven, total_neto, tasa
+                    FROM FacturasReng
+                ) x
+                GROUP BY mes_inicio, co_ven
+            `;
+        }
+
+        const factReq = pool.request();
+        factReq.input('start', startDate);
+        factReq.input('end', endDate + ' 23:59:59');
+        if (coVen) factReq.input('co_ven', coVen);
+        if (coSucu) factReq.input('co_sucu', coSucu);
+        const factResult = await factReq.query(facturadoQuery);
 
         const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 
@@ -664,6 +828,34 @@ router.get('/', async (req, res) => {
             cobrosBsMontoMap.set(key, Number(row.cobros_bs_monto) || 0);
         });
 
+        // Mapas de facturación (USD y BS) por (periodo + co_ven)
+        const facturadoUsdMap = new Map();
+        const facturadoBsMap = new Map();
+        const facturadoBsMontoMap = new Map();
+
+        factResult.recordset.forEach(row => {
+            let pStr = '';
+            if (tipoAgrupacion === 'diario') {
+                const dia = String(row.dia).padStart(2, '0');
+                const mes = monthNames[row.mes - 1];
+                pStr = `${dia} ${mes}`;
+            } else if (tipoAgrupacion === 'semanal') {
+                const dIni = String(row.dia_inicio).padStart(2, '0');
+                const dFin = String(row.dia_fin).padStart(2, '0');
+                if (row.mes_inicio === row.mes_fin) {
+                    pStr = `${dIni} - ${dFin} ${monthNames[row.mes_fin - 1]}`;
+                } else {
+                    pStr = `${dIni} ${monthNames[row.mes_inicio - 1]} - ${dFin} ${monthNames[row.mes_fin - 1]}`;
+                }
+            } else {
+                pStr = `${monthNames[row.mes - 1]} ${row.anio}`;
+            }
+            const key = `${pStr}_${(row.co_ven || '').trim()}`;
+            facturadoUsdMap.set(key, Number(row.facturado_usd) || 0);
+            facturadoBsMap.set(key, Number(row.facturado_bs) || 0);
+            facturadoBsMontoMap.set(key, Number(row.facturado_bs_monto) || 0);
+        });
+
         const rawRows = result.recordset.map(row => {
             let periodo = '';
             if (tipoAgrupacion === 'diario') {
@@ -693,6 +885,11 @@ router.get('/', async (req, res) => {
             const cobros_bs = cobrosBsMap.get(cobKey) || 0;
             const cobros_bs_monto = cobrosBsMontoMap.get(cobKey) || 0;
 
+            const factKey = `${periodo}_${cVen}`;
+            const facturado_usd = facturadoUsdMap.get(factKey) || 0;
+            const facturado_bs = facturadoBsMap.get(factKey) || 0;
+            const facturado_bs_monto = facturadoBsMontoMap.get(factKey) || 0;
+
             return {
                 periodo,
                 co_ven: cVen,
@@ -708,7 +905,10 @@ router.get('/', async (req, res) => {
                 art_cotizados,
                 cobros_usd,
                 cobros_bs,
-                cobros_bs_monto
+                cobros_bs_monto,
+                facturado_usd,
+                facturado_bs,
+                facturado_bs_monto
             };
         });
 
@@ -739,7 +939,10 @@ router.get('/', async (req, res) => {
                 art_cotizados: 0,
                 cobros_usd: 0,
                 cobros_bs: 0,
-                cobros_bs_monto: 0
+                cobros_bs_monto: 0,
+                facturado_usd: 0,
+                facturado_bs: 0,
+                facturado_bs_monto: 0
             });
         }
 
@@ -760,13 +963,16 @@ router.get('/', async (req, res) => {
                 item.cobros_usd += r.cobros_usd;
                 item.cobros_bs += r.cobros_bs;
                 item.cobros_bs_monto += r.cobros_bs_monto;
+                item.facturado_usd += r.facturado_usd;
+                item.facturado_bs += r.facturado_bs;
+                item.facturado_bs_monto += r.facturado_bs_monto;
             }
         }
 
         // Si se filtró por un vendedor específico y es vista diaria, excluimos días donde ese vendedor tuvo 0 docs
         let timeline = Array.from(mainTimelineMap.values());
         if (coVen && tipoAgrupacion === 'diario') {
-            timeline = timeline.filter(t => (t.facturas + t.cotizaciones + t.pedidos + t.devoluciones + t.fletes + t.cortes + t.art_distintos + t.art_pedidos + t.art_cotizados + t.cobros_usd + t.cobros_bs) > 0);
+            timeline = timeline.filter(t => (t.facturas + t.cotizaciones + t.pedidos + t.devoluciones + t.fletes + t.cortes + t.art_distintos + t.art_pedidos + t.art_cotizados + t.cobros_usd + t.cobros_bs + t.facturado_usd + t.facturado_bs) > 0);
         }
 
         // Totales acumulados
@@ -784,8 +990,11 @@ router.get('/', async (req, res) => {
             acc.cobros_usd += m.cobros_usd;
             acc.cobros_bs += m.cobros_bs;
             acc.cobros_bs_monto += m.cobros_bs_monto;
+            acc.facturado_usd += m.facturado_usd;
+            acc.facturado_bs += m.facturado_bs;
+            acc.facturado_bs_monto += m.facturado_bs_monto;
             return acc;
-        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0, art_distintos: 0, art_pedidos: 0, art_cotizados: 0, cobros_usd: 0, cobros_bs: 0, cobros_bs_monto: 0 });
+        }, { facturas: 0, devoluciones: 0, docs_exitosos: 0, cotizaciones: 0, pedidos: 0, fletes: 0, cortes: 0, art_distintos: 0, art_pedidos: 0, art_cotizados: 0, cobros_usd: 0, cobros_bs: 0, cobros_bs_monto: 0, facturado_usd: 0, facturado_bs: 0, facturado_bs_monto: 0 });
 
         // Rankings de variedad por asesor (Facturas, Pedidos, Cotizaciones)
         let rankingVendedores = [];
@@ -1014,6 +1223,7 @@ router.get('/', async (req, res) => {
                     WHERE c.anulado = 0 
                       AND c.fecha >= @start AND c.fecha <= @end
                       ${coVen ? 'AND LTRIM(RTRIM(c.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(c.co_sucu_in)) = @co_sucu' : ''}
                       AND c.co_ven IS NOT NULL AND RTRIM(c.co_ven) <> ''
                 )
                 SELECT 
@@ -1036,6 +1246,7 @@ router.get('/', async (req, res) => {
             cobRankReq.input('start', startDate);
             cobRankReq.input('end', endDate + ' 23:59:59');
             if (coVen) cobRankReq.input('co_ven', coVen);
+            if (coSucu) cobRankReq.input('co_sucu', coSucu);
             const cobRankRes = await cobRankReq.query(rankingCobrosQuery);
 
             const allCobRows = cobRankRes.recordset.map(r => ({
@@ -1057,6 +1268,80 @@ router.get('/', async (req, res) => {
             totalCobrosBsGlobal = allCobRows.reduce((acc, r) => acc + r.total_bs, 0);
         } catch (cobRankErr) {
             console.warn('[rendimiento-vendedores] Error calculando rankings de cobros:', cobRankErr.message);
+        }
+
+        // Ranking de Facturación en USD por Asesor (facturas exitosas: anulado = 0 y sin devoluciones, tasa convertida a USD)
+        let rankingFacturadoUsd = [];
+        let totalFacturadoUsdGlobal = 0;
+
+        try {
+            const rankingFacturadoQuery = `
+                ;WITH FacturasTotales AS (
+                    SELECT 
+                        LTRIM(RTRIM(f.co_ven)) AS co_ven,
+                        f.total_neto,
+                        CASE 
+                            WHEN f.tasa > 1.000001 THEN f.tasa
+                            ELSE ISNULL(
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                   AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), f.fec_emis, 120) 
+                                 ORDER BY t.fecha DESC),
+                                (SELECT TOP 1 t.tasa_v 
+                                 FROM saTasa t 
+                                 WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US', '$') 
+                                 ORDER BY t.fecha DESC)
+                            )
+                        END AS tasa
+                    FROM saFacturaVenta f
+                    WHERE f.anulado = 0 
+                      AND f.fec_emis >= @start AND f.fec_emis <= @end
+                      ${coVen ? 'AND LTRIM(RTRIM(f.co_ven)) = @co_ven' : ''}
+                      ${coSucu ? 'AND LTRIM(RTRIM(f.co_sucu_in)) = @co_sucu' : ''}
+                      AND f.co_ven IS NOT NULL AND RTRIM(f.co_ven) <> ''
+                      AND NOT EXISTS (
+                          SELECT 1 
+                          FROM saDevolucionClienteReng dr
+                          JOIN saDevolucionCliente d ON dr.doc_num = d.doc_num
+                          WHERE d.anulado = 0 
+                            AND LTRIM(RTRIM(dr.tipo_doc)) = 'FACT' 
+                            AND LTRIM(RTRIM(dr.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                      )
+                )
+                SELECT 
+                    a.co_ven,
+                    RTRIM(ISNULL(u.desc_usuario, ISNULL(v.ven_des, a.co_ven))) AS ven_des,
+                    SUM(a.total_neto / NULLIF(a.tasa, 0)) AS total_usd,
+                    MAX(CASE 
+                        WHEN CAST(ISNULL(v.inactivo, 0) AS INT) = 1 OR LTRIM(RTRIM(CAST(ISNULL(v.inactivo, 0) AS VARCHAR(10)))) = '1' THEN 1
+                        WHEN UPPER(LTRIM(RTRIM(ISNULL(u.Estado, '')))) = 'I' THEN 1 
+                        ELSE 0 
+                    END) AS inactivo
+                FROM FacturasTotales a
+                LEFT JOIN MasterProfitPro.dbo.MpUsuario u ON UPPER(LTRIM(RTRIM(a.co_ven))) = UPPER(LTRIM(RTRIM(u.cod_usuario)))
+                LEFT JOIN saVendedor v ON UPPER(LTRIM(RTRIM(a.co_ven))) = UPPER(LTRIM(RTRIM(v.co_ven)))
+                GROUP BY a.co_ven, u.desc_usuario, v.ven_des
+            `;
+            const factRankReq = pool.request();
+            factRankReq.input('start', startDate);
+            factRankReq.input('end', endDate + ' 23:59:59');
+            if (coVen) factRankReq.input('co_ven', coVen);
+            if (coSucu) factRankReq.input('co_sucu', coSucu);
+            const factRankRes = await factRankReq.query(rankingFacturadoQuery);
+
+            const allFactRows = factRankRes.recordset.map(r => ({
+                co_ven: r.co_ven,
+                ven_des: (r.ven_des || r.co_ven || '').trim().toUpperCase(),
+                total_usd: Number(r.total_usd) || 0,
+                facturado_usd: Number(r.total_usd) || 0,
+                inactivo: Number(r.inactivo) === 1
+            }));
+
+            rankingFacturadoUsd = [...allFactRows].sort((a, b) => b.total_usd - a.total_usd);
+            totalFacturadoUsdGlobal = allFactRows.reduce((acc, r) => acc + r.total_usd, 0);
+        } catch (factRankErr) {
+            console.warn('[rendimiento-vendedores] Error calculando ranking de facturación USD:', factRankErr.message);
         }
 
         // Lista de vendedores activos en el período cruzados con MasterProfitPro.dbo.MpUsuario
@@ -1111,6 +1396,8 @@ router.get('/', async (req, res) => {
             startDate,
             endDate,
             co_ven: coVen || null,
+            co_sucu: coSucu || null,
+            sucursales,
             tipoAgrupacion,
             diffDays,
             daysInStartMonth,
@@ -1125,13 +1412,15 @@ router.get('/', async (req, res) => {
             rankingArtCotizados,
             rankingCobrosUsd,
             rankingCobrosBs,
+            rankingFacturadoUsd,
             totalArticulosActivos,
             totalArticulosDistintosGlobal,
             totalArtPedidosGlobal,
             totalArtCotizadosGlobal,
             totalCobrosUsdGlobal,
             totalCobrosBsUsdGlobal,
-            totalCobrosBsGlobal
+            totalCobrosBsGlobal,
+            totalFacturadoUsdGlobal
         });
 
     } catch (error) {

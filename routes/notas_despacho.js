@@ -70,6 +70,26 @@ router.get('/', async (req, res) => {
                         whereClauses.push("c.anulado = 1");
                     } else if (status === 'activo') {
                         whereClauses.push("c.anulado = 0");
+                    } else if (status === 'parcial') {
+                        whereClauses.push(`c.anulado = 0 AND (
+                            (SELECT ISNULL(SUM(r.total_art), 0) FROM saNotaDespachoVentaReng r WHERE r.doc_num = c.doc_num)
+                            < (SELECT ISNULL(SUM(fr.total_art), 0) FROM saFacturaVentaReng fr WHERE fr.doc_num = (SELECT TOP 1 r2.num_doc FROM saNotaDespachoVentaReng r2 WHERE r2.doc_num = c.doc_num AND r2.num_doc IS NOT NULL AND RTRIM(r2.num_doc) <> ''))
+                            OR EXISTS (
+                                SELECT 1 FROM saNotaDespachoVentaReng r 
+                                INNER JOIN saFacturaVenta f ON f.doc_num = r.num_doc 
+                                WHERE r.doc_num = c.doc_num AND (f.status = '1' OR (SELECT ISNULL(SUM(fr.pendiente), 0) FROM saFacturaVentaReng fr WHERE fr.doc_num = f.doc_num) > 0)
+                            )
+                        )`);
+                    } else if (status === 'despachado' || status === 'completado') {
+                        whereClauses.push(`c.anulado = 0 AND (
+                            (SELECT ISNULL(SUM(r.total_art), 0) FROM saNotaDespachoVentaReng r WHERE r.doc_num = c.doc_num)
+                            >= (SELECT ISNULL(SUM(fr.total_art), 0) FROM saFacturaVentaReng fr WHERE fr.doc_num = (SELECT TOP 1 r2.num_doc FROM saNotaDespachoVentaReng r2 WHERE r2.doc_num = c.doc_num AND r2.num_doc IS NOT NULL AND RTRIM(r2.num_doc) <> ''))
+                            AND NOT EXISTS (
+                                SELECT 1 FROM saNotaDespachoVentaReng r 
+                                INNER JOIN saFacturaVenta f ON f.doc_num = r.num_doc 
+                                WHERE r.doc_num = c.doc_num AND (f.status = '1' OR (SELECT ISNULL(SUM(fr.pendiente), 0) FROM saFacturaVentaReng fr WHERE fr.doc_num = f.doc_num) > 0)
+                            )
+                        )`);
                     } else {
                         request.input('status_val', sql.Char(1), status);
                         whereClauses.push("c.status = @status_val AND c.anulado = 0");
@@ -107,6 +127,30 @@ router.get('/', async (req, res) => {
                             FROM saNotaDespachoVentaReng r 
                             WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND RTRIM(r.num_doc) <> ''
                         ) AS factura_origen,
+                        (
+                            SELECT TOP 1 f.status 
+                            FROM saNotaDespachoVentaReng r 
+                            INNER JOIN saFacturaVenta f ON f.doc_num = r.num_doc 
+                            WHERE r.doc_num = c.doc_num
+                        ) AS factura_status,
+                        (
+                            SELECT ISNULL(SUM(fr.total_art), 0) 
+                            FROM saFacturaVentaReng fr 
+                            WHERE fr.doc_num = (
+                                SELECT TOP 1 r.num_doc 
+                                FROM saNotaDespachoVentaReng r 
+                                WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND RTRIM(r.num_doc) <> ''
+                            )
+                        ) AS factura_total_unidades,
+                        (
+                            SELECT ISNULL(SUM(fr.pendiente), 0) 
+                            FROM saFacturaVentaReng fr 
+                            WHERE fr.doc_num = (
+                                SELECT TOP 1 r.num_doc 
+                                FROM saNotaDespachoVentaReng r 
+                                WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND RTRIM(r.num_doc) <> ''
+                            )
+                        ) AS factura_pendiente,
                         (
                             SELECT COUNT(*) 
                             FROM saNotaDespachoVentaReng r 
@@ -355,6 +399,8 @@ router.get('/:doc_num', async (req, res) => {
                             RTRIM(cl.email) AS email,
                             RTRIM(c.co_cond) AS co_cond,
                             ISNULL(NULLIF(RTRIM(cd.cond_des), ''), RTRIM(c.co_cond)) AS cond_des,
+                            RTRIM(c.co_tran) AS co_tran,
+                            ISNULL(NULLIF(RTRIM(t.des_tran), ''), RTRIM(c.co_tran)) AS des_tran,
                             c.fec_emis,
                             c.fec_venc,
                             c.fec_reg,
@@ -371,6 +417,7 @@ router.get('/:doc_num', async (req, res) => {
                         FROM saNotaDespachoVenta c
                         LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
                         LEFT JOIN saCondicionPago cd ON c.co_cond = cd.co_cond
+                        LEFT JOIN saTransporte t ON c.co_tran = t.co_tran
                         WHERE c.doc_num = @doc_num
                     `);
 
@@ -394,7 +441,13 @@ router.get('/:doc_num', async (req, res) => {
                             r.total_art AS cant_despachada,
                             r.pendiente AS cant_pendiente,
                             RTRIM(r.num_doc) AS doc_num_factura,
-                            RTRIM(r.tipo_doc) AS tipo_doc
+                            RTRIM(r.tipo_doc) AS tipo_doc,
+                            r.prec_vta,
+                            r.tipo_imp,
+                            r.porc_imp,
+                            r.monto_imp,
+                            r.reng_neto,
+                            r.rowguid_doc
                         FROM saNotaDespachoVentaReng r
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni
@@ -403,12 +456,141 @@ router.get('/:doc_num', async (req, res) => {
                         ORDER BY r.reng_num ASC
                     `);
 
+                const existingDispatchLines = rengRes.recordset || [];
+                const facturaOrigen = (existingDispatchLines[0] && existingDispatchLines[0].doc_num_factura) 
+                    || (header.n_control ? header.n_control.trim() : '')
+                    || (header.descrip ? (header.descrip.match(/G\d+/) || [''])[0] : '');
+
+                let mergedLines = existingDispatchLines;
+
+                if (facturaOrigen) {
+                    try {
+                        const factRengRes = await pool.request()
+                            .input('num_doc', sql.Char(20), padProfit(facturaOrigen, 20))
+                            .query(`
+                                SELECT 
+                                    fr.reng_num,
+                                    RTRIM(fr.doc_num) AS doc_num,
+                                    RTRIM(fr.co_art) AS co_art,
+                                    RTRIM(a.art_des) AS art_des,
+                                    RTRIM(a.modelo) AS modelo,
+                                    RTRIM(a.ref) AS referencia,
+                                    RTRIM(fr.co_uni) AS co_uni,
+                                    COALESCE(NULLIF(RTRIM(u.des_uni), ''), RTRIM(fr.co_uni)) AS unidad,
+                                    RTRIM(fr.co_alma) AS co_alma,
+                                    RTRIM(al.des_alma) AS des_alma,
+                                    fr.total_art AS cant_original,
+                                    fr.pendiente AS cant_pendiente_factura,
+                                    fr.prec_vta,
+                                    fr.prec_vta_om,
+                                    fr.tipo_imp,
+                                    fr.porc_imp,
+                                    fr.monto_imp,
+                                    fr.reng_neto,
+                                    fr.rowguid AS rowguid_doc
+                                FROM saFacturaVentaReng fr
+                                LEFT JOIN saArticulo a ON fr.co_art = a.co_art
+                                LEFT JOIN saUnidad u ON fr.co_uni = u.co_uni
+                                LEFT JOIN saAlmacen al ON fr.co_alma = al.co_alma
+                                WHERE fr.doc_num = @num_doc
+                                ORDER BY fr.reng_num ASC
+                            `);
+
+                        let otherDispatchesByArt = {};
+                        try {
+                            const otherRes = await pool.request()
+                                .input('num_doc', sql.Char(20), padProfit(facturaOrigen, 20))
+                                .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                                .query(`
+                                    SELECT RTRIM(r.co_art) AS co_art, RTRIM(r.doc_num) AS doc_num_despacho, r.total_art
+                                    FROM saNotaDespachoVentaReng r
+                                    INNER JOIN saNotaDespachoVenta c ON c.doc_num = r.doc_num
+                                    WHERE r.num_doc = @num_doc AND r.doc_num <> @doc_num AND c.anulado = 0
+                                `);
+                            for (const row of (otherRes.recordset || [])) {
+                                otherDispatchesByArt[row.co_art.trim()] = {
+                                    doc_num: row.doc_num_despacho,
+                                    total_art: Number(row.total_art) || 0
+                                };
+                            }
+                        } catch (oErr) {
+                            console.warn('⚠️ [AGENT] Error consultando otros despachos de la factura:', oErr.message);
+                        }
+
+                        if (factRengRes.recordset && factRengRes.recordset.length > 0) {
+                            mergedLines = factRengRes.recordset.map((fr) => {
+                                const matched = existingDispatchLines.find(
+                                    dr => dr.co_art?.trim() === fr.co_art?.trim()
+                                );
+
+                                if (matched) {
+                                    const despQty = Number(matched.cant_despachada) || 0;
+                                    const pendFact = Number(fr.cant_pendiente_factura) || 0;
+                                    return {
+                                        reng_num: fr.reng_num,
+                                        co_art: fr.co_art,
+                                        art_des: fr.art_des,
+                                        modelo: fr.modelo,
+                                        referencia: fr.referencia,
+                                        co_uni: fr.co_uni,
+                                        unidad: fr.unidad,
+                                        co_alma: matched.co_alma || fr.co_alma,
+                                        des_alma: matched.des_alma || fr.des_alma,
+                                        cant_original: Number(fr.cant_original) || despQty,
+                                        cant_despachada: despQty,
+                                        cant_pendiente: despQty + pendFact,
+                                        checked: despQty > 0,
+                                        prec_vta: fr.prec_vta,
+                                        tipo_imp: fr.tipo_imp,
+                                        porc_imp: fr.porc_imp,
+                                        monto_imp: fr.monto_imp,
+                                        reng_neto: fr.reng_neto,
+                                        rowguid_doc: fr.rowguid_doc,
+                                        doc_num_factura: facturaOrigen,
+                                        despachado_en_otro: null,
+                                        cant_otra_nota: 0
+                                    };
+                                } else {
+                                    const pendFact = Number(fr.cant_pendiente_factura) || 0;
+                                    const otherDisp = otherDispatchesByArt[fr.co_art?.trim()] || null;
+                                    return {
+                                        reng_num: fr.reng_num,
+                                        co_art: fr.co_art,
+                                        art_des: fr.art_des,
+                                        modelo: fr.modelo,
+                                        referencia: fr.referencia,
+                                        co_uni: fr.co_uni,
+                                        unidad: fr.unidad,
+                                        co_alma: fr.co_alma,
+                                        des_alma: fr.des_alma,
+                                        cant_original: Number(fr.cant_original) || 0,
+                                        cant_despachada: 0,
+                                        cant_pendiente: pendFact,
+                                        checked: false,
+                                        prec_vta: fr.prec_vta,
+                                        tipo_imp: fr.tipo_imp,
+                                        porc_imp: fr.porc_imp,
+                                        monto_imp: fr.monto_imp,
+                                        reng_neto: fr.reng_neto,
+                                        rowguid_doc: fr.rowguid_doc,
+                                        doc_num_factura: facturaOrigen,
+                                        despachado_en_otro: otherDisp ? otherDisp.doc_num : null,
+                                        cant_otra_nota: otherDisp ? otherDisp.total_art : 0
+                                    };
+                                }
+                            });
+                        }
+                    } catch (fErr) {
+                        console.warn(`⚠️ [AGENT] No se pudieron combinar renglones de factura ${facturaOrigen}:`, fErr.message);
+                    }
+                }
+
                 return res.json({
                     success: true,
                     data: {
                         ...header,
-                        factura_origen: rengRes.recordset && rengRes.recordset[0] ? rengRes.recordset[0].doc_num_factura : '',
-                        renglones: rengRes.recordset || []
+                        factura_origen: facturaOrigen,
+                        renglones: mergedLines
                     }
                 });
             } catch (err) {
@@ -447,18 +629,59 @@ router.post('/', async (req, res) => {
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
             const coSucu = (payload.co_sucu || srv.co_sucu || '01').substring(0, 6);
 
-            // 1. Obtener próximo consecutivo para saNotaDespachoVenta
-            const consecutivoInfo = await getProximoConsecutivo({
-                runner: pool,
-                co_tipo_serie: 'V009',
-                co_consecutivos: ['NDES_NUM', 'NDES', 'DESP_NUM', 'DESP'],
-                co_sucur: coSucu,
-                table: 'saNotaDespachoVenta',
-                col: 'doc_num'
-            });
+            let docNum = (payload.isEditing && payload.doc_num ? String(payload.doc_num).trim() : '');
 
-            const docNum = consecutivoInfo.docNum;
-            console.log(`📦 [DESPACHO] Asignando correlativo de Despacho: ${docNum} para sede: ${srv.name}`);
+            // Si estamos editando una nota de despacho existente, revertimos los renglones y eliminamos la nota anterior
+            if (payload.isEditing && docNum) {
+                try {
+                    const check = await pool.request()
+                        .input('doc_num', sql.Char(20), padProfit(docNum, 20))
+                        .query("SELECT validador FROM saNotaDespachoVenta WHERE doc_num = @doc_num");
+
+                    if (check.recordset.length > 0) {
+                        const prevReng = await pool.request()
+                            .input('doc_num', sql.Char(20), padProfit(docNum, 20))
+                            .query("SELECT RTRIM(num_doc) AS num_doc, co_art, total_art FROM saNotaDespachoVentaReng WHERE doc_num = @doc_num");
+
+                        for (const r of (prevReng.recordset || [])) {
+                            if (r.num_doc) {
+                                await pool.request()
+                                    .input('num_doc', sql.Char(20), padProfit(r.num_doc, 20))
+                                    .input('co_art', sql.Char(30), padProfit(r.co_art, 30))
+                                    .input('cant', sql.Decimal(18, 5), Number(r.total_art) || 0)
+                                    .query("UPDATE saFacturaVentaReng SET pendiente = pendiente + @cant WHERE doc_num = @num_doc AND co_art = @co_art");
+                            }
+                        }
+
+                        const delReq = new sql.Request(pool);
+                        delReq.input('sDoc_NumOri',   sql.Char(20), padProfit(docNum, 20));
+                        delReq.input('tsValidador',   sql.VarBinary, check.recordset[0].validador);
+                        delReq.input('sMaquina',      sql.VarChar(60), 'SYNC2K');
+                        delReq.input('sCo_Us_Mo',     sql.Char(6), auditUser);
+                        delReq.input('sCo_Sucu_Mo',   sql.Char(6), coSucu);
+                        delReq.input('gRowguid',      sql.UniqueIdentifier, null);
+                        await delReq.execute('pEliminarNotaDespachoVenta');
+                        console.log(`♻️ [DESPACHO] Nota ${docNum} limpiada para actualización.`);
+                    }
+                } catch (editErr) {
+                    console.warn(`⚠️ [DESPACHO] Error al limpiar versión anterior de nota ${docNum}:`, editErr.message);
+                }
+            }
+
+            // Si es un despacho nuevo, obtener correlativo
+            if (!docNum) {
+                const consecutivoInfo = await getProximoConsecutivo({
+                    runner: pool,
+                    co_tipo_serie: 'V009',
+                    co_consecutivos: ['NDES_NUM', 'NDES', 'DESP_NUM', 'DESP'],
+                    co_sucur: coSucu,
+                    table: 'saNotaDespachoVenta',
+                    col: 'doc_num'
+                });
+                docNum = consecutivoInfo.docNum;
+            }
+
+            console.log(`📦 [DESPACHO] Procesando Despacho: ${docNum} para sede: ${srv.name}`);
 
             const ts = new Date();
             const fecEmis = payload.fec_emis ? new Date(`${safeDate(payload.fec_emis)}T00:00:00`) : ts;
@@ -593,6 +816,25 @@ router.post('/', async (req, res) => {
                 rengReq.input('sMaquina',           sql.VarChar(60), 'SYNC2K');
 
                 await rengReq.execute('pInsertarRenglonesNotaDespachoVenta');
+
+                // Descontar la cantidad despachada del pendiente en la factura de origen
+                const numFactLine = String(line.doc_num_factura || line.num_doc || payload.factura_origen || '').trim();
+                if (numFactLine) {
+                    try {
+                        await pool.request()
+                            .input('num_doc', sql.Char(20), padProfit(numFactLine, 20))
+                            .input('co_art', sql.Char(30), padProfit(line.co_art, 30))
+                            .input('cant', sql.Decimal(18, 5), cantDesp)
+                            .query(`
+                                UPDATE saFacturaVentaReng
+                                SET pendiente = CASE WHEN pendiente >= @cant THEN pendiente - @cant ELSE 0 END
+                                WHERE doc_num = @num_doc AND co_art = @co_art;
+                            `);
+                    } catch (decErr) {
+                        console.warn(`⚠️ [DESPACHO] Advertencia actualizando pendiente de ${line.co_art} en factura ${numFactLine}:`, decErr.message);
+                    }
+                }
+
                 rengNum++;
             }
 

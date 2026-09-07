@@ -12,4 +12,5 @@ config/servers.json
 
 # Local scratch and logs
 scratch/
+debug/
 *.txt
