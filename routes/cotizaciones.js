@@ -51,7 +51,7 @@ router.get('/', async (req, res) => {
                 }
                 if (fec_h) {
                     request.input('fec_h', sql.SmallDateTime, fec_h);
-                    whereClauses.push("c.fec_emis <= @fec_h");
+                    whereClauses.push("c.fec_emis < DATEADD(day, 1, @fec_h)");
                 }
                 if (only_available === 'true') {
                     whereClauses.push("c.anulado = 0 AND EXISTS (SELECT 1 FROM saCotizacionClienteReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0)");

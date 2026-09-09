@@ -44,12 +44,12 @@ router.get('/', async (req, res) => {
                     whereClauses.push("LTRIM(RTRIM(c.co_us_in)) = @co_us_in_filter");
                 }
                 if (fec_d) {
-                    request.input('fec_d', sql.VarChar, `${fec_d} 00:00:00`);
+                    request.input('fec_d', sql.SmallDateTime, fec_d);
                     whereClauses.push("c.fe_us_in >= @fec_d");
                 }
                 if (fec_h) {
-                    request.input('fec_h', sql.VarChar, `${fec_h} 23:59:59`);
-                    whereClauses.push("c.fe_us_in <= @fec_h");
+                    request.input('fec_h', sql.SmallDateTime, fec_h);
+                    whereClauses.push("c.fe_us_in < DATEADD(day, 1, @fec_h)");
                 }
 
                 const whereSQL = whereClauses.join(" AND ");

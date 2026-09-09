@@ -67,6 +67,12 @@ const DOC_TYPE_CONFIG = {
         co_consecutivos: ['NDES_NUM', 'NDES', 'DESP_NUM', 'DESP'],
         table: 'saNotaDespachoVenta',
         col: 'doc_num'
+    },
+    FACTURA_COMPRA: {
+        co_tipo_serie: 'C001',
+        co_consecutivos: ['DOC_COM_FACT', 'FCOM_NUM', 'FACT_COM', 'FAC_COM'],
+        table: 'saFacturaCompra',
+        col: 'doc_num'
     }
 };
 

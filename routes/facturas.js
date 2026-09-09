@@ -53,7 +53,7 @@ router.get('/', async (req, res) => {
                 }
                 if (fec_h) {
                     request.input('fec_h', sql.SmallDateTime, fec_h);
-                    whereClauses.push("f.fec_emis <= @fec_h");
+                    whereClauses.push("f.fec_emis < DATEADD(day, 1, @fec_h)");
                 }
 
                 const whereSQL = whereClauses.join(" AND ");

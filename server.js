@@ -132,6 +132,8 @@ app.use('/api/v1/notas-recepcion', require('./routes/notas_recepcion'));
 app.use('/api/v1/receiving-notes', require('./routes/notas_recepcion'));
 app.use('/api/v1/notas-despacho',  require('./routes/notas_despacho'));
 app.use('/api/v1/dispatches',      require('./routes/notas_despacho'));
+app.use('/api/v1/facturas-compras', require('./routes/facturas_compras'));
+app.use('/api/v1/purchase-invoices', require('./routes/facturas_compras'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

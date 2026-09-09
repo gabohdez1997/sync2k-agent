@@ -58,12 +58,12 @@ router.get('/', async (req, res) => {
                     )`);
                 }
                 if (fec_d) {
-                    request.input('fec_d', sql.SmallDateTime, new Date(`${fec_d}T00:00:00`));
+                    request.input('fec_d', sql.SmallDateTime, fec_d);
                     whereClauses.push("c.fec_emis >= @fec_d");
                 }
                 if (fec_h) {
-                    request.input('fec_h', sql.SmallDateTime, new Date(`${fec_h}T23:59:59`));
-                    whereClauses.push("c.fec_emis <= @fec_h");
+                    request.input('fec_h', sql.SmallDateTime, fec_h);
+                    whereClauses.push("c.fec_emis < DATEADD(day, 1, @fec_h)");
                 }
                 if (status !== undefined && status !== null && status !== '' && status !== 'all') {
                     if (status === 'anulado') {
