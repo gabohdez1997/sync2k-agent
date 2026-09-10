@@ -1368,6 +1368,8 @@ router.get('/articulos-stock', async (req, res) => {
                         art.almacenes.push({
                             co_alma: row.co_alma,
                             des_alma: row.des_alma || row.co_alma,
+                            sede_id: srv.id,
+                            sede_nombre: srv.name,
                             stock_act: act,
                             stock_com: com,
                             stock_disp: disp
