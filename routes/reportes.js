@@ -1256,6 +1256,202 @@ router.get('/articulos-precios', async (req, res) => {
     }
 });
 
+// --- REPORT STOCK DE ARTICULOS POR ALMACEN Y SEDE ---
+router.get('/articulos-stock', async (req, res) => {
+    try {
+        const { sede, search, co_lin, co_subl, co_cat, co_alma, estatus, stock_status } = req.query;
+        const servers = getServers();
+        const targets = sede && sede !== 'all' && sede !== 'Todas' ? servers.filter(s => s.id === sede) : servers;
+
+        if (targets.length === 0) {
+            return res.status(200).json({ success: true, count: 0, data: [] });
+        }
+
+        const allBranchesData = await Promise.all(targets.map(async (srv) => {
+            try {
+                const pool = await getPool(srv.id, req.sqlAuth);
+                const r = pool.request();
+
+                let whereClauses = [];
+                if (search) {
+                    r.input('search', sql.VarChar, `%${search}%`);
+                    whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR ISNULL(a.modelo, '') LIKE @search)");
+                }
+                if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
+                    r.input('co_lin', sql.VarChar, co_lin);
+                    whereClauses.push("a.co_lin = @co_lin");
+                }
+                if (co_subl && co_subl !== 'all' && co_subl !== 'null') {
+                    r.input('co_subl', sql.VarChar, co_subl);
+                    whereClauses.push("a.co_subl = @co_subl");
+                }
+                if (co_cat && co_cat !== 'all' && co_cat !== 'null') {
+                    r.input('co_cat', sql.VarChar, co_cat);
+                    whereClauses.push("a.co_cat = @co_cat");
+                }
+                if (estatus === 'active') {
+                    whereClauses.push("a.anulado = 0");
+                } else if (estatus === 'inactive') {
+                    whereClauses.push("a.anulado = 1");
+                }
+
+                const whereSQL = whereClauses.length > 0 ? whereClauses.join(" AND ") : "1=1";
+
+                let almaFilterSQL = "";
+                if (co_alma && co_alma !== 'all' && co_alma !== 'null') {
+                    r.input('co_alma', sql.VarChar, co_alma);
+                    almaFilterSQL = " AND s.co_alma = @co_alma ";
+                }
+
+                const querySQL = `
+                    SELECT 
+                        RTRIM(a.co_art) AS co_art, 
+                        RTRIM(a.art_des) AS art_des,
+                        RTRIM(ISNULL(a.modelo, '')) AS modelo,
+                        a.anulado,
+                        RTRIM(a.co_lin) AS co_lin,
+                        RTRIM(l.lin_des) AS des_lin,
+                        RTRIM(a.co_subl) AS co_subl,
+                        RTRIM(sl.subl_des) AS des_subl,
+                        RTRIM(a.co_cat) AS co_cat,
+                        RTRIM(c.cat_des) AS des_cat,
+                        RTRIM(ISNULL(s.co_alma, '')) AS co_alma,
+                        RTRIM(ISNULL(alm.des_alma, '')) AS des_alma,
+                        SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) AS stock_act,
+                        SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0)) AS stock_com,
+                        (SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='ACT' THEN s.stock ELSE 0 END, 0)) -
+                         SUM(ISNULL(CASE WHEN RTRIM(s.tipo)='COM' THEN s.stock ELSE 0 END, 0))) AS stock_disp
+                    FROM saArticulo a
+                    LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+                    LEFT JOIN saSubLinea sl ON a.co_subl = sl.co_subl AND a.co_lin = sl.co_lin
+                    LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+                    LEFT JOIN saStockAlmacen s ON a.co_art = s.co_art ${almaFilterSQL}
+                    LEFT JOIN saAlmacen alm ON s.co_alma = alm.co_alma
+                    WHERE ${whereSQL}
+                    GROUP BY 
+                        a.co_art, a.art_des, a.modelo, a.anulado, 
+                        a.co_lin, l.lin_des, a.co_subl, sl.subl_des, 
+                        a.co_cat, c.cat_des, s.co_alma, alm.des_alma
+                    ORDER BY a.co_art ASC, s.co_alma ASC
+                `;
+
+                const resData = await r.query(querySQL);
+                
+                const artMap = new Map();
+                for (const row of resData.recordset) {
+                    if (!artMap.has(row.co_art)) {
+                        artMap.set(row.co_art, {
+                            co_art: row.co_art,
+                            art_des: row.art_des,
+                            modelo: row.modelo,
+                            anulado: Boolean(row.anulado),
+                            co_lin: row.co_lin,
+                            des_lin: row.des_lin,
+                            co_subl: row.co_subl,
+                            des_subl: row.des_subl,
+                            co_cat: row.co_cat,
+                            des_cat: row.des_cat,
+                            sede_id: srv.id,
+                            sede_nombre: srv.name,
+                            stock_total_act: 0,
+                            stock_total_com: 0,
+                            stock_total: 0,
+                            almacenes: []
+                        });
+                    }
+
+                    const art = artMap.get(row.co_art);
+                    if (row.co_alma) {
+                        const act = Number(row.stock_act) || 0;
+                        const com = Number(row.stock_com) || 0;
+                        const disp = Number(row.stock_disp) || 0;
+                        art.almacenes.push({
+                            co_alma: row.co_alma,
+                            des_alma: row.des_alma || row.co_alma,
+                            stock_act: act,
+                            stock_com: com,
+                            stock_disp: disp
+                        });
+                        art.stock_total_act += act;
+                        art.stock_total_com += com;
+                        art.stock_total += disp;
+                    }
+                }
+
+                return Array.from(artMap.values());
+            } catch (err) {
+                console.error(`[REPORTES/ARTICULOS-STOCK] Error en sede ${srv.name}:`, err.message);
+                return [];
+            }
+        }));
+
+        // Consolidación global de artículos entre todas las sedes consultadas
+        const masterArtMap = new Map();
+        for (const srvList of allBranchesData) {
+            for (const art of srvList) {
+                if (!masterArtMap.has(art.co_art)) {
+                    masterArtMap.set(art.co_art, {
+                        co_art: art.co_art,
+                        art_des: art.art_des,
+                        modelo: art.modelo,
+                        anulado: art.anulado,
+                        co_lin: art.co_lin,
+                        des_lin: art.des_lin,
+                        co_subl: art.co_subl,
+                        des_subl: art.des_subl,
+                        co_cat: art.co_cat,
+                        des_cat: art.des_cat,
+                        sede_id: art.sede_id,
+                        sede_nombre: art.sede_nombre,
+                        sedes: {},
+                        almacenes: [],
+                        stock_total_act: 0,
+                        stock_total_com: 0,
+                        stock_total: 0
+                    });
+                }
+
+                const masterArt = masterArtMap.get(art.co_art);
+                masterArt.sedes[art.sede_nombre] = {
+                    sede_id: art.sede_id,
+                    sede_nombre: art.sede_nombre,
+                    stock_act: art.stock_total_act,
+                    stock_com: art.stock_total_com,
+                    stock_disp: art.stock_total
+                };
+                masterArt.stock_total_act += art.stock_total_act;
+                masterArt.stock_total_com += art.stock_total_com;
+                masterArt.stock_total += art.stock_total;
+
+                for (const alm of (art.almacenes || [])) {
+                    masterArt.almacenes.push({
+                        ...alm,
+                        sede_id: art.sede_id,
+                        sede_nombre: art.sede_nombre
+                    });
+                }
+            }
+        }
+
+        let consolidated = Array.from(masterArtMap.values());
+
+        if (stock_status === 'with') {
+            consolidated = consolidated.filter(item => item.stock_total > 0);
+        } else if (stock_status === 'without') {
+            consolidated = consolidated.filter(item => item.stock_total <= 0);
+        }
+
+        return res.status(200).json({
+            success: true,
+            count: consolidated.length,
+            data: consolidated
+        });
+    } catch (error) {
+        console.error('[REPORTES/ARTICULOS-STOCK ERROR]:', error.message);
+        res.status(500).json({ success: false, message: 'Error al consultar Stock de Artículos.', error: error.message });
+    }
+});
+
 // --- REPORT CANTIDAD REAL VENDIDA POR ARTICULO ---
 router.get('/articulos-ventas', async (req, res) => {
     try {
