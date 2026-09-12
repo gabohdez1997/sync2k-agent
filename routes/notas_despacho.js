@@ -687,12 +687,23 @@ router.post('/', async (req, res) => {
             const fecEmis = payload.fec_emis ? new Date(`${safeDate(payload.fec_emis)}T00:00:00`) : ts;
             const fecVenc = payload.fec_venc ? new Date(`${safeDate(payload.fec_venc)}T00:00:00`) : fecEmis;
 
+            // Obtener transporte por defecto desde saTransporte
+            let defTran = '001';
+            try {
+                const resTran = await pool.request().query(`SELECT TOP 1 RTRIM(co_tran) AS co_tran FROM saTransporte`);
+                if (resTran.recordset.length > 0 && resTran.recordset[0].co_tran) {
+                    defTran = resTran.recordset[0].co_tran;
+                }
+            } catch (tranErr) {
+                console.warn(`⚠️ [DESPACHO] Error al consultar saTransporte:`, tranErr.message);
+            }
+
             // 2. Insertar Encabezado
             const headReq = new sql.Request(pool);
             headReq.input('sDoc_Num',        sql.Char(20), padProfit(docNum, 20));
             headReq.input('sDescrip',        sql.VarChar(60), String(payload.descrip || `DESPACHO FACT: ${payload.factura_origen || ''}`).trim().substring(0, 60));
             headReq.input('sCo_Cli',         sql.Char(16), padProfit(payload.co_cli, 16));
-            headReq.input('sCo_Tran',        sql.Char(6), padProfit(payload.co_tran || '01', 6));
+            headReq.input('sCo_Tran',        sql.Char(6), padProfit(payload.co_tran || defTran, 6));
             headReq.input('sCo_Mone',        sql.Char(6), padProfit(payload.co_mone || 'BS', 6));
             headReq.input('sCo_Ven',         sql.Char(6), padProfit(payload.co_ven || '01', 6));
             headReq.input('sCo_Cond',        sql.Char(6), padProfit(payload.co_cond || '01', 6));

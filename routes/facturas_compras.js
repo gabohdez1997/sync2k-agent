@@ -419,11 +419,10 @@ router.post('/', async (req, res) => {
         console.log(`📦 [FACTURA COMPRA] Asignando Correlativo: ${docNum} para sede: ${srv.name}`);
 
         // 2. Resolver datos maestros y moneda
-        const [resMoneda, resUSD, resCond, resTax, resTasa] = await Promise.all([
+        const [resMoneda, resUSD, resCond, resTasa] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_mone)  AS co_mone   FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'`),
             pool.request().input('co_cond', sql.VarChar, payload.co_cond || '01').query(`SELECT TOP 1 co_cond, dias_cred FROM saCondicionPago WHERE co_cond = @co_cond`),
-            pool.request().query(`SELECT TOP 1 RTRIM(co_art) as tax_co_art FROM par_emp`),
             getExchangeRate(pool)
         ]);
 
@@ -433,8 +432,10 @@ router.post('/', async (req, res) => {
 
         const ts = new Date();
         const fecEmis = payload.fec_emis ? new Date(`${safeDate(payload.fec_emis)}T00:00:00`) : ts;
-        const fecVenc = payload.fec_venc ? new Date(`${safeDate(payload.fec_venc)}T00:00:00`) : new Date(fecEmis.getTime() + (diasCred * 86400000));
-        const fecReg = ts;
+        let fecVenc = payload.fec_venc ? new Date(`${safeDate(payload.fec_venc)}T00:00:00`) : new Date(fecEmis.getTime() + (diasCred * 86400000));
+        if (fecVenc < fecEmis) fecVenc = fecEmis;
+        let fecReg = ts;
+        if (fecReg < fecEmis) fecReg = fecEmis;
 
         // Iniciar Transacción SQL
         const transaction = new sql.Transaction(pool);
@@ -532,7 +533,10 @@ router.post('/', async (req, res) => {
                 const porcDesc = Number(item.porc_desc) || 0;
                 const montoDesc = subtotal * (porcDesc / 100);
                 const netoReng = subtotal - montoDesc;
-                const tipoImp = item.tipo_imp ? String(item.tipo_imp).trim().substring(0, 1) : '1';
+                // Profit Plus CHECK constraint CK_saFacturaCompraReng_TipoImpuesto:
+                // Valid values: '1' = Gravado, '2' = Exento, '3' = No sujeto
+                let tipoImp = item.tipo_imp ? String(item.tipo_imp).trim().substring(0, 1) : '1';
+                if (!['1', '2', '3'].includes(tipoImp)) tipoImp = '2'; // Fallback: Exento
                 const porcImp = Number(item.porc_imp) || 0;
                 const montoImp = netoReng * (porcImp / 100);
 
@@ -596,7 +600,102 @@ router.post('/', async (req, res) => {
                 reqR.input('deCosto_Adi3',           sql.Decimal(18, 5), 0);
                 reqR.input('sCredito_fiscal',        sql.VarChar(30),    'Totalmente Deducible (Art. 34)');
 
-                await reqR.execute('pInsertarRenglonesFacturaCompra');
+                try {
+                    await reqR.execute('pInsertarRenglonesFacturaCompra');
+                } catch (spErr) {
+                    console.warn(`⚠️ [FACTURA COMPRA] SP pInsertarRenglonesFacturaCompra falló: ${spErr.message}. Insertando directo...`);
+                    // Fallback: INSERT directo con NEWID() para rowguid
+                    const rowguid = require('crypto').randomUUID();
+                    const directReq = new sql.Request(transaction);
+                    directReq.input('rowguid', sql.UniqueIdentifier, rowguid);
+                    directReq.input('doc_num', sql.Char(20), padProfit(docNum, 20));
+                    directReq.input('reng_num', sql.Int, rengNum);
+                    directReq.input('co_art', sql.Char(30), padProfit(item.co_art, 30));
+                    directReq.input('des_art', sql.VarChar(120), (item.des_art || item.art_des || '').substring(0, 120));
+                    directReq.input('co_uni', sql.Char(6), padProfit(item.co_uni || '01', 6));
+                    directReq.input('sco_uni', sql.Char(6), null);
+                    directReq.input('co_alma', sql.Char(6), padProfit(item.co_alma || '01', 6));
+                    directReq.input('tipo_imp_v', sql.Char(1), tipoImp);
+                    directReq.input('tipo_imp2', sql.Char(1), null);
+                    directReq.input('tipo_imp3', sql.Char(1), null);
+                    directReq.input('tipo_doc', sql.Char(4), tipoDocOrigen ? padProfit(tipoDocOrigen, 4) : null);
+                    directReq.input('num_doc', sql.Char(20), numDocOrigen ? padProfit(numDocOrigen, 20) : null);
+                    directReq.input('rowguid_doc', sql.UniqueIdentifier, rowguidDocOrigen);
+                    directReq.input('reng_neto', sql.Decimal(18, 2), netoReng);
+                    directReq.input('cost_unit', sql.Decimal(18, 5), costUnit);
+                    directReq.input('cost_unit_om', sql.Decimal(18, 5), costUnitOM);
+                    directReq.input('total_art', sql.Decimal(18, 5), cant);
+                    directReq.input('stotal_art', sql.Decimal(18, 5), 0);
+                    directReq.input('otros', sql.Decimal(18, 5), 0);
+                    directReq.input('porc_imp', sql.Decimal(18, 5), porcImp);
+                    directReq.input('porc_imp2', sql.Decimal(18, 5), 0);
+                    directReq.input('porc_imp3', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_imp', sql.Decimal(18, 5), montoImp);
+                    directReq.input('monto_imp2', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_imp3', sql.Decimal(18, 5), 0);
+                    directReq.input('porc_gas', sql.Decimal(18, 2), 0);
+                    directReq.input('total_dev', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_dev', sql.Decimal(18, 5), 0);
+                    directReq.input('pendiente2', sql.Decimal(18, 5), 0);
+                    directReq.input('comentario', sql.VarChar(sql.MAX), null);
+                    directReq.input('lote_asignado', sql.Bit, 0);
+                    directReq.input('monto_desc_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_reca_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('otros1_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('otros2_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('otros3_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_imp_afec_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_imp2_afec_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_imp3_afec_glob', sql.Decimal(18, 5), 0);
+                    directReq.input('monto_desc', sql.Decimal(18, 5), montoDesc);
+                    directReq.input('pendiente', sql.Decimal(18, 5), cant);
+                    directReq.input('porc_desc', sql.Char(15), String(porcDesc));
+                    directReq.input('dis_cen', sql.VarChar(sql.MAX), null);
+                    directReq.input('co_sucu_in', sql.Char(6), padProfit(coSucu, 6));
+                    directReq.input('co_us_in', sql.Char(6), padProfit(auditUser, 6));
+                    directReq.input('maquina', sql.VarChar(60), 'SYNC2K');
+                    directReq.input('costo_adi1', sql.Decimal(18, 5), 0);
+                    directReq.input('costo_adi2', sql.Decimal(18, 5), 0);
+                    directReq.input('costo_adi3', sql.Decimal(18, 5), 0);
+                    directReq.input('credito_fiscal', sql.VarChar(30), 'Totalmente Deducible (Art. 34)');
+
+                    await directReq.query(`
+                        INSERT INTO saFacturaCompraReng (
+                            rowguid, doc_num, reng_num, co_art, des_art, co_uni, sco_uni, co_alma,
+                            tipo_imp, tipo_imp2, tipo_imp3, tipo_doc, num_doc, rowguid_doc,
+                            reng_neto, cost_unit, cost_unit_om, total_art, stotal_art, otros,
+                            porc_imp, porc_imp2, porc_imp3, monto_imp, monto_imp2, monto_imp3,
+                            porc_gas, total_dev, monto_dev, pendiente2, comentario, lote_asignado,
+                            monto_desc_glob, monto_reca_glob, otros1_glob, otros2_glob, otros3_glob,
+                            monto_imp_afec_glob, monto_imp2_afec_glob, monto_imp3_afec_glob,
+                            monto_desc, pendiente, porc_desc, dis_cen,
+                            co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo,
+                            revisado, trasnfe, maquina, costo_adi1, costo_adi2, costo_adi3
+                        ) VALUES (
+                            @rowguid, @doc_num, @reng_num, @co_art, @des_art, @co_uni, @sco_uni, @co_alma,
+                            @tipo_imp_v, @tipo_imp2, @tipo_imp3, @tipo_doc, @num_doc, @rowguid_doc,
+                            @reng_neto, @cost_unit, @cost_unit_om, @total_art, @stotal_art, @otros,
+                            @porc_imp, @porc_imp2, @porc_imp3, @monto_imp, @monto_imp2, @monto_imp3,
+                            @porc_gas, @total_dev, @monto_dev, @pendiente2, @comentario, @lote_asignado,
+                            @monto_desc_glob, @monto_reca_glob, @otros1_glob, @otros2_glob, @otros3_glob,
+                            @monto_imp_afec_glob, @monto_imp2_afec_glob, @monto_imp3_afec_glob,
+                            @monto_desc, @pendiente, @porc_desc, @dis_cen,
+                            @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(),
+                            NULL, NULL, @maquina, @costo_adi1, @costo_adi2, @costo_adi3
+                        );
+
+                        -- Insert into Ext table if it exists
+                        IF OBJECT_ID('saFacturaCompraRengExt', 'U') IS NOT NULL
+                        BEGIN
+                            IF NOT EXISTS (SELECT 1 FROM saFacturaCompraRengExt WHERE rowguid_reng = @rowguid)
+                            BEGIN
+                                INSERT INTO saFacturaCompraRengExt (rowguid_reng, credito_fiscal)
+                                VALUES (@rowguid, @credito_fiscal);
+                            END
+                        END
+                    `);
+                    console.log(`✅ [FACTURA COMPRA] Renglón ${rengNum} insertado vía INSERT directo.`);
+                }
 
                 // Si viene de Nota de Recepción, descontar pendiente
                 if (numDocOrigen) {
@@ -651,78 +750,135 @@ router.post('/', async (req, res) => {
             // 7. Insertar Documento en Cuentas por Pagar (saDocumentoCompra)
             try {
                 const reqDoc = new sql.Request(transaction);
-                reqDoc.input('sCo_Tipo_Doc',     sql.Char(4),        padProfit('FACT', 4));
+                reqDoc.input('sCo_Tipo_Doc',     sql.Char(6),        padProfit('FACT', 6));
                 reqDoc.input('sNro_Doc',         sql.Char(20),       padProfit(docNum, 20));
+                reqDoc.input('sNro_Fact',        sql.Char(20),       padProfit(String(payload.nro_fact).trim(), 20));
+                reqDoc.input('sCo_Mone',         sql.Char(6),        padProfit(coMone, 6));
                 reqDoc.input('sCo_Prov',         sql.Char(16),       padProfit(payload.co_prov, 16));
                 reqDoc.input('sCo_Cta_Ingr_Egr', sql.Char(20),       null);
-                reqDoc.input('sCo_Mone',         sql.Char(6),        padProfit(coMone, 6));
-                reqDoc.input('sNro_Fact',        sql.Char(20),       padProfit(String(payload.nro_fact).trim(), 20));
-                reqDoc.input('sN_Control',       sql.Char(20),       payload.n_control ? padProfit(String(payload.n_control).trim(), 20) : padProfit('N/A', 20));
-                reqDoc.input('sdFec_Emis',       sql.SmallDateTime,  fecEmis);
-                reqDoc.input('sdFec_Venc',       sql.SmallDateTime,  fecVenc);
-                reqDoc.input('sdFec_Reg',        sql.SmallDateTime,  fecReg);
-                reqDoc.input('sObserva',         sql.VarChar(sql.MAX), `FACT N° ${payload.nro_fact} de proveedor ${payload.co_prov}`.substring(0, 120));
+                reqDoc.input('sDoc_Orig',        sql.Char(6),        padProfit('FACT', 6));
+                reqDoc.input('sMov_Ban',         sql.Char(20),       null);
+                reqDoc.input('sNro_Orig',        sql.Char(20),       padProfit(docNum, 20));
+                reqDoc.input('sNro_Che',         sql.Char(20),       null);
+                reqDoc.input('sPorc_Reca',       sql.Char(15),       null);
+                reqDoc.input('sPorc_Desc_Glob',  sql.Char(15),       String(descGlobalPorc));
                 reqDoc.input('bAnulado',         sql.Bit,            0);
                 reqDoc.input('bAut',             sql.Bit,            1);
-                reqDoc.input('deTasa',           sql.Decimal(18, 5), tasaCambio);
-                reqDoc.input('deTotal_Bruto',    sql.Decimal(18, 2), totalBruto);
+                reqDoc.input('iPagar',           sql.Int,            0);
+                reqDoc.input('sObserva',         sql.VarChar(120),   `FACT N° ${payload.nro_fact} de proveedor ${payload.co_prov}`.substring(0, 120));
+                reqDoc.input('sTipo_Imp',        sql.Char(1),        '1');
+                reqDoc.input('sTipo_Imp2',       sql.Char(1),        null);
+                reqDoc.input('sTipo_Imp3',       sql.Char(1),        null);
+                reqDoc.input('sdFec_Reg',        sql.SmallDateTime,  fecReg);
+                reqDoc.input('sdFec_Emis',       sql.SmallDateTime,  fecEmis);
+                reqDoc.input('sdFec_Venc',       sql.SmallDateTime,  fecVenc);
                 reqDoc.input('deTotal_Neto',     sql.Decimal(18, 2), totalNeto);
-                reqDoc.input('deSaldo',          sql.Decimal(18, 2), saldo);
+                reqDoc.input('deTasa',           sql.Decimal(21, 8), tasaCambio);
+                reqDoc.input('dePorc_Imp',       sql.Decimal(18, 5), totalBruto > 0 ? ((totalImp / totalBruto) * 100) : 0);
+                reqDoc.input('dePorc_Imp2',      sql.Decimal(18, 5), 0);
+                reqDoc.input('dePorc_Imp3',      sql.Decimal(18, 5), 0);
                 reqDoc.input('deMonto_Imp',      sql.Decimal(18, 2), totalImp);
                 reqDoc.input('deMonto_Imp2',     sql.Decimal(18, 2), 0);
                 reqDoc.input('deMonto_Imp3',     sql.Decimal(18, 2), 0);
-                reqDoc.input('sPorc_Desc_Glob',  sql.Char(15),       String(descGlobalPorc));
+                reqDoc.input('deTotal_Bruto',    sql.Decimal(18, 2), totalBruto);
                 reqDoc.input('deMonto_Desc_Glob',sql.Decimal(18, 2), descGlobalMonto);
-                reqDoc.input('sPorc_Reca',       sql.Char(15),       null);
                 reqDoc.input('deMonto_Reca',     sql.Decimal(18, 2), 0);
+                reqDoc.input('deSaldo',          sql.Decimal(18, 2), saldo);
+                reqDoc.input('deAdicional',      sql.Decimal(18, 2), 0);
                 reqDoc.input('deOtros1',         sql.Decimal(18, 2), 0);
                 reqDoc.input('deOtros2',         sql.Decimal(18, 2), 0);
                 reqDoc.input('deOtros3',         sql.Decimal(18, 2), 0);
-                reqDoc.input('sCo_Sucu_In',      sql.Char(6),        padProfit(coSucu, 6));
-                reqDoc.input('sCo_Us_In',        sql.Char(6),        padProfit(auditUser, 6));
+                reqDoc.input('sPro_Pago',        sql.VarChar(sql.MAX), null);
+                reqDoc.input('sSalestax',        sql.Char(8),        null);
+                reqDoc.input('sProv_Ter',        sql.Char(16),       null);
+                reqDoc.input('iReng_Ter',        sql.Int,            0);
+                reqDoc.input('iTipo_Origen',     sql.Int,            0);
+                reqDoc.input('sNum_Comprobante', sql.Char(14),       null);
+                reqDoc.input('sDis_Cen',         sql.VarChar(sql.MAX), null);
+                reqDoc.input('sN_Control',       sql.Char(20),       payload.n_control ? padProfit(String(payload.n_control).trim(), 20) : padProfit('N/A', 20));
+                reqDoc.input('sCampo1',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo2',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo3',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo4',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo5',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo6',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo7',          sql.VarChar(60),    null);
+                reqDoc.input('sCampo8',          sql.VarChar(60),    null);
+                reqDoc.input('sRevisado',        sql.Char(1),        null);
+                reqDoc.input('sTrasnfe',         sql.Char(1),        null);
+                reqDoc.input('sco_sucu_in',      sql.Char(6),        padProfit(coSucu, 6));
+                reqDoc.input('sco_us_in',        sql.Char(6),        padProfit(auditUser, 6));
                 reqDoc.input('sMaquina',         sql.VarChar(60),    'SYNC2K');
+                reqDoc.input('bNac',             sql.Bit,            0);
 
                 await reqDoc.execute('pInsertarDocumentoCompra');
-                console.log(`💳 [FACTURA COMPRA] Cuentas por Pagar registrada en saDocumentoCompra.`);
+                console.log(`💳 [FACTURA COMPRA] Cuentas por Pagar registrada en saDocumentoCompra (vía SP).`);
             } catch (docErr) {
-                console.warn(`⚠️ [FACTURA COMPRA] Advertencia al insertar saDocumentoCompra:`, docErr.message);
-                // Si pInsertarDocumentoCompra falla por parámetros específicos de versión, insertamos directo:
-                await transaction.request()
-                    .input('co_tipo_doc', sql.Char(4), 'FACT')
-                    .input('nro_doc', sql.Char(20), padProfit(docNum, 20))
-                    .input('nro_fact', sql.Char(20), padProfit(String(payload.nro_fact).trim(), 20))
-                    .input('co_prov', sql.Char(16), padProfit(payload.co_prov, 16))
-                    .input('co_mone', sql.Char(6), padProfit(coMone, 6))
-                    .input('fec_emis', sql.SmallDateTime, fecEmis)
-                    .input('fec_venc', sql.SmallDateTime, fecVenc)
-                    .input('fec_reg', sql.SmallDateTime, fecReg)
-                    .input('tasa', sql.Decimal(18, 5), tasaCambio)
-                    .input('total_bruto', sql.Decimal(18, 2), totalBruto)
-                    .input('total_neto', sql.Decimal(18, 2), totalNeto)
-                    .input('saldo', sql.Decimal(18, 2), saldo)
-                    .input('monto_imp', sql.Decimal(18, 2), totalImp)
-                    .input('n_control', sql.Char(20), payload.n_control ? padProfit(String(payload.n_control).trim(), 20) : padProfit('N/A', 20))
-                    .input('observa', sql.VarChar(120), `FACT N° ${payload.nro_fact} de prov ${payload.co_prov}`.substring(0, 120))
-                    .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
-                    .input('co_sucu_in', sql.Char(6), padProfit(coSucu, 6))
-                    .query(`
-                        IF NOT EXISTS (SELECT 1 FROM saDocumentoCompra WHERE nro_doc = @nro_doc AND co_tipo_doc = 'FACT')
-                        BEGIN
-                            INSERT INTO saDocumentoCompra (
-                                co_tipo_doc, nro_doc, nro_fact, co_prov, co_mone,
-                                fec_emis, fec_venc, fec_reg, tasa, total_bruto,
-                                total_neto, saldo, monto_imp, n_control, observa,
-                                co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
-                                anulado, aut
-                            ) VALUES (
-                                @co_tipo_doc, @nro_doc, @nro_fact, @co_prov, @co_mone,
-                                @fec_emis, @fec_venc, @fec_reg, @tasa, @total_bruto,
-                                @total_neto, @saldo, @monto_imp, @n_control, @observa,
-                                @co_us_in, @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(),
-                                0, 1
-                            );
-                        END
-                    `);
+                console.warn(`⚠️ [FACTURA COMPRA] Advertencia al insertar saDocumentoCompra vía SP:`, docErr.message);
+                console.log(`🔄 [FACTURA COMPRA] Intentando INSERT directo en saDocumentoCompra...`);
+                // Fallback direct INSERT con TODOS los campos requeridos por saDocumentoCompra
+                const directReq = new sql.Request(transaction);
+                directReq.input('co_tipo_doc',    sql.Char(6), padProfit('FACT', 6));
+                directReq.input('nro_doc',        sql.Char(20), padProfit(docNum, 20));
+                directReq.input('nro_fact',       sql.Char(20), padProfit(String(payload.nro_fact).trim(), 20));
+                directReq.input('co_mone',        sql.Char(6), padProfit(coMone, 6));
+                directReq.input('co_prov',        sql.Char(16), padProfit(payload.co_prov, 16));
+                directReq.input('doc_orig',       sql.Char(6), padProfit('FACT', 6));
+                directReq.input('nro_orig',       sql.Char(20), padProfit(docNum, 20));
+                directReq.input('monto_reca',     sql.Decimal(18, 2), 0);
+                directReq.input('monto_desc_glob',sql.Decimal(18, 2), descGlobalMonto);
+                directReq.input('porc_desc_glob', sql.Char(15), String(descGlobalPorc));
+                directReq.input('anulado',        sql.Bit, 0);
+                directReq.input('aut',            sql.Bit, 1);
+                directReq.input('pagar',          sql.Int, 0);
+                directReq.input('observa',        sql.VarChar(120), `FACT N° ${payload.nro_fact} de prov ${payload.co_prov}`.substring(0, 120));
+                directReq.input('tipo_imp',       sql.Char(1), '1');
+                directReq.input('fec_reg',        sql.SmallDateTime, fecReg);
+                directReq.input('fec_emis',       sql.SmallDateTime, fecEmis);
+                directReq.input('fec_venc',       sql.SmallDateTime, fecVenc);
+                directReq.input('porc_imp',       sql.Decimal(18, 5), totalBruto > 0 ? ((totalImp / totalBruto) * 100) : 0);
+                directReq.input('porc_imp2',      sql.Decimal(18, 5), 0);
+                directReq.input('porc_imp3',      sql.Decimal(18, 5), 0);
+                directReq.input('monto_imp',      sql.Decimal(18, 2), totalImp);
+                directReq.input('monto_imp2',     sql.Decimal(18, 2), 0);
+                directReq.input('monto_imp3',     sql.Decimal(18, 2), 0);
+                directReq.input('tasa',           sql.Decimal(21, 8), tasaCambio);
+                directReq.input('total_bruto',    sql.Decimal(18, 2), totalBruto);
+                directReq.input('total_neto',     sql.Decimal(18, 2), totalNeto);
+                directReq.input('saldo',          sql.Decimal(18, 2), saldo);
+                directReq.input('adicional',      sql.Decimal(18, 2), 0);
+                directReq.input('otros1',         sql.Decimal(18, 2), 0);
+                directReq.input('otros2',         sql.Decimal(18, 2), 0);
+                directReq.input('otros3',         sql.Decimal(18, 2), 0);
+                directReq.input('reng_ter',       sql.Int, 0);
+                directReq.input('tipo_origen',    sql.Int, 0);
+                directReq.input('n_control',      sql.Char(20), payload.n_control ? padProfit(String(payload.n_control).trim(), 20) : padProfit('N/A', 20));
+                directReq.input('co_us_in',       sql.Char(6), padProfit(auditUser, 6));
+                directReq.input('co_sucu_in',     sql.Char(6), padProfit(coSucu, 6));
+
+                await directReq.query(`
+                    IF NOT EXISTS (SELECT 1 FROM saDocumentoCompra WHERE nro_doc = @nro_doc AND co_tipo_doc = 'FACT')
+                    BEGIN
+                        INSERT INTO saDocumentoCompra (
+                            co_tipo_doc, nro_doc, nro_fact, co_mone, co_prov, doc_orig, nro_orig,
+                            porc_desc_glob, monto_desc_glob, monto_reca, anulado, aut, pagar,
+                            observa, tipo_imp, fec_reg, fec_emis, fec_venc, porc_imp, porc_imp2,
+                            porc_imp3, monto_imp, monto_imp2, monto_imp3, tasa, total_bruto,
+                            total_neto, saldo, adicional, otros1, otros2, otros3, reng_ter,
+                            tipo_origen, n_control, co_us_in, co_sucu_in, fe_us_in, co_us_mo,
+                            co_sucu_mo, fe_us_mo
+                        ) VALUES (
+                            @co_tipo_doc, @nro_doc, @nro_fact, @co_mone, @co_prov, @doc_orig, @nro_orig,
+                            @porc_desc_glob, @monto_desc_glob, @monto_reca, @anulado, @aut, @pagar,
+                            @observa, @tipo_imp, @fec_reg, @fec_emis, @fec_venc, @porc_imp, @porc_imp2,
+                            @porc_imp3, @monto_imp, @monto_imp2, @monto_imp3, @tasa, @total_bruto,
+                            @total_neto, @saldo, @adicional, @otros1, @otros2, @otros3, @reng_ter,
+                            @tipo_origen, @n_control, @co_us_in, @co_sucu_in, GETDATE(), @co_us_in,
+                            @co_sucu_in, GETDATE()
+                        );
+                    END
+                `);
+                console.log(`💳 [FACTURA COMPRA] Cuentas por Pagar registrada en saDocumentoCompra (vía INSERT directo).`);
             }
 
             await transaction.commit();
@@ -765,7 +921,7 @@ router.post('/:doc_num/anular', async (req, res) => {
 
             // Fetch invoice lines to revert pending quantities in reception notes
             const resL = await pool.request().input('doc_num', sql.VarChar, doc_num).query(
-                `SELECT reng_num, co_art, total_art, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, reng_doc, rowguid_doc 
+                `SELECT reng_num, co_art, total_art, RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc 
                  FROM saFacturaCompraReng 
                  WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))`
             );
@@ -783,6 +939,7 @@ router.post('/:doc_num/anular', async (req, res) => {
                     .query(`
                         UPDATE saFacturaCompra
                         SET anulado = 1,
+                            saldo = 0,
                             fe_us_mo = GETDATE(),
                             co_us_mo = @auditUser
                         WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
@@ -798,13 +955,13 @@ router.post('/:doc_num/anular', async (req, res) => {
                         rRevert.input('num_doc', sql.Char(20), padProfit(line.num_doc, 20));
                         rRevert.input('co_art', sql.Char(30), padProfit(line.co_art, 30));
 
-                        if (line.reng_doc) {
-                            rRevert.input('reng_num', sql.Int, line.reng_doc);
+                        if (line.rowguid_doc) {
+                            rRevert.input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc);
                             await rRevert.query(`
                                 UPDATE saNotaRecepcionCompraReng
                                 SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
                                     fe_us_mo = GETDATE()
-                                WHERE doc_num = @num_doc AND reng_num = @reng_num;
+                                WHERE rowguid = @rowguid_doc;
                             `);
                         } else {
                             await rRevert.query(`
@@ -845,6 +1002,7 @@ router.post('/:doc_num/anular', async (req, res) => {
                     .query(`
                         UPDATE saDocumentoCompra
                         SET anulado = 1,
+                            saldo = 0,
                             fe_us_mo = GETDATE(),
                             co_us_mo = @auditUser
                         WHERE LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@doc_num))
