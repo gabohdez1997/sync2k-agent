@@ -405,20 +405,7 @@ router.post('/', async (req, res) => {
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 6).toUpperCase();
-        const coSucu = (payload.co_sucu || srv.co_sucu || '01').substring(0, 6);
-
-        // 1. Obtener correlativo consecutivo para saFacturaCompra
-        const consecutivoInfo = await getProximoConsecutivo({
-            runner: pool,
-            co_tipo_serie: 'FACTURA_COMPRA',
-            co_sucur: coSucu,
-            table: 'saFacturaCompra',
-            col: 'doc_num'
-        });
-        const docNum = consecutivoInfo.docNum;
-        console.log(`📦 [FACTURA COMPRA] Asignando Correlativo: ${docNum} para sede: ${srv.name}`);
-
-        // 2. Resolver datos maestros y moneda
+        // 1. Resolver datos maestros y moneda
         const [resMoneda, resUSD, resCond, resTasa] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_mone)  AS co_mone   FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'`),
@@ -426,8 +413,12 @@ router.post('/', async (req, res) => {
             getExchangeRate(pool)
         ]);
 
-        const coMone = payload.co_mone || resUSD.recordset[0]?.co_mone || 'USD';
-        const tasaCambio = Number(payload.tasa) > 0 ? Number(payload.tasa) : (Number(resTasa) || 1);
+        const coMone = resUSD.recordset[0]?.co_mone || 'USD';
+        const currentTasa = resTasa || 1;
+        let tasaDoc = Number(payload.tasa || currentTasa);
+        if (tasaDoc <= 1 && currentTasa > 1) {
+            tasaDoc = currentTasa;
+        }
         const diasCred = Number(resCond.recordset[0]?.dias_cred) || 0;
 
         const ts = new Date();
@@ -437,35 +428,70 @@ router.post('/', async (req, res) => {
         let fecReg = ts;
         if (fecReg < fecEmis) fecReg = fecEmis;
 
+        // 2. Pre-calcular Totales e IVA
+        // Al igual que en Factura de Ventas (/dashboard/billing y routes/facturas.js),
+        // el documento se emite en USD con su tasa de cambio, pero todos los montos base
+        // (cost_unit, reng_neto, total_bruto, total_neto, saldo) se almacenan en Bolívares (BS).
+        let totalBruto = 0;
+        let totalImp = 0;
+        let totalNeto = 0;
+
+        for (const item of payload.renglones) {
+            const cant = Number(item.total_art || item.cantidad) || 0;
+            if (cant <= 0) continue;
+
+            const unitCostUSD = Number(item.cost_unit_om != null ? item.cost_unit_om : (item.cost_unit || item.costo)) || 0;
+            const costUnitBs = Math.round((unitCostUSD * tasaDoc) * 100000) / 100000;
+            const costUnit = costUnitBs;
+
+            const subtotal = Math.round((cant * costUnit) * 100) / 100;
+            const porcDesc = Number(item.porc_desc) || 0;
+            const montoDesc = Math.round((subtotal * (porcDesc / 100)) * 100) / 100;
+            const netoReng = subtotal - montoDesc;
+            const porcImp = Number(item.porc_imp) || 0;
+            const montoImp = Math.round((netoReng * (porcImp / 100)) * 100) / 100;
+
+            totalBruto += subtotal;
+            totalImp += montoImp;
+            totalNeto += (netoReng + montoImp);
+        }
+
+        const descGlobalPorc = Number(payload.porc_desc_glob) || 0;
+        const descGlobalMonto = Math.round((totalBruto * (descGlobalPorc / 100)) * 100) / 100;
+        totalNeto -= descGlobalMonto;
+        const saldo = totalNeto;
+
+        // 3. Determinar Sucursal (co_sucu_in, co_sucu_mo) según IVA (idéntico a /dashboard/billing y facturas.js)
+        // Si tiene IVA se guarda con la sucursal por defecto según la sede, sino por la otra sucursal
+        const branchCodes = srv.profit_branch_codes || [];
+        const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: srv.co_sucu || '01' };
+        const nonDefaultCodeObj = branchCodes.find(b => b.is_default === false) || defaultCodeObj;
+
+        let sucuCode;
+        if (payload.force_sucu) {
+            sucuCode = String(payload.force_sucu).trim();
+        } else if (payload.co_sucu) {
+            sucuCode = String(payload.co_sucu).trim();
+        } else {
+            sucuCode = totalImp === 0 ? nonDefaultCodeObj.code : defaultCodeObj.code;
+        }
+        console.log(`🏢 [FACTURA COMPRA] Resolviendo sucursal. IVA = ${totalImp}, force_sucu = ${payload.force_sucu || payload.co_sucu || 'N/A'}. Sucu asignada = ${sucuCode} (Default = ${defaultCodeObj.code}, Non-Default = ${nonDefaultCodeObj.code})`);
+
         // Iniciar Transacción SQL
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
         try {
-            // 3. Calcular Totales
-            let totalBruto = 0;
-            let totalImp = 0;
-            let totalNeto = 0;
-
-            for (const item of payload.renglones) {
-                const cant = Number(item.total_art || item.cantidad) || 0;
-                const costUnit = Number(item.cost_unit || item.costo) || 0;
-                const subtotal = cant * costUnit;
-                const porcDesc = Number(item.porc_desc) || 0;
-                const montoDesc = subtotal * (porcDesc / 100);
-                const netoReng = subtotal - montoDesc;
-                const porcImp = Number(item.porc_imp) || 0;
-                const montoImp = netoReng * (porcImp / 100);
-
-                totalBruto += subtotal;
-                totalImp += montoImp;
-                totalNeto += (netoReng + montoImp);
-            }
-
-            const descGlobalPorc = Number(payload.porc_desc_glob) || 0;
-            const descGlobalMonto = totalBruto * (descGlobalPorc / 100);
-            totalNeto -= descGlobalMonto;
-            const saldo = totalNeto;
+            // 4. Obtener correlativo consecutivo para saFacturaCompra según la sucursal
+            const consecutivoInfo = await getProximoConsecutivo({
+                runner: transaction,
+                co_tipo_serie: 'FACTURA_COMPRA',
+                co_sucur: sucuCode,
+                table: 'saFacturaCompra',
+                col: 'doc_num'
+            });
+            const docNum = consecutivoInfo.docNum;
+            console.log(`📦 [FACTURA COMPRA] Asignando Correlativo: ${docNum} para sede: ${srv.name}, sucursal: ${sucuCode}`);
 
             // 4. Insertar Cabecera de Factura de Compra
             const descripDoc = (payload.descrip || `FACTURA COMPRA ${payload.nro_fact}`).substring(0, 60);
@@ -484,7 +510,7 @@ router.post('/', async (req, res) => {
             reqH.input('sdFec_Reg',         sql.SmallDateTime,  fecReg);
             reqH.input('bAnulado',          sql.Bit,            0);
             reqH.input('sStatus',           sql.Char(1),        '0');
-            reqH.input('deTasa',            sql.Decimal(18, 5), tasaCambio);
+            reqH.input('deTasa',            sql.Decimal(18, 5), tasaDoc);
             reqH.input('sPorc_Reca',        sql.VarChar(15),    null);
             reqH.input('deSaldo',           sql.Decimal(18, 2), saldo);
             reqH.input('deTotal_Bruto',     sql.Decimal(18, 2), totalBruto);
@@ -513,7 +539,7 @@ router.post('/', async (req, res) => {
             reqH.input('sRevisado',         sql.Char(1),        null);
             reqH.input('sTrasnfe',          sql.Char(1),        null);
             reqH.input('sCo_Us_In',         sql.Char(6),        padProfit(auditUser, 6));
-            reqH.input('sCo_Sucu_In',       sql.Char(6),        padProfit(coSucu, 6));
+            reqH.input('sCo_Sucu_In',       sql.Char(6),        padProfit(sucuCode, 6));
             reqH.input('sMaquina',          sql.VarChar(60),    'SYNC2K');
             reqH.input('bNac',              sql.Bit,            1);
 
@@ -527,18 +553,24 @@ router.post('/', async (req, res) => {
                 const cant = Number(item.total_art || item.cantidad) || 0;
                 if (cant <= 0) continue;
 
-                const costUnit = Number(item.cost_unit || item.costo) || 0;
-                const costUnitOM = Number(item.cost_unit_om) || (coMone === 'BS' ? (costUnit / (tasaCambio || 1)) : costUnit);
-                const subtotal = cant * costUnit;
+                const unitCostUSD = Number(item.cost_unit_om != null ? item.cost_unit_om : (item.cost_unit || item.costo)) || 0;
+                const costUnitBs = Math.round((unitCostUSD * tasaDoc) * 100000) / 100000;
+                const costUnitOM = unitCostUSD;
+                const costUnit = costUnitBs;
+
+                const subtotal = Math.round((cant * costUnit) * 100) / 100;
                 const porcDesc = Number(item.porc_desc) || 0;
-                const montoDesc = subtotal * (porcDesc / 100);
+                const montoDesc = Math.round((subtotal * (porcDesc / 100)) * 100) / 100;
                 const netoReng = subtotal - montoDesc;
-                // Profit Plus CHECK constraint CK_saFacturaCompraReng_TipoImpuesto:
-                // Valid values: '1' = Gravado, '2' = Exento, '3' = No sujeto
+                // Profit Plus: '1' = General (16%), '2' = Reducida (8%), '3' = Adicional (31%), '7'/'6' = Exento (0%)
                 let tipoImp = item.tipo_imp ? String(item.tipo_imp).trim().substring(0, 1) : '1';
-                if (!['1', '2', '3'].includes(tipoImp)) tipoImp = '2'; // Fallback: Exento
                 const porcImp = Number(item.porc_imp) || 0;
-                const montoImp = netoReng * (porcImp / 100);
+                if (porcImp === 0) {
+                    tipoImp = (tipoImp === '6' || tipoImp === '7') ? tipoImp : '7';
+                } else if (!['1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(tipoImp)) {
+                    tipoImp = '1';
+                }
+                const montoImp = Math.round((netoReng * (porcImp / 100)) * 100) / 100;
 
                 const tipoDocOrigen = (item.tipo_doc || (item.num_doc ? 'NREC' : null));
                 const numDocOrigen = item.num_doc ? String(item.num_doc).trim() : null;
@@ -590,7 +622,7 @@ router.post('/', async (req, res) => {
                 reqR.input('dePendiente',            sql.Decimal(18, 5), cant);
                 reqR.input('iReng_Doc',              sql.Int,            rengDocOrigen);
                 reqR.input('sDis_Cen',               sql.VarChar(sql.MAX), null);
-                reqR.input('sCo_Sucu_In',            sql.Char(6),        padProfit(coSucu, 6));
+                reqR.input('sCo_Sucu_In',            sql.Char(6),        padProfit(sucuCode, 6));
                 reqR.input('sCo_Us_In',              sql.Char(6),        padProfit(auditUser, 6));
                 reqR.input('sRevisado',              sql.Char(1),        null);
                 reqR.input('sTrasnfe',               sql.Char(1),        null);
@@ -773,7 +805,7 @@ router.post('/', async (req, res) => {
                 reqDoc.input('sdFec_Emis',       sql.SmallDateTime,  fecEmis);
                 reqDoc.input('sdFec_Venc',       sql.SmallDateTime,  fecVenc);
                 reqDoc.input('deTotal_Neto',     sql.Decimal(18, 2), totalNeto);
-                reqDoc.input('deTasa',           sql.Decimal(21, 8), tasaCambio);
+                reqDoc.input('deTasa',           sql.Decimal(21, 8), tasaDoc);
                 reqDoc.input('dePorc_Imp',       sql.Decimal(18, 5), totalBruto > 0 ? ((totalImp / totalBruto) * 100) : 0);
                 reqDoc.input('dePorc_Imp2',      sql.Decimal(18, 5), 0);
                 reqDoc.input('dePorc_Imp3',      sql.Decimal(18, 5), 0);
@@ -806,7 +838,7 @@ router.post('/', async (req, res) => {
                 reqDoc.input('sCampo8',          sql.VarChar(60),    null);
                 reqDoc.input('sRevisado',        sql.Char(1),        null);
                 reqDoc.input('sTrasnfe',         sql.Char(1),        null);
-                reqDoc.input('sco_sucu_in',      sql.Char(6),        padProfit(coSucu, 6));
+                reqDoc.input('sco_sucu_in',      sql.Char(6),        padProfit(sucuCode, 6));
                 reqDoc.input('sco_us_in',        sql.Char(6),        padProfit(auditUser, 6));
                 reqDoc.input('sMaquina',         sql.VarChar(60),    'SYNC2K');
                 reqDoc.input('bNac',             sql.Bit,            0);
@@ -842,7 +874,7 @@ router.post('/', async (req, res) => {
                 directReq.input('monto_imp',      sql.Decimal(18, 2), totalImp);
                 directReq.input('monto_imp2',     sql.Decimal(18, 2), 0);
                 directReq.input('monto_imp3',     sql.Decimal(18, 2), 0);
-                directReq.input('tasa',           sql.Decimal(21, 8), tasaCambio);
+                directReq.input('tasa',           sql.Decimal(21, 8), tasaDoc);
                 directReq.input('total_bruto',    sql.Decimal(18, 2), totalBruto);
                 directReq.input('total_neto',     sql.Decimal(18, 2), totalNeto);
                 directReq.input('saldo',          sql.Decimal(18, 2), saldo);
@@ -854,7 +886,7 @@ router.post('/', async (req, res) => {
                 directReq.input('tipo_origen',    sql.Int, 0);
                 directReq.input('n_control',      sql.Char(20), payload.n_control ? padProfit(String(payload.n_control).trim(), 20) : padProfit('N/A', 20));
                 directReq.input('co_us_in',       sql.Char(6), padProfit(auditUser, 6));
-                directReq.input('co_sucu_in',     sql.Char(6), padProfit(coSucu, 6));
+                directReq.input('co_sucu_in',     sql.Char(6), padProfit(sucuCode, 6));
 
                 await directReq.query(`
                     IF NOT EXISTS (SELECT 1 FROM saDocumentoCompra WHERE nro_doc = @nro_doc AND co_tipo_doc = 'FACT')

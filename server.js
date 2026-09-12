@@ -5,8 +5,7 @@ const cors = require('cors');
 
 // Importar módulo de base de datos
 const { getServers, initServers, closeAllPools } = require('./db');
-const swaggerUi = require('swagger-ui-express');
-const swaggerSpecs = require('./swaggerOptions');
+let swaggerRouter = null;
 
 // Las rutas se cargarán bajo demanda (lazy loading) en el bloque de endpoints
 
@@ -94,10 +93,20 @@ app.use('/api/v1/auth', (req, res, next) => require('./routes/auth')(req, res, n
 app.use('/api', authenticateAPIKey, parseSQLAuth);
 
 // ==========================================
-// DOCUMENTACIÓN DE LA API (SWAGGER)
+// DOCUMENTACIÓN DE LA API (SWAGGER - CARGA PEREZOSA)
 // ==========================================
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpecs));
+app.use('/api-docs', (req, res, next) => {
+    if (!swaggerRouter) {
+        const swaggerUi = require('swagger-ui-express');
+        const swaggerSpecs = require('./swaggerOptions');
+        swaggerRouter = express.Router();
+        swaggerRouter.use('/', swaggerUi.serve);
+        swaggerRouter.get('/', swaggerUi.setup(swaggerSpecs));
+    }
+    return swaggerRouter(req, res, next);
+});
 app.get('/swagger.json', (req, res) => {
+    const swaggerSpecs = require('./swaggerOptions');
     res.setHeader('Content-Type', 'application/json');
     res.send(swaggerSpecs);
 });
@@ -151,6 +160,14 @@ function gracefulShutdown(signal) {
         return;
     }
     console.log('\nRecibida señal de apagado (SIGINT/SIGTERM). Cerrando servicios...');
+
+    // Límite de tiempo forzado de 1.5s para no demorar la terminal al reiniciar o actualizar con git pull
+    const forceExitTimer = setTimeout(() => {
+        console.warn('⚠️ Límite de tiempo de cierre alcanzado (1.5s). Finalizando proceso...');
+        process.exit(0);
+    }, 1500);
+    forceExitTimer.unref();
+
     closeAllPools().then(() => {
         console.log('✅ Conexiones a SQL Server cerradas correctamente.');
         process.exit(0);
