@@ -225,6 +225,29 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Campos obligatorios: co_prov, renglones' });
     }
 
+    // Validación previa de renglones: cantidad > 0 y costo unitario > 0 (Requisito estricto CK_saOrdenCompraReng_cost_unit)
+    for (let idx = 0; idx < data.renglones.length; idx++) {
+        const item = data.renglones[idx];
+        const qty = Number(item.cantidad || 0);
+        const prcIn = Number(item.precio != null ? item.precio : (item.cost_unit || 0));
+
+        if (isNaN(qty) || qty <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: `El renglón ${idx + 1} (${item.co_art || 'Desconocido'}) tiene una cantidad inválida (${item.cantidad}). Debe ser mayor a 0.`
+            });
+        }
+
+        if (isNaN(prcIn) || prcIn <= 0) {
+            const artCode = item.co_art ? String(item.co_art).trim() : `Renglón ${idx + 1}`;
+            const artDes = item.art_des ? ` - ${String(item.art_des).trim()}` : '';
+            return res.status(400).json({
+                success: false,
+                message: `El artículo "${artCode}${artDes}" tiene costo unitario de 0. En Profit Plus todos los renglones de una orden de compra deben tener un costo unitario mayor a 0.`
+            });
+        }
+    }
+
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
         // 1. Cargar Catálogos y Parámetros Globales
         const [resMoneda, resUSD, resAlma, resCond, resSucu, resProv, resTax, resTasa, resCtaIE, resTran] = await Promise.all([
@@ -535,6 +558,9 @@ router.post('/', async (req, res) => {
             return { doc_num: docNum, detail: isUpdate ? 'Actualizado exitosamente' : 'Creado con éxito' };
         } catch (err) {
             if (transaction._aborted === false) await transaction.rollback();
+            if (err.message && err.message.includes('CK_saOrdenCompraReng_cost_unit')) {
+                err.message = 'Error en Profit Plus: Uno o más artículos tienen costo unitario de 0. Todos los renglones deben tener un costo mayor a 0 (restricción CK_saOrdenCompraReng_cost_unit).';
+            }
             throw err;
         }
     });
