@@ -73,6 +73,24 @@ const DOC_TYPE_CONFIG = {
         co_consecutivos: ['DOC_COM_FACT', 'FCOM_NUM', 'FACT_COM', 'FAC_COM'],
         table: 'saFacturaCompra',
         col: 'doc_num'
+    },
+    PAGO: {
+        co_tipo_serie: 'C020',
+        co_consecutivos: ['PAGO', 'PAGO_NUM', 'PAG_NUM'],
+        table: 'saPago',
+        col: 'cob_num'
+    },
+    IVAN_COMPRA: {
+        co_tipo_serie: 'C016',
+        co_consecutivos: ['DOC_COM_IVAN', 'IVAN_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
+    },
+    ISLR_COMPRA: {
+        co_tipo_serie: 'C015',
+        co_consecutivos: ['DOC_COM_ISLR', 'ISLR_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
     }
 };
 

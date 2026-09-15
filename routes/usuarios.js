@@ -592,6 +592,27 @@ router.post('/sync/import-master', async (req, res) => {
         const pool = await getMasterPool(sede);
         const { mapas = [], usuarios = [], perfiles = [], reportes_mapa = [] } = data;
 
+        // Determinar la sucursal por defecto y códigos válidos de la sede destino
+        const { getServers } = require('../db');
+        const servers = getServers();
+        const targetServer = (sede ? servers.find(s => s.id === sede || s.name === sede) : null)
+            || (req.headers['x-branch-id'] ? servers.find(s => s.id === req.headers['x-branch-id']) : null)
+            || servers[0];
+
+        let defaultSucu = null;
+        let validCodes = [];
+        if (targetServer?.profit_branch_codes) {
+            const pbc = targetServer.profit_branch_codes;
+            if (Array.isArray(pbc) && pbc.length > 0) {
+                const def = pbc.find(c => c && c.is_default);
+                defaultSucu = def ? String(def.code).trim() : String(pbc[0]?.code || pbc[0]).trim();
+                validCodes = pbc.map(c => String(typeof c === 'object' ? c.code : c).trim());
+            } else if (typeof pbc === 'string' && pbc.trim()) {
+                defaultSucu = pbc.trim();
+                validCodes = [defaultSucu];
+            }
+        }
+
         let migratedMapas = 0;
         let migratedUsers = 0;
         let migratedPerfiles = 0;
@@ -674,7 +695,9 @@ router.post('/sync/import-master', async (req, res) => {
                 reqU.input('Cod_Empresa_Nomi', sql.Char(20), u.Cod_Empresa_Nomi ? u.Cod_Empresa_Nomi.padEnd(20, ' ') : null);
                 reqU.input('Cod_Empresa_Admi', sql.Char(20), u.Cod_Empresa_Admi ? u.Cod_Empresa_Admi.padEnd(20, ' ') : null);
 
-                reqU.input('Sucursal', sql.Char(6), u.Sucursal ? u.Sucursal.padEnd(6, ' ') : null);
+                const userSucu = u.Sucursal ? String(u.Sucursal).trim() : null;
+                const sucursalToUse = (userSucu && validCodes.includes(userSucu)) ? userSucu : (defaultSucu || userSucu);
+                reqU.input('Sucursal', sql.Char(6), sucursalToUse ? sucursalToUse.padEnd(6, ' ') : null);
                 reqU.input('Camb_Sucu', sql.Bit, u.Camb_Sucu ? 1 : 0);
                 reqU.input('Pide_Sucu', sql.Bit, u.Pide_Sucu ? 1 : 0);
 
@@ -900,6 +923,21 @@ router.post('/sync', async (req, res) => {
                     } catch (eM) {}
                 }
 
+                // Determinar la sucursal por defecto de este servidor
+                let defaultSucu = null;
+                let validCodes = [];
+                if (srv.profit_branch_codes) {
+                    const pbc = srv.profit_branch_codes;
+                    if (Array.isArray(pbc) && pbc.length > 0) {
+                        const def = pbc.find(c => c && c.is_default);
+                        defaultSucu = def ? String(def.code).trim() : String(pbc[0]?.code || pbc[0]).trim();
+                        validCodes = pbc.map(c => String(typeof c === 'object' ? c.code : c).trim());
+                    } else if (typeof pbc === 'string' && pbc.trim()) {
+                        defaultSucu = pbc.trim();
+                        validCodes = [defaultSucu];
+                    }
+                }
+
                 // Sincronizar usuarios
                 for (const u of unifiedUsers) {
                     try {
@@ -926,7 +964,9 @@ router.post('/sync', async (req, res) => {
                         reqU.input('Cod_Empresa_Nomi', sql.Char(20), u.Cod_Empresa_Nomi ? u.Cod_Empresa_Nomi.padEnd(20, ' ') : null);
                         reqU.input('Cod_Empresa_Admi', sql.Char(20), u.Cod_Empresa_Admi ? u.Cod_Empresa_Admi.padEnd(20, ' ') : null);
 
-                        reqU.input('Sucursal', sql.Char(6), u.Sucursal ? u.Sucursal.padEnd(6, ' ') : null);
+                        const userSucu = u.Sucursal ? String(u.Sucursal).trim() : null;
+                        const sucursalToUse = (userSucu && validCodes.includes(userSucu)) ? userSucu : (defaultSucu || userSucu);
+                        reqU.input('Sucursal', sql.Char(6), sucursalToUse ? sucursalToUse.padEnd(6, ' ') : null);
                         reqU.input('Camb_Sucu', sql.Bit, u.Camb_Sucu ? 1 : 0);
                         reqU.input('Pide_Sucu', sql.Bit, u.Pide_Sucu ? 1 : 0);
 
