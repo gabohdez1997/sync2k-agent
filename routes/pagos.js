@@ -3,6 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
+const { getProximoConsecutivoRetencion } = require('../helpers/consecutivoRetenciones');
 
 /**
  * @swagger
@@ -699,10 +700,12 @@ router.post('/', async (req, res) => {
 
                 // 3.1 Generar documento IVAN (Retención de IVA en compras)
                 if (adjustedMontoRetencionIva > 0) {
-                    const corrIvan = await getProximoConsecutivo({
+                    const corrIvan = await getProximoConsecutivoRetencion({
                         runner: transaction,
                         co_tipo_serie: 'IVAN_COMPRA',
-                        co_sucur: sucuCode
+                        co_sucur: sucuCode,
+                        currentSrvId: srv.id,
+                        sqlAuth: req.sqlAuth
                     });
                     const ivanNum = corrIvan.docNum;
 
@@ -825,10 +828,12 @@ router.post('/', async (req, res) => {
 
                 // 3.2 Generar documento ISLR (Retención de ISLR en compras)
                 if (adjustedMontoRetencion > 0) {
-                    const corrIslr = await getProximoConsecutivo({
+                    const corrIslr = await getProximoConsecutivoRetencion({
                         runner: transaction,
                         co_tipo_serie: 'ISLR_COMPRA',
-                        co_sucur: sucuCode
+                        co_sucur: sucuCode,
+                        currentSrvId: srv.id,
+                        sqlAuth: req.sqlAuth
                     });
                     const islrNum = corrIslr.docNum;
 
