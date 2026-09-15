@@ -92,33 +92,35 @@ async function getProximoConsecutivoRetencion(params) {
 
     const candidateNumbers = [];
 
-    // Candidato 1: prox_n local
+    // Candidato 1: prox_n en saSerie local
     if (Number.isFinite(Number(localMeta.prox_n)) && Number(localMeta.prox_n) > 0) {
         candidateNumbers.push(Number(localMeta.prox_n));
     }
 
-    // Candidato 2: Máximo doc físico local en saDocumentoCompra
-    try {
-        const localMaxDocRes = await runner.request().query(`
-            SELECT ISNULL(MAX(
-                CASE 
-                    WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
-                    THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
-                    ELSE 0 
-                END
-            ), 0) AS max_n
-            FROM saDocumentoCompra
-            WHERE UPPER(RTRIM(co_tipo_doc)) = '${docTypeProfit}'
-        `);
-        const maxDocLocal = Number(localMaxDocRes.recordset[0]?.max_n || 0);
-        if (maxDocLocal > 0) {
-            candidateNumbers.push(maxDocLocal + 1);
+    // Candidato 2: Si es ISLR, consultar MAX(nro_doc) local
+    if (docTypeProfit === 'ISLR') {
+        try {
+            const localMaxDocRes = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_n
+                FROM saDocumentoCompra
+                WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
+            `);
+            const maxDocLocal = Number(localMaxDocRes.recordset[0]?.max_n || 0);
+            if (maxDocLocal > 0) {
+                candidateNumbers.push(maxDocLocal);
+            }
+        } catch (eDocLocal) {
+            console.warn(`[consecutivoRetenciones] Advertencia al consultar max_doc ISLR local:`, eDocLocal.message);
         }
-    } catch (eDocLocal) {
-        console.warn(`[consecutivoRetenciones] Advertencia al consultar max_doc local:`, eDocLocal.message);
     }
 
-    // Si es IVAN, verificar también max comprobante en saPagoRetenIvaReng
+    // Si es IVAN, verificar max comprobante en saPagoRetenIvaReng y en saDocumentoCompra
     if (docTypeProfit === 'IVAN') {
         try {
             const localMaxCompRes = await runner.request().query(`
@@ -133,7 +135,23 @@ async function getProximoConsecutivoRetencion(params) {
             `);
             const maxCLocal = Number(localMaxCompRes.recordset[0]?.max_c || 0);
             if (maxCLocal > 0) {
-                candidateNumbers.push(maxCLocal + 1);
+                candidateNumbers.push(maxCLocal);
+            }
+
+            const docCompRes = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_c
+                FROM saDocumentoCompra
+                WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
+            `);
+            const maxCDoc = Number(docCompRes.recordset[0]?.max_c || 0);
+            if (maxCDoc > 0) {
+                candidateNumbers.push(maxCDoc);
             }
         } catch (eCompLocal) {
             console.warn(`[consecutivoRetenciones] Advertencia al consultar max_comprobante local:`, eCompLocal.message);
@@ -151,7 +169,7 @@ async function getProximoConsecutivoRetencion(params) {
         console.warn(`[consecutivoRetenciones] Advertencia al consultar PG global_consecutivos:`, ePg.message);
     }
 
-    // Candidato 4: Consultar en las DEMÁS sedes activas
+    // Candidato 4: Consultar en las DEMÁS sedes activas (saSerie)
     const otherServers = allServers.filter(s => s.id && s.id !== currentSrvId);
     await Promise.all(otherServers.map(async (otherSrv) => {
         try {
@@ -166,32 +184,34 @@ async function getProximoConsecutivoRetencion(params) {
                 if (otherN > 0) candidateNumbers.push(otherN);
             }
 
-            const otherMaxDocRes = await otherPool.request().query(`
-                SELECT ISNULL(MAX(
-                    CASE 
-                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
-                        THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
-                        ELSE 0 
-                    END
-                ), 0) AS max_n
-                FROM saDocumentoCompra
-                WHERE UPPER(RTRIM(co_tipo_doc)) = '${docTypeProfit}'
-            `);
-            const maxDocOther = Number(otherMaxDocRes.recordset[0]?.max_n || 0);
-            if (maxDocOther > 0) {
-                candidateNumbers.push(maxDocOther + 1);
+            if (docTypeProfit === 'ISLR') {
+                const otherMaxDocRes = await otherPool.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_n
+                    FROM saDocumentoCompra
+                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
+                `);
+                const maxDocOther = Number(otherMaxDocRes.recordset[0]?.max_n || 0);
+                if (maxDocOther > 0) {
+                    candidateNumbers.push(maxDocOther);
+                }
             }
         } catch (eOther) {
             console.warn(`[consecutivoRetenciones] No se pudo leer sede remota ${otherSrv.id}: ${eOther.message}`);
         }
     }));
 
-    // ── 2. Calcular número a asignar y próximo correlativo ──
+    // ── 2. Calcular número fiscal a asignar (base actual + 1) ──
     const maxVal = candidateNumbers.length > 0 ? Math.max(...candidateNumbers) : 1;
-    const assignedN = maxVal;
-    const nextN = assignedN + 1;
+    const assignedN = maxVal + 1;
+    const nextN = assignedN;
 
-    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Asignado: ${assignedN} | Próximo global: ${nextN}`);
+    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Base anterior: ${maxVal} | Asignado fiscal: ${assignedN}`);
 
     // ── 3. Actualizar saSerie en la transacción de la sede actual ──
     await runner.request().query(`
@@ -230,7 +250,37 @@ async function getProximoConsecutivoRetencion(params) {
 
     // ── 6. Formatear y retornar número de documento ──
     const numStr = assignedN.toString().padStart(longitud, '0');
-    const docNum = `${prefijo}${numStr}${sufijo}`;
+    let docNum = `${prefijo}${numStr}${sufijo}`;
+
+    // Si es IVAN, verificar que docNum no colisione físicamente en saDocumentoCompra
+    if (docTypeProfit === 'IVAN') {
+        try {
+            const existsCheck = await runner.request().query(`
+                SELECT TOP 1 nro_doc 
+                FROM saDocumentoCompra 
+                WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN' 
+                  AND UPPER(RTRIM(nro_doc)) = '${docNum.trim().toUpperCase()}'
+            `);
+            if (existsCheck.recordset.length > 0) {
+                const maxPhysRes = await runner.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_phys
+                    FROM saDocumentoCompra
+                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
+                `);
+                const nextPhysN = Number(maxPhysRes.recordset[0]?.max_phys || 0) + 1;
+                docNum = `${prefijo}${nextPhysN.toString().padStart(longitud, '0')}${sufijo}`;
+                console.log(`⚠️ [RETENCIONES IVAN] nro_doc físico ajustado a "${docNum}" para evitar duplicidad de Primary Key en saDocumentoCompra (Comprobante fiscal se mantiene en ${assignedN})`);
+            }
+        } catch (eCheck) {
+            console.warn(`[consecutivoRetenciones] Advertencia al verificar duplicidad física de nro_doc:`, eCheck.message);
+        }
+    }
 
     return {
         docNum,
