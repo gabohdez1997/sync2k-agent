@@ -733,18 +733,18 @@ router.post('/', async (req, res) => {
                         .query(`
                             INSERT INTO saDocumentoCompra (
                                 co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
-                                fec_reg, fec_emis, fec_venc, anulado, aut,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
                                 doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
-                                otros1, otros2, otros3, co_us_in, co_sucu_in, fe_us_in,
+                                otros1, otros2, otros3, adicional, co_us_in, co_sucu_in, fe_us_in,
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
                                 monto_desc_glob, monto_reca, num_comprobante, tipo_imp
                             ) VALUES (
                                 @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
-                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
-                                0, 0, 0, @co_us_in, @co_sucu_in, GETDATE(),
+                                0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
                                 @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
                                 0, 0, @num_comprobante, '7'
                             )
@@ -855,18 +855,18 @@ router.post('/', async (req, res) => {
                         .query(`
                             INSERT INTO saDocumentoCompra (
                                 co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
-                                fec_reg, fec_emis, fec_venc, anulado, aut,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
                                 doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
-                                otros1, otros2, otros3, co_us_in, co_sucu_in, fe_us_in,
+                                otros1, otros2, otros3, adicional, co_us_in, co_sucu_in, fe_us_in,
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
                                 monto_desc_glob, monto_reca
                             ) VALUES (
                                 @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
-                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
-                                0, 0, 0, @co_us_in, @co_sucu_in, GETDATE(),
+                                0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
                                 @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
                                 0, 0
                             )
