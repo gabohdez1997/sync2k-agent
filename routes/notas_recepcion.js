@@ -104,10 +104,14 @@ router.get('/', async (req, res) => {
                         RTRIM(c.co_sucu_in) AS co_sucu_in,
                         (SELECT COUNT(*) FROM saNotaRecepcionCompraReng r WHERE r.doc_num = c.doc_num) AS cant_renglones,
                         (SELECT ISNULL(SUM(r.total_art), 0) FROM saNotaRecepcionCompraReng r WHERE r.doc_num = c.doc_num) AS total_unidades,
-                        (
-                            SELECT TOP 1 RTRIM(r.num_doc) 
-                            FROM saNotaRecepcionCompraReng r 
-                            WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND LTRIM(RTRIM(r.num_doc)) <> ''
+                        ISNULL(
+                            STUFF((
+                                SELECT DISTINCT ', ' + RTRIM(r.num_doc) 
+                                FROM saNotaRecepcionCompraReng r 
+                                WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND LTRIM(RTRIM(r.num_doc)) <> ''
+                                FOR XML PATH('')
+                            ), 1, 2, ''),
+                            RTRIM(c.n_control)
                         ) AS orden_compra,
                         RTRIM(oc_info.oc_co_us_in) AS oc_co_us_in,
                         RTRIM(oc_info.oc_doc_num) AS oc_doc_num,
@@ -162,7 +166,7 @@ router.get('/', async (req, res) => {
 // =========================================================================
 router.get('/ordenes-pendientes', async (req, res) => {
     try {
-        const { sede, search, co_prov } = req.query;
+        const { sede, search, co_prov, co_us_in, exact } = req.query;
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -181,8 +185,17 @@ router.get('/ordenes-pendientes', async (req, res) => {
                     whereClauses.push("(c.doc_num LIKE @search OR p.prov_des LIKE @search OR c.co_prov LIKE @search OR p.rif LIKE @search OR c.descrip LIKE @search)");
                 }
                 if (co_prov) {
-                    request.input('co_prov', sql.VarChar, `%${co_prov}%`);
-                    whereClauses.push("(c.co_prov LIKE @co_prov OR p.prov_des LIKE @co_prov OR p.rif LIKE @co_prov)");
+                    if (exact === 'true' || exact === true) {
+                        request.input('co_prov_exact', sql.VarChar, co_prov.trim());
+                        whereClauses.push("LTRIM(RTRIM(c.co_prov)) = @co_prov_exact");
+                    } else {
+                        request.input('co_prov', sql.VarChar, `%${co_prov}%`);
+                        whereClauses.push("(c.co_prov LIKE @co_prov OR p.prov_des LIKE @co_prov OR p.rif LIKE @co_prov)");
+                    }
+                }
+                if (co_us_in) {
+                    request.input('co_us_in_exact', sql.VarChar, co_us_in.trim());
+                    whereClauses.push("LTRIM(RTRIM(c.co_us_in)) = @co_us_in_exact");
                 }
 
                 const whereSQL = whereClauses.join(" AND ");
@@ -206,6 +219,7 @@ router.get('/ordenes-pendientes', async (req, res) => {
                         c.monto_imp,
                         c.total_neto,
                         c.status,
+                        RTRIM(c.co_us_in) AS co_us_in,
                         (SELECT COUNT(*) FROM saOrdenCompraReng r WHERE r.doc_num = c.doc_num) AS total_renglones,
                         (SELECT COUNT(*) FROM saOrdenCompraReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0) AS renglones_pendientes,
                         (SELECT ISNULL(SUM(r.total_art), 0) FROM saOrdenCompraReng r WHERE r.doc_num = c.doc_num) AS cant_total,
@@ -276,6 +290,7 @@ router.get('/ordenes-pendientes/:doc_num', async (req, res) => {
                             c.total_neto,
                             c.status,
                             c.anulado,
+                            RTRIM(c.co_us_in) AS co_us_in,
                             RTRIM(c.comentario) AS comentario,
                             '${srv.name || srv.id}' AS sede_nombre,
                             '${srv.id}' AS sede_id
@@ -388,10 +403,14 @@ router.get('/:doc_num', async (req, res) => {
                             RTRIM(c.co_us_in) AS co_us_in,
                             RTRIM(c.co_us_mo) AS co_us_mo,
                             RTRIM(c.co_sucu_in) AS co_sucu_in,
-                            (
-                                SELECT TOP 1 RTRIM(r.num_doc) 
-                                FROM saNotaRecepcionCompraReng r 
-                                WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND LTRIM(RTRIM(r.num_doc)) <> ''
+                            ISNULL(
+                                STUFF((
+                                    SELECT DISTINCT ', ' + RTRIM(r.num_doc) 
+                                    FROM saNotaRecepcionCompraReng r 
+                                    WHERE r.doc_num = c.doc_num AND r.num_doc IS NOT NULL AND LTRIM(RTRIM(r.num_doc)) <> ''
+                                    FOR XML PATH('')
+                                ), 1, 2, ''),
+                                RTRIM(c.n_control)
                             ) AS orden_compra,
                             RTRIM(oc_info.oc_co_us_in) AS oc_co_us_in,
                             RTRIM(oc_info.oc_doc_num) AS oc_doc_num,
@@ -691,8 +710,12 @@ router.post('/', async (req, res) => {
                     throw new Error("El N° de Factura / Guía del Proveedor (N° NDR) es obligatorio.");
                 }
 
-                const finalDescrip = String(data.descrip || data.observaciones || (data.doc_num_oc ? `RECEPCION OC ${data.doc_num_oc}` : 'RECEPCION')).trim().substring(0, 60);
-                const finalComentario = String(data.comentario || (data.doc_num_oc ? `Recepción de OC ${data.doc_num_oc}` : 'Recepción de Mercancía')).trim().substring(0, 500);
+                const ocList = Array.isArray(data.doc_num_oc) 
+                    ? data.doc_num_oc.filter(Boolean).join(', ') 
+                    : String(data.doc_num_oc || '').trim();
+
+                const finalDescrip = String(data.descrip || data.observaciones || (ocList ? `RECEPCION OC ${ocList}` : 'RECEPCION')).trim().substring(0, 60);
+                const finalComentario = String(data.comentario || (ocList ? `Recepción de OC: ${ocList}` : 'Recepción de Mercancía')).trim().substring(0, 500);
 
                 // 5. Insertar o Actualizar Cabecera de Nota de Recepción
                 if (isUpdate) {
@@ -812,7 +835,7 @@ router.post('/', async (req, res) => {
                         console.warn(`⚠️ [AGENT] Almacén '${targetAlma}' no existe en sede ${srv.name}. Reasignando automáticamente a '${defAlma}'.`);
                         targetAlma = defAlma;
                     }
-                    const originDocNum = (item.num_doc || data.doc_num_oc || '').trim();
+                    const originDocNum = (item.num_doc || item.doc_num || (Array.isArray(data.doc_num_oc) ? data.doc_num_oc[0] : data.doc_num_oc) || '').trim();
 
                     let finalUni = String(item.co_uni || '').trim();
                     try {
