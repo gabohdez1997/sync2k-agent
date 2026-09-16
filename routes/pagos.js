@@ -540,9 +540,7 @@ router.post('/', async (req, res) => {
                     ? Math.round((totalFormasPagoBs / Number(data.tasa || 1)) * 100) / 100 
                     : totalFormasPagoBs;
             } else {
-                finalMontoHeader = Math.max(0, paymentMone === 'USD' 
-                    ? Math.round((totalAbonoBs / Number(data.tasa || 1)) * 100) / 100 
-                    : totalAbonoBs);
+                finalMontoHeader = 0;
             }
 
             // 2. Insertar Cabecera de Pago en saPago
@@ -1074,19 +1072,19 @@ router.post('/', async (req, res) => {
                     .input('mov_num_c', sql.Char(20), movNumC ? padProfit(movNumC, 20) : null)
                     .input('mov_num_b', sql.Char(20), movNumB ? padProfit(movNumB, 20) : null)
                     .input('num_doc', sql.Char(20), tp.num_doc ? padProfit(tp.num_doc, 20) : null)
-                    .input('mont_doc', sql.Decimal(18, 2), Number(tp.mont_doc))
+                    .input('mont_doc', sql.Decimal(18, 2), Number(tp.mont_doc || 0))
                     .input('fecha_che', sql.SmallDateTime, tp.fecha_che ? new Date(tp.fecha_che) : tsDate)
                     .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                     .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         INSERT INTO saPagoTPReng (
                             reng_num, cob_num, forma_pag, cod_cta, cod_caja,
-                            mov_num_c, mov_num_b, num_doc, mont_doc, fecha_che,
+                            mov_num_c, mov_num_b, num_doc, devuelto, mont_doc, fecha_che,
                             co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo,
                             trasnfe, revisado, rowguid
                         ) VALUES (
                             @reng_num, @cob_num, @forma_pag, @cod_cta, @cod_caja,
-                            @mov_num_c, @mov_num_b, @num_doc, @mont_doc, @fecha_che,
+                            @mov_num_c, @mov_num_b, @num_doc, 0, @mont_doc, @fecha_che,
                             @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(),
                             NULL, NULL, NEWID()
                         )
