@@ -769,8 +769,6 @@ router.post('/', async (req, res) => {
             let rengNum = 1;
             for (const line of validLines) {
                 const cantDesp = Number(line.cant_despachada || line.cant_recibida || line.total_art || 0);
-                const cantPendOriginal = Number(line.cant_pendiente || cantDesp);
-                const cantPendRestante = Math.max(0, cantPendOriginal - cantDesp);
 
                 let targetAlma = (line.co_alma || requestedDefAlma || '').trim();
                 if (!validAlmacenes.includes(targetAlma)) {
@@ -796,8 +794,8 @@ router.post('/', async (req, res) => {
                 rengReq.input('sPorc_Desc',         sql.VarChar(15), String(line.porc_desc || '0'));
                 rengReq.input('deMonto_Desc',       sql.Decimal(18, 5), Number(line.monto_desc) || 0);
                 rengReq.input('deReng_Neto',        sql.Decimal(18, 5), Number(line.reng_neto) || 0);
-                rengReq.input('dePendiente',        sql.Decimal(18, 5), cantPendRestante);
-                rengReq.input('dePendiente2',       sql.Decimal(18, 5), 0);
+                rengReq.input('dePendiente',        sql.Decimal(18, 5), cantDesp);
+                rengReq.input('dePendiente2',       sql.Decimal(18, 5), cantDesp);
                 rengReq.input('deMonto_Desc_Glob',  sql.Decimal(18, 5), 0);
                 rengReq.input('deMonto_reca_Glob',  sql.Decimal(18, 5), 0);
                 rengReq.input('deOtros1_glob',      sql.Decimal(18, 5), 0);
