@@ -1071,7 +1071,6 @@ router.post('/', async (req, res) => {
                     .input('forma_pag', sql.Char(2), tp.forma_pag === 'TE' ? 'TP' : tp.forma_pag)
                     .input('cod_cta', sql.Char(6), tp.cod_cta ? padProfit(tp.cod_cta, 6) : null)
                     .input('cod_caja', sql.Char(6), tp.cod_caja ? padProfit(tp.cod_caja, 6) : null)
-                    .input('co_ban', sql.Char(6), tp.co_ban ? padProfit(tp.co_ban, 6) : null)
                     .input('mov_num_c', sql.Char(20), movNumC ? padProfit(movNumC, 20) : null)
                     .input('mov_num_b', sql.Char(20), movNumB ? padProfit(movNumB, 20) : null)
                     .input('num_doc', sql.Char(20), tp.num_doc ? padProfit(tp.num_doc, 20) : null)
@@ -1081,12 +1080,12 @@ router.post('/', async (req, res) => {
                     .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         INSERT INTO saPagoTPReng (
-                            reng_num, cob_num, forma_pag, cod_cta, cod_caja, co_ban,
+                            reng_num, cob_num, forma_pag, cod_cta, cod_caja,
                             mov_num_c, mov_num_b, num_doc, mont_doc, fecha_che,
                             co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo,
                             trasnfe, revisado, rowguid
                         ) VALUES (
-                            @reng_num, @cob_num, @forma_pag, @cod_cta, @cod_caja, @co_ban,
+                            @reng_num, @cob_num, @forma_pag, @cod_cta, @cod_caja,
                             @mov_num_c, @mov_num_b, @num_doc, @mont_doc, @fecha_che,
                             @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(),
                             NULL, NULL, NEWID()
