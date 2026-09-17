@@ -388,6 +388,208 @@ async function getProximoConsecutivoRetencion(params) {
     };
 }
 
+/**
+ * Al eliminar un pago que contenía un comprobante de retención (IVA o ISLR),
+ * verifica si dicho comprobante correspondía al ÚLTIMO emitido en el sistema.
+ * Si es el último emitido (es decir, ningún comprobante físico con número mayor existe):
+ * Reestablece el próximo correlativo a (mayor_físico_restante + 1) en:
+ * 1. Supabase Cloud (global_consecutivos)
+ * 2. PostgreSQL local (global_consecutivos)
+ * 3. saSerie en la sede actual
+ * 4. saSerie en las demás sedes remotas alcanzables
+ *
+ * @param {Object} params
+ * @param {Object} params.runner - Pool o transacción mssql de la sede actual
+ * @param {string} params.co_tipo_serie - 'IVAN_COMPRA' o 'ISLR_COMPRA' (o 'C016' / 'C015')
+ * @param {string|number} params.deletedNum - Número o comprobante que se eliminó
+ * @param {string} [params.currentSrvId] - ID de la sede actual
+ * @param {Object} [params.sqlAuth] - Credenciales para sedes remotas
+ * @returns {Promise<{ reverted: boolean, newNextN?: number, currentMax?: number }>}
+ */
+async function revertirConsecutivoRetencionIfLast(params) {
+    const { runner, currentSrvId, sqlAuth } = params;
+    if (!runner) return { reverted: false };
+
+    let delCorrelativo = null;
+    const rawVal = params.deletedNum;
+    if (typeof rawVal === 'number') {
+        delCorrelativo = rawVal;
+    } else if (typeof rawVal === 'string') {
+        const digits = rawVal.trim().replace(/\D/g, '');
+        if (digits.length >= 8) {
+            delCorrelativo = parseInt(digits.slice(-8), 10);
+        } else if (digits.length > 0) {
+            delCorrelativo = parseInt(digits, 10);
+        }
+    }
+
+    if (!delCorrelativo || isNaN(delCorrelativo) || delCorrelativo <= 0) {
+        console.log(`[revertirConsecutivoRetencion] No se pudo determinar el correlativo numérico de:`, rawVal);
+        return { reverted: false };
+    }
+
+    const typeKey = (params.co_tipo_serie || '').toUpperCase();
+    const conf = DOC_TYPE_CONFIG[typeKey] || {
+        co_tipo_serie: typeKey === 'IVAN_COMPRA' ? 'C016' : typeKey === 'ISLR_COMPRA' ? 'C015' : typeKey,
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
+    };
+    const profitSerieCode = conf.co_tipo_serie;
+    const docTypeProfit = typeKey === 'IVAN_COMPRA' || profitSerieCode === 'C016' ? 'IVAN' : 'ISLR';
+
+    const maxIssuedNumbers = [];
+
+    // 1. Consultar comprobantes físicos restantes en la sede local
+    if (docTypeProfit === 'IVAN') {
+        try {
+            const r1 = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_c
+                FROM saPagoRetenIvaReng
+            `);
+            const m1 = Number(r1.recordset[0]?.max_c || 0);
+            if (m1 > 0) maxIssuedNumbers.push(m1);
+
+            const r2 = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_c
+                FROM saDocumentoCompra
+                WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
+            `);
+            const m2 = Number(r2.recordset[0]?.max_c || 0);
+            if (m2 > 0) maxIssuedNumbers.push(m2);
+        } catch (e) {
+            console.warn('[revertirConsecutivoRetencion] Error consultando max_c local:', e.message);
+        }
+    } else if (docTypeProfit === 'ISLR') {
+        try {
+            const rIslr = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_n
+                FROM saDocumentoCompra
+                WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
+            `);
+            const mIslr = Number(rIslr.recordset[0]?.max_n || 0);
+            if (mIslr > 0) maxIssuedNumbers.push(mIslr);
+        } catch (e) {
+            console.warn('[revertirConsecutivoRetencion] Error consultando max_n ISLR local:', e.message);
+        }
+    }
+
+    // 2. Consultar en las demás sedes remotas si están conectadas
+    const allServers = await getAllActiveServers();
+    const otherServers = allServers.filter(s => s.id && s.id !== currentSrvId);
+    await Promise.all(otherServers.map(async (otherSrv) => {
+        try {
+            const otherPool = await getPool(otherSrv.id, sqlAuth);
+            if (docTypeProfit === 'IVAN') {
+                const o1 = await otherPool.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_c
+                    FROM saPagoRetenIvaReng
+                `);
+                const om1 = Number(o1.recordset[0]?.max_c || 0);
+                if (om1 > 0) maxIssuedNumbers.push(om1);
+
+                const o2 = await otherPool.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_c
+                    FROM saDocumentoCompra
+                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
+                `);
+                const om2 = Number(o2.recordset[0]?.max_c || 0);
+                if (om2 > 0) maxIssuedNumbers.push(om2);
+            } else if (docTypeProfit === 'ISLR') {
+                const oIslr = await otherPool.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_n
+                    FROM saDocumentoCompra
+                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
+                `);
+                const omIslr = Number(oIslr.recordset[0]?.max_n || 0);
+                if (omIslr > 0) maxIssuedNumbers.push(omIslr);
+            }
+        } catch (e) {}
+    }));
+
+    const currentMaxPhysical = maxIssuedNumbers.length > 0 ? Math.max(...maxIssuedNumbers) : 0;
+
+    // 3. Evaluar si el comprobante eliminado era efectivamente el último emitido
+    if (delCorrelativo > currentMaxPhysical) {
+        const newNextN = currentMaxPhysical + 1;
+        console.log(`🔄 [RETENCIONES REVERT] Comprobante ${delCorrelativo} era el último emitido para ${profitSerieCode}. Revertiendo próximo correlativo a ${newNextN} (máximo físico actual: ${currentMaxPhysical})`);
+
+        // A) Actualizar Supabase Cloud
+        await updateSupabaseConsecutivo(profitSerieCode, newNextN);
+
+        // B) Actualizar PostgreSQL local si está disponible
+        try {
+            await pgPool.query(`
+                INSERT INTO global_consecutivos (tipo, prox_n, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (tipo)
+                DO UPDATE SET prox_n = EXCLUDED.prox_n, updated_at = NOW()
+            `, [profitSerieCode, newNextN]);
+        } catch (ePg) {}
+
+        // C) Actualizar saSerie en la sede actual
+        await runner.request().query(`
+            UPDATE saSerie
+            SET prox_n = ${newNextN}, fe_us_mo = GETDATE()
+            WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
+        `);
+
+        // D) Replicar a sedes remotas en segundo plano
+        Promise.allSettled(otherServers.map(async (otherSrv) => {
+            try {
+                const remotePool = await getPool(otherSrv.id, sqlAuth);
+                await remotePool.request().query(`
+                    UPDATE saSerie
+                    SET prox_n = ${newNextN}, fe_us_mo = GETDATE()
+                    WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
+                `);
+            } catch (e) {}
+        })).catch(() => {});
+
+        return { reverted: true, newNextN, currentMax: currentMaxPhysical, delCorrelativo };
+    } else {
+        console.log(`ℹ️ [RETENCIONES REVERT] Comprobante ${delCorrelativo} NO era el último (máximo físico actual: ${currentMaxPhysical}). No se retrocede el consecutivo para preservar correlatividad.`);
+        return { reverted: false, currentMax: currentMaxPhysical, delCorrelativo };
+    }
+}
+
 module.exports = {
-    getProximoConsecutivoRetencion
+    getProximoConsecutivoRetencion,
+    revertirConsecutivoRetencionIfLast,
+    updateSupabaseConsecutivo
 };

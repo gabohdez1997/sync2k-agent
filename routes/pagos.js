@@ -3,7 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
-const { getProximoConsecutivoRetencion } = require('../helpers/consecutivoRetenciones');
+const { getProximoConsecutivoRetencion, revertirConsecutivoRetencionIfLast } = require('../helpers/consecutivoRetenciones');
 
 /**
  * @swagger
@@ -514,7 +514,7 @@ const eliminarPagoHandler = async (req, res) => {
         const cob_num = (req.params.cob_num || '').trim();
         const sede = req.query.sede || req.headers['x-branch-id'];
 
-        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool, srv) => {
             // 1. Verificar si el pago existe
             const resPago = await pool.request()
                 .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
@@ -526,6 +526,32 @@ const eliminarPagoHandler = async (req, res) => {
             if (!resPago.recordset.length) throw new Error(`El pago ${cob_num} no existe.`);
 
             const pago = resPago.recordset[0];
+
+            // 1.1 Consultar las retenciones (IVAN e ISLR) generadas por este pago antes de borrarlas
+            const retIvaDocs = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT DISTINCT RTRIM(ri.num_comprobante) AS num_comprobante
+                    FROM saPagoRetenIvaReng ri
+                    INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid
+                    WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
+                    UNION
+                    SELECT DISTINCT RTRIM(num_comprobante) AS num_comprobante
+                    FROM saDocumentoCompra
+                    WHERE DOC_ORIG = 'PAGO' 
+                      AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num)) 
+                      AND UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
+                `);
+
+            const retIslrDocs = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT DISTINCT RTRIM(nro_doc) AS nro_doc
+                    FROM saDocumentoCompra
+                    WHERE DOC_ORIG = 'PAGO' 
+                      AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num)) 
+                      AND UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
+                `);
 
             // 2. Obtener renglones de documentos pagados
             const resReng = await pool.request()
@@ -642,6 +668,40 @@ const eliminarPagoHandler = async (req, res) => {
                     `);
 
                 await transaction.commit();
+
+                // 10. Si el pago contenía comprobantes de retención, verificar si correspondían al último emitido y revertir contador
+                for (const row of retIvaDocs.recordset) {
+                    if (row.num_comprobante) {
+                        try {
+                            await revertirConsecutivoRetencionIfLast({
+                                runner: pool,
+                                co_tipo_serie: 'IVAN_COMPRA',
+                                deletedNum: row.num_comprobante,
+                                currentSrvId: srv?.id,
+                                sqlAuth: req.sqlAuth
+                            });
+                        } catch (eRevIva) {
+                            console.warn(`[ELIMINAR PAGO] Advertencia al verificar/revertir correlativo de retención IVA:`, eRevIva.message);
+                        }
+                    }
+                }
+
+                for (const row of retIslrDocs.recordset) {
+                    if (row.nro_doc) {
+                        try {
+                            await revertirConsecutivoRetencionIfLast({
+                                runner: pool,
+                                co_tipo_serie: 'ISLR_COMPRA',
+                                deletedNum: row.nro_doc,
+                                currentSrvId: srv?.id,
+                                sqlAuth: req.sqlAuth
+                            });
+                        } catch (eRevIslr) {
+                            console.warn(`[ELIMINAR PAGO] Advertencia al verificar/revertir correlativo de retención ISLR:`, eRevIslr.message);
+                        }
+                    }
+                }
+
                 return { success: true, cob_num: cob_num, message: `Pago ${cob_num} eliminado exitosamente.` };
             } catch (err) {
                 if (transaction._aborted === false) await transaction.rollback();
