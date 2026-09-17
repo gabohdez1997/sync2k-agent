@@ -165,9 +165,10 @@ async function getProximoConsecutivoRetencion(params) {
     const sedesConsultadas = [];
     const sedesFallidas = [];
 
-    // ── 2. Consultar comprobantes físicos emitidos en la sede LOCAL ──
+    // ── 2. Consultar comprobantes emitidos en la sede LOCAL ──
     if (docTypeProfit === 'IVAN') {
         try {
+            // Consultar exclusivamente el número de comprobante fiscal en saPagoRetenIvaReng
             const localMaxCompRes = await runner.request().query(`
                 SELECT ISNULL(MAX(
                     CASE 
@@ -180,23 +181,9 @@ async function getProximoConsecutivoRetencion(params) {
             `);
             const maxCLocal = Number(localMaxCompRes.recordset[0]?.max_c || 0);
             if (maxCLocal > 0) maxIssuedNumbers.push(maxCLocal);
-
-            const docCompRes = await runner.request().query(`
-                SELECT ISNULL(MAX(
-                    CASE 
-                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
-                        THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
-                        ELSE 0 
-                    END
-                ), 0) AS max_c
-                FROM saDocumentoCompra
-                WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
-            `);
-            const maxCDoc = Number(docCompRes.recordset[0]?.max_c || 0);
-            if (maxCDoc > 0) maxIssuedNumbers.push(maxCDoc);
             sedesConsultadas.push(currentSrvId || 'LOCAL');
         } catch (eCompLocal) {
-            console.warn(`[consecutivoRetenciones] ⚠️ Error al consultar max_comprobante en sede LOCAL:`, eCompLocal.message);
+            console.warn(`[consecutivoRetenciones] ⚠️ Error al consultar num_comprobante en sede LOCAL:`, eCompLocal.message);
             sedesFallidas.push(currentSrvId || 'LOCAL');
         }
     } else if (docTypeProfit === 'ISLR') {
@@ -221,7 +208,7 @@ async function getProximoConsecutivoRetencion(params) {
         }
     }
 
-    // ── 3. Consultar comprobantes físicos en TODAS las demás sedes (OBLIGATORIO) ──
+    // ── 3. Consultar comprobantes en TODAS las demás sedes (OBLIGATORIO) ──
     const otherServers = allServers.filter(s => s.id && s.id !== currentSrvId);
     await Promise.all(otherServers.map(async (otherSrv) => {
         try {
@@ -240,20 +227,6 @@ async function getProximoConsecutivoRetencion(params) {
                 `);
                 const otherMaxC = Number(otherMaxCompRes.recordset[0]?.max_c || 0);
                 if (otherMaxC > 0) maxIssuedNumbers.push(otherMaxC);
-
-                const otherDocRes = await otherPool.request().query(`
-                    SELECT ISNULL(MAX(
-                        CASE 
-                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
-                            THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
-                            ELSE 0 
-                        END
-                    ), 0) AS max_c
-                    FROM saDocumentoCompra
-                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
-                `);
-                const otherDocC = Number(otherDocRes.recordset[0]?.max_c || 0);
-                if (otherDocC > 0) maxIssuedNumbers.push(otherDocC);
             } else if (docTypeProfit === 'ISLR') {
                 const otherMaxDocRes = await otherPool.request().query(`
                     SELECT ISNULL(MAX(
@@ -276,7 +249,7 @@ async function getProximoConsecutivoRetencion(params) {
         }
     }));
 
-    // ── 4. Consultar punteros en Supabase Cloud y PostgreSQL local como respaldo ──
+    // ── 4. Consultar punteros en Supabase Cloud y PostgreSQL local como respaldo si no hay comprobantes físicos ──
     const supabaseProxN = await getSupabaseConsecutivo(profitSerieCode);
     if (supabaseProxN && supabaseProxN > 0) {
         nextPointers.push(supabaseProxN);
@@ -293,24 +266,19 @@ async function getProximoConsecutivoRetencion(params) {
     }
 
     // ── 5. Calcular número fiscal asignable ──
-    // REGLA: El comprobante asignado = MAX(todos los comprobantes físicos de TODAS las sedes) + 1
-    // Si hubo sedes fallidas, también considerar Supabase/PG como respaldo
+    // REGLA ESTRICTA SENIAT: El correlativo asignado es SIEMPRE el MAX(num_comprobante emitido en todas las sedes) + 1.
+    // Ningún puntero externo (Supabase/saSerie) debe inflar o crear saltos en la numeración real emitida.
     const maxIssued = maxIssuedNumbers.length > 0 ? Math.max(...maxIssuedNumbers) : 0;
     const supabaseN = Number(supabaseProxN) || 0;
     const maxPointer = nextPointers.length > 0 ? Math.max(...nextPointers) : 0;
 
     let assignedN = 1;
 
-    // Caso principal: hay comprobantes físicos emitidos → asignar MAX + 1
+    // Si hay comprobantes emitidos, el nuevo SIEMPRE es el siguiente inmediato (maxIssued + 1)
     if (maxIssued > 0) {
         assignedN = maxIssued + 1;
-        // Si Supabase o PG apuntan a un número aún mayor, respetar ese puntero
-        // (esto cubre el caso donde se eliminó un comprobante y Supabase ya avanzó)
-        if (maxPointer > assignedN) {
-            assignedN = maxPointer;
-        }
     } else if (maxPointer > 0) {
-        // No hay comprobantes físicos pero Supabase/PG tienen un puntero
+        // Solo como semilla inicial si nunca se ha emitido un comprobante
         assignedN = maxPointer;
     } else {
         // Último recurso: usar saSerie local
@@ -322,7 +290,7 @@ async function getProximoConsecutivoRetencion(params) {
     // El siguiente correlativo que debe quedar guardado para el próximo documento
     const nextN = assignedN + 1;
 
-    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Sedes consultadas: [${sedesConsultadas.join(', ')}] | Sedes fallidas: [${sedesFallidas.join(', ') || 'ninguna'}] | Mayor físico emitido: ${maxIssued} | Supabase prox_n: ${supabaseN} | PG prox_n: ${maxPointer} | ► ASIGNADO: ${assignedN} | Siguiente: ${nextN}`);
+    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Sedes consultadas: [${sedesConsultadas.join(', ')}] | Sedes fallidas: [${sedesFallidas.join(', ') || 'ninguna'}] | Mayor físico emitido: ${maxIssued} | ► ASIGNADO: ${assignedN} | Siguiente: ${nextN}`);
 
     // ── 6. Actualizar saSerie en la sede actual al siguiente número ──
     await runner.request().query(`
