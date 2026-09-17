@@ -432,9 +432,12 @@ router.post('/:cob_num/anular', async (req, res) => {
                         WHERE DOC_ORIG = 'PAGO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
                     `);
 
-                // 3. Revertir saldo de los documentos de compra pagados
+                // 3. Revertir saldo de los documentos de compra pagados (omitir retenciones generadas)
                 for (const line of resReng.recordset) {
                     const totalRebaje = Number(line.mont_cob || 0);
+                    const tipoDoc = line.co_tipo_doc.trim().toUpperCase();
+                    if (tipoDoc === 'IVAN' || tipoDoc === 'ISLR') continue;
+
                     if (totalRebaje > 0) {
                         await transaction.request()
                             .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
@@ -451,7 +454,7 @@ router.post('/:cob_num/anular', async (req, res) => {
                             `);
 
                         // Si es factura de compra (FACT), revertir saldo también en saFacturaCompra
-                        if (line.co_tipo_doc.trim().toUpperCase() === 'FACT') {
+                        if (tipoDoc === 'FACT') {
                             await transaction.request()
                                 .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                                 .input('rebaje', sql.Decimal(18, 2), totalRebaje)
@@ -540,9 +543,13 @@ const eliminarPagoHandler = async (req, res) => {
                 const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
 
                 // 3. Si el pago NO estaba anulado, revertir el saldo de las facturas / documentos de compra
+                // (Omitiendo los documentos de retención propios del pago)
                 if (!pago.anulado) {
                     for (const line of resReng.recordset) {
                         const totalRebaje = Number(line.mont_cob || 0);
+                        const tipoDoc = line.co_tipo_doc.trim().toUpperCase();
+                        if (tipoDoc === 'IVAN' || tipoDoc === 'ISLR') continue;
+
                         if (totalRebaje > 0) {
                             await transaction.request()
                                 .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
@@ -558,7 +565,7 @@ const eliminarPagoHandler = async (req, res) => {
                                       AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
                                 `);
 
-                            if (line.co_tipo_doc.trim().toUpperCase() === 'FACT') {
+                            if (tipoDoc === 'FACT') {
                                 await transaction.request()
                                     .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                                     .input('rebaje', sql.Decimal(18, 2), totalRebaje)
@@ -575,78 +582,63 @@ const eliminarPagoHandler = async (req, res) => {
                     }
                 }
 
-                // 4. Eliminar documentos de retención creados por este pago (IVAN, ISLR)
-                await transaction.request()
-                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
-                    .query(`
-                        DELETE FROM saDocumentoCompra
-                        WHERE DOC_ORIG = 'PAGO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
-                    `);
-
-                // 5. Eliminar movimientos de caja y banco creados por este pago
+                // 4. Eliminar movimientos de caja y banco creados por este pago
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
                         DELETE FROM saMovimientoCaja
-                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG'
-                    `);
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG';
 
-                await transaction.request()
-                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
-                    .query(`
                         DELETE FROM saMovimientoBanco
-                        WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG'
+                        WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG';
                     `);
 
-                // 6. Eliminar renglones de retención de IVA e ISLR asociados a los renglones del pago
+                // 5. Eliminar renglones de retención de IVA e ISLR asociados al pago (hijos de saPagoDocReng)
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
                         DELETE ri
                         FROM saPagoRetenIvaReng ri
                         INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid
-                        WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
-                    `);
+                        WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num));
 
-                await transaction.request()
-                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
-                    .query(`
                         DELETE rn
                         FROM saPagoRentenReng rn
                         INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid
-                        WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
+                        WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num));
                     `);
 
-                // 7. Eliminar instrumentos de pago (saPagoTPReng)
+                // 6. Eliminar instrumentos de pago (saPagoTPReng) y giros
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
-                        DELETE FROM saPagoTPReng
-                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                        DELETE FROM saPagoTPReng WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                        DELETE FROM saGiroCompra WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
                     `);
 
-                // 8. Eliminar giros si existieran (saGiroCompra)
-                await transaction.request()
-                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
-                    .query(`
-                        DELETE FROM saGiroCompra
-                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
-                    `);
-
-                // 9. Eliminar renglones de documentos (saPagoDocReng)
+                // 7. Eliminar renglones de documentos (saPagoDocReng)
+                // DEBE eliminarse antes de saDocumentoCompra para evitar violación de FK_saPagoDocReng_saDocumentoCompra
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
                         DELETE FROM saPagoDocReng
-                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
                     `);
 
-                // 10. Eliminar cabecera (saPago)
+                // 8. Eliminar cabecera (saPago)
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
                         DELETE FROM saPago
-                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                    `);
+
+                // 9. Ahora sí: Eliminar documentos fiscales de retención creados por este pago en saDocumentoCompra (IVAN, ISLR)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoCompra
+                        WHERE DOC_ORIG = 'PAGO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num));
                     `);
 
                 await transaction.commit();
