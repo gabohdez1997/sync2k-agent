@@ -217,8 +217,8 @@ router.get('/conceptos-islr', async (req, res) => {
 // --- OBTENER DETALLE DE UN PAGO ---
 router.get('/:cob_num', async (req, res) => {
     try {
-        const { cob_num } = req.params;
-        const { sede } = req.query;
+        const cob_num = (req.params.cob_num || '').trim();
+        const sede = req.query.sede || req.headers['x-branch-id'];
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -234,11 +234,11 @@ router.get('/:cob_num', async (req, res) => {
                         SELECT RTRIM(p.cob_num) AS cob_num, RTRIM(p.recibo) AS recibo, RTRIM(p.descrip) AS descrip,
                                RTRIM(p.co_prov) AS co_prov, RTRIM(pr.prov_des) AS prov_des, RTRIM(pr.rif) AS rif,
                                ISNULL(pr.porc_esp, 0) AS porc_esp, pr.contribu_e,
-                               p.fe_us_in AS fecha, p.anulado,
+                               ISNULL(p.fecha, p.fe_us_in) AS fecha, p.anulado,
                                ISNULL((SELECT SUM(mont_doc) FROM saPagoTPReng WHERE cob_num = p.cob_num), 0) AS monto,
                                RTRIM(p.co_mone) AS co_mone, 
                                CASE WHEN p.tasa <= 1.000001 THEN 
-                                    ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), p.fecha, 120) ORDER BY t.fecha DESC), 1.0)
+                                    ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), ISNULL(p.fecha, p.fe_us_in), 120) ORDER BY t.fecha DESC), 1.0)
                                ELSE p.tasa END AS tasa,
                                RTRIM(p.co_us_in) AS co_us_in
                         FROM saPago p
@@ -275,7 +275,15 @@ router.get('/:cob_num', async (req, res) => {
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT ri.reng_num, ri.rowguid_reng_cob, RTRIM(ri.num_comprobante) AS num_comprobante,
                                ri.monto_documento, ri.base_imponible, ri.monto_ret_imp, ri.alicuota,
-                               RTRIM(ri.numero_documento_afectado) AS numero_documento_afectado
+                               CASE 
+                                   WHEN NULLIF(RTRIM(ri.numero_documento_afectado), '0') IS NOT NULL AND RTRIM(ri.numero_documento_afectado) <> '' 
+                                   THEN RTRIM(ri.numero_documento_afectado)
+                                   WHEN NULLIF(RTRIM(pdr.nro_fact), '') IS NOT NULL 
+                                   THEN RTRIM(pdr.nro_fact)
+                                   ELSE RTRIM(pdr.nro_doc)
+                               END AS numero_documento_afectado,
+                               RTRIM(pdr.nro_doc) AS nro_doc,
+                               RTRIM(pdr.nro_fact) AS nro_fact
                         FROM saPagoRetenIvaReng ri
                         INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid
                         WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -285,19 +293,32 @@ router.get('/:cob_num', async (req, res) => {
                                orig.total_bruto - orig.otros1 AS base_imponible, 
                                d.total_neto AS monto_ret_imp, 
                                orig.porc_imp AS alicuota,
-                               RTRIM(pdr.nro_doc) AS numero_documento_afectado
+                               CASE 
+                                   WHEN NULLIF(RTRIM(pdr.nro_fact), '') IS NOT NULL 
+                                   THEN RTRIM(pdr.nro_fact)
+                                   ELSE RTRIM(pdr.nro_doc)
+                               END AS numero_documento_afectado,
+                               RTRIM(pdr.nro_doc) AS nro_doc,
+                               RTRIM(pdr.nro_fact) AS nro_fact
                         FROM saPagoDocReng r
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
-                        INNER JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
+                        LEFT JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                           AND LTRIM(RTRIM(r.co_tipo_doc)) = 'IVAN'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM saPagoRetenIvaReng ri2
+                              INNER JOIN saPagoDocReng pdr2 ON ri2.rowguid_reng_cob = pdr2.rowguid
+                              WHERE LTRIM(RTRIM(pdr2.cob_num)) = LTRIM(RTRIM(@cob_num))
+                          )
                     `),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT rn.reng_num, rn.rowguid_reng_cob, RTRIM(rn.co_islr) AS co_islr,
-                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn
+                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn,
+                               RTRIM(pdr.nro_doc) AS nro_doc,
+                               RTRIM(pdr.nro_fact) AS nro_fact
                         FROM saPagoRentenReng rn
                         INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid
                         WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -306,15 +327,22 @@ router.get('/:cob_num', async (req, res) => {
                                orig.total_bruto AS monto, 
                                d.total_neto AS monto_reten, 
                                orig.total_bruto - orig.otros1 AS monto_obj,
-                               CASE WHEN orig.total_bruto - orig.otros1 > 0 THEN ROUND((d.total_neto / (orig.total_bruto - orig.otros1)) * 100, 2) ELSE 2.00 END AS porc_retn
+                               CASE WHEN orig.total_bruto - orig.otros1 > 0 THEN ROUND((d.total_neto / (orig.total_bruto - orig.otros1)) * 100, 2) ELSE 2.00 END AS porc_retn,
+                               RTRIM(pdr.nro_doc) AS nro_doc,
+                               RTRIM(pdr.nro_fact) AS nro_fact
                         FROM saPagoDocReng r
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
-                        INNER JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
+                        LEFT JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                           AND LTRIM(RTRIM(r.co_tipo_doc)) = 'ISLR'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM saPagoRentenReng rn2
+                              INNER JOIN saPagoDocReng pdr2 ON rn2.rowguid_reng_cob = pdr2.rowguid
+                              WHERE LTRIM(RTRIM(pdr2.cob_num)) = LTRIM(RTRIM(@cob_num))
+                          )
                     `)
                 ]);
 
@@ -476,6 +504,167 @@ router.post('/:cob_num/anular', async (req, res) => {
         res.status(500).json({ success: false, message: 'Error al anular pago.', error: error.message });
     }
 });
+
+// --- ELIMINAR PAGO DEFINITIVAMENTE ---
+const eliminarPagoHandler = async (req, res) => {
+    try {
+        const cob_num = (req.params.cob_num || '').trim();
+        const sede = req.query.sede || req.headers['x-branch-id'];
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            // 1. Verificar si el pago existe
+            const resPago = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT anulado, RTRIM(co_prov) AS co_prov, monto
+                    FROM saPago
+                    WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                `);
+            if (!resPago.recordset.length) throw new Error(`El pago ${cob_num} no existe.`);
+
+            const pago = resPago.recordset[0];
+
+            // 2. Obtener renglones de documentos pagados
+            const resReng = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT RTRIM(co_tipo_doc) AS co_tipo_doc, RTRIM(nro_doc) AS nro_doc, mont_cob
+                    FROM saPagoDocReng
+                    WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                `);
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+
+                // 3. Si el pago NO estaba anulado, revertir el saldo de las facturas / documentos de compra
+                if (!pago.anulado) {
+                    for (const line of resReng.recordset) {
+                        const totalRebaje = Number(line.mont_cob || 0);
+                        if (totalRebaje > 0) {
+                            await transaction.request()
+                                .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
+                                .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                                .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                                .query(`
+                                    UPDATE saDocumentoCompra
+                                    SET saldo = saldo + @rebaje,
+                                        fe_us_mo = GETDATE(),
+                                        co_us_mo = @auditUser
+                                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                                `);
+
+                            if (line.co_tipo_doc.trim().toUpperCase() === 'FACT') {
+                                await transaction.request()
+                                    .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                                    .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                                    .query(`
+                                        UPDATE saFacturaCompra
+                                        SET saldo = saldo + @rebaje,
+                                            fe_us_mo = GETDATE(),
+                                            co_us_mo = @auditUser
+                                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
+                                    `);
+                            }
+                        }
+                    }
+                }
+
+                // 4. Eliminar documentos de retención creados por este pago (IVAN, ISLR)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoCompra
+                        WHERE DOC_ORIG = 'PAGO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 5. Eliminar movimientos de caja y banco creados por este pago
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saMovimientoCaja
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG'
+                    `);
+
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saMovimientoBanco
+                        WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG'
+                    `);
+
+                // 6. Eliminar renglones de retención de IVA e ISLR asociados a los renglones del pago
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE ri
+                        FROM saPagoRetenIvaReng ri
+                        INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid
+                        WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE rn
+                        FROM saPagoRentenReng rn
+                        INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid
+                        WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 7. Eliminar instrumentos de pago (saPagoTPReng)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saPagoTPReng
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 8. Eliminar giros si existieran (saGiroCompra)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saGiroCompra
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 9. Eliminar renglones de documentos (saPagoDocReng)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saPagoDocReng
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                // 10. Eliminar cabecera (saPago)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saPago
+                        WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                    `);
+
+                await transaction.commit();
+                return { success: true, cob_num: cob_num, message: `Pago ${cob_num} eliminado exitosamente.` };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al eliminar pago.', error: error.message });
+    }
+};
+
+router.delete('/:cob_num', eliminarPagoHandler);
+router.post('/:cob_num/eliminar', eliminarPagoHandler);
 
 // --- GUARDAR PAGO ---
 router.post('/', async (req, res) => {

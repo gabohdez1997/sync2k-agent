@@ -270,6 +270,27 @@ async function getExchangeRate(pool) {
   }
 }
 
+/**
+ * Retorna todas las sedes activas directamente desde PostgreSQL sin filtrar por LOCAL_BRANCH_NAME.
+ * Utilizado para consultas multi-sede en tiempo real (ej. correlativos fiscales compartidos).
+ */
+async function getAllActiveServers() {
+    try {
+        const { rows } = await pgPool.query('SELECT id, name, sql_config, profit_branch_codes FROM branches WHERE active = true');
+        return rows.map(r => ({
+            id: r.id,
+            name: r.name,
+            server: r.sql_config?.host || r.sql_config?.server,
+            database: r.sql_config?.database,
+            sql_config: r.sql_config,
+            profit_branch_codes: r.profit_branch_codes
+        }));
+    } catch (e) {
+        console.warn('⚠️ [Agente DB] Error obteniendo todas las sedes activas de PG:', e.message);
+        return cachedServers;
+    }
+}
+
 module.exports = { 
   sql, 
   getPool, 
@@ -277,6 +298,7 @@ module.exports = {
   initServers,
   getMasterPool, 
   getServers, 
+  getAllActiveServers,
   setServers, 
   setMasterConfig, 
   addOrUpdateServer, 

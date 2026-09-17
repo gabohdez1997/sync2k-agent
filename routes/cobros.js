@@ -255,7 +255,12 @@ router.get('/:cob_num', async (req, res) => {
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT ri.reng_num, ri.rowguid_reng_cob, RTRIM(ri.num_comprobante) AS num_comprobante,
                                ri.monto_documento, ri.base_imponible, ri.monto_ret_imp, ri.alicuota,
-                               RTRIM(ri.numero_documento_afectado) AS numero_documento_afectado
+                               CASE 
+                                   WHEN NULLIF(RTRIM(ri.numero_documento_afectado), '0') IS NOT NULL AND RTRIM(ri.numero_documento_afectado) <> '' 
+                                   THEN RTRIM(ri.numero_documento_afectado)
+                                   ELSE RTRIM(cdr.nro_doc)
+                               END AS numero_documento_afectado,
+                               RTRIM(cdr.nro_doc) AS nro_doc
                         FROM saCobroRetenIvaReng ri
                         INNER JOIN saCobroDocReng cdr ON ri.rowguid_reng_cob = cdr.rowguid
                         WHERE LTRIM(RTRIM(cdr.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -265,19 +270,26 @@ router.get('/:cob_num', async (req, res) => {
                                orig.total_bruto - orig.otros1 AS base_imponible, 
                                d.total_neto AS monto_ret_imp, 
                                orig.porc_imp AS alicuota,
-                               RTRIM(cdr.nro_doc) AS numero_documento_afectado
+                               RTRIM(cdr.nro_doc) AS numero_documento_afectado,
+                               RTRIM(cdr.nro_doc) AS nro_doc
                         FROM saCobroDocReng r
                         INNER JOIN saDocumentoVenta d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                     AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
-                        INNER JOIN saCobroDocReng cdr ON r.rowguid_reng_ori = cdr.rowguid
+                        LEFT JOIN saCobroDocReng cdr ON r.rowguid_reng_ori = cdr.rowguid
                         LEFT JOIN saDocumentoVenta orig ON LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                        AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                           AND LTRIM(RTRIM(r.co_tipo_doc)) = 'IVAN'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM saCobroRetenIvaReng ri2
+                              INNER JOIN saCobroDocReng cdr2 ON ri2.rowguid_reng_cob = cdr2.rowguid
+                              WHERE LTRIM(RTRIM(cdr2.cob_num)) = LTRIM(RTRIM(@cob_num))
+                          )
                     `),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT rn.reng_num, rn.rowguid_reng_cob, RTRIM(rn.co_islr) AS co_islr,
-                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn
+                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn,
+                               RTRIM(cdr.nro_doc) AS nro_doc
                         FROM saCobroRentenReng rn
                         INNER JOIN saCobroDocReng cdr ON rn.rowguid_reng_cob = cdr.rowguid
                         WHERE LTRIM(RTRIM(cdr.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -286,15 +298,21 @@ router.get('/:cob_num', async (req, res) => {
                                orig.total_bruto AS monto, 
                                d.total_neto AS monto_reten, 
                                orig.total_bruto - orig.otros1 AS monto_obj,
-                               CASE WHEN orig.total_bruto - orig.otros1 > 0 THEN ROUND((d.total_neto / (orig.total_bruto - orig.otros1)) * 100, 2) ELSE 2.00 END AS porc_retn
+                               CASE WHEN orig.total_bruto - orig.otros1 > 0 THEN ROUND((d.total_neto / (orig.total_bruto - orig.otros1)) * 100, 2) ELSE 2.00 END AS porc_retn,
+                               RTRIM(cdr.nro_doc) AS nro_doc
                         FROM saCobroDocReng r
                         INNER JOIN saDocumentoVenta d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                     AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
-                        INNER JOIN saCobroDocReng cdr ON r.rowguid_reng_ori = cdr.rowguid
+                        LEFT JOIN saCobroDocReng cdr ON r.rowguid_reng_ori = cdr.rowguid
                         LEFT JOIN saDocumentoVenta orig ON LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                        AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                           AND LTRIM(RTRIM(r.co_tipo_doc)) = 'ISLR'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM saCobroRentenReng rn2
+                              INNER JOIN saCobroDocReng cdr2 ON rn2.rowguid_reng_cob = cdr2.rowguid
+                              WHERE LTRIM(RTRIM(cdr2.cob_num)) = LTRIM(RTRIM(@cob_num))
+                          )
                     `)
                 ]);
 

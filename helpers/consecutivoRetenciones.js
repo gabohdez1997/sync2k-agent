@@ -12,7 +12,7 @@
  * 5. Se registre el correlativo en PostgreSQL (global_consecutivos) como fuente central de verdad.
  */
 
-const { getPool, getServers, pgPool } = require('../db');
+const { getPool, getServers, getAllActiveServers, pgPool } = require('../db');
 const { DOC_TYPE_CONFIG } = require('./consecutivos');
 
 /**
@@ -37,6 +37,8 @@ async function ensurePgTable() {
 
 /**
  * Obtiene el próximo correlativo único sincronizado entre todas las sedes para retenciones.
+ * Consulta en el momento exacto el mayor comprobante físico emitido en TODAS las sedes de Profit Plus
+ * para evitar desfases si se registran documentos directamente desde el cliente Desktop de Profit.
  * 
  * @param {Object} params
  * @param {Object} params.runner - Transacción o pool de la sede actual
@@ -61,7 +63,9 @@ async function getProximoConsecutivoRetencion(params) {
 
     const profitSerieCode = conf.co_tipo_serie;
     const docTypeProfit = typeKey === 'IVAN_COMPRA' || profitSerieCode === 'C016' ? 'IVAN' : 'ISLR';
-    const allServers = getServers();
+    
+    // Obtener TODAS las sedes activas desde PostgreSQL sin limitarse por LOCAL_BRANCH_NAME
+    const allServers = await getAllActiveServers();
 
     await ensurePgTable();
 
@@ -90,37 +94,10 @@ async function getProximoConsecutivoRetencion(params) {
     const sufijo = (localMeta.sufijo || '').trim();
     const longitud = Number(localMeta.longitud) || 10;
 
-    const candidateNumbers = [];
+    const maxIssuedNumbers = [];
+    const nextPointers = [];
 
-    // Candidato 1: prox_n en saSerie local
-    if (Number.isFinite(Number(localMeta.prox_n)) && Number(localMeta.prox_n) > 0) {
-        candidateNumbers.push(Number(localMeta.prox_n));
-    }
-
-    // Candidato 2: Si es ISLR, consultar MAX(nro_doc) local
-    if (docTypeProfit === 'ISLR') {
-        try {
-            const localMaxDocRes = await runner.request().query(`
-                SELECT ISNULL(MAX(
-                    CASE 
-                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
-                        THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
-                        ELSE 0 
-                    END
-                ), 0) AS max_n
-                FROM saDocumentoCompra
-                WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
-            `);
-            const maxDocLocal = Number(localMaxDocRes.recordset[0]?.max_n || 0);
-            if (maxDocLocal > 0) {
-                candidateNumbers.push(maxDocLocal);
-            }
-        } catch (eDocLocal) {
-            console.warn(`[consecutivoRetenciones] Advertencia al consultar max_doc ISLR local:`, eDocLocal.message);
-        }
-    }
-
-    // Si es IVAN, verificar max comprobante en saPagoRetenIvaReng y en saDocumentoCompra
+    // ── 1. Consultar comprobantes emitidos en sede local ──
     if (docTypeProfit === 'IVAN') {
         try {
             const localMaxCompRes = await runner.request().query(`
@@ -134,9 +111,7 @@ async function getProximoConsecutivoRetencion(params) {
                 FROM saPagoRetenIvaReng
             `);
             const maxCLocal = Number(localMaxCompRes.recordset[0]?.max_c || 0);
-            if (maxCLocal > 0) {
-                candidateNumbers.push(maxCLocal);
-            }
+            if (maxCLocal > 0) maxIssuedNumbers.push(maxCLocal);
 
             const docCompRes = await runner.request().query(`
                 SELECT ISNULL(MAX(
@@ -150,30 +125,53 @@ async function getProximoConsecutivoRetencion(params) {
                 WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
             `);
             const maxCDoc = Number(docCompRes.recordset[0]?.max_c || 0);
-            if (maxCDoc > 0) {
-                candidateNumbers.push(maxCDoc);
-            }
+            if (maxCDoc > 0) maxIssuedNumbers.push(maxCDoc);
         } catch (eCompLocal) {
             console.warn(`[consecutivoRetenciones] Advertencia al consultar max_comprobante local:`, eCompLocal.message);
         }
+    } else if (docTypeProfit === 'ISLR') {
+        try {
+            const localMaxDocRes = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), 10) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_n
+                FROM saDocumentoCompra
+                WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
+            `);
+            const maxDocLocal = Number(localMaxDocRes.recordset[0]?.max_n || 0);
+            if (maxDocLocal > 0) maxIssuedNumbers.push(maxDocLocal);
+        } catch (eDocLocal) {
+            console.warn(`[consecutivoRetenciones] Advertencia al consultar max_doc ISLR local:`, eDocLocal.message);
+        }
     }
 
-    // Candidato 3: PostgreSQL central (global_consecutivos)
+    // Puntero local en saSerie (es el próximo número configurado)
+    if (Number.isFinite(Number(localMeta.prox_n)) && Number(localMeta.prox_n) > 0) {
+        nextPointers.push(Number(localMeta.prox_n));
+    }
+
+    // ── 2. Consultar en PostgreSQL central (global_consecutivos) ──
     try {
         const pgRes = await pgPool.query(`SELECT prox_n FROM global_consecutivos WHERE tipo = $1`, [profitSerieCode]);
         if (pgRes.rows.length > 0) {
             const pgN = Number(pgRes.rows[0].prox_n);
-            if (pgN > 0) candidateNumbers.push(pgN);
+            if (pgN > 0) nextPointers.push(pgN);
         }
     } catch (ePg) {
         console.warn(`[consecutivoRetenciones] Advertencia al consultar PG global_consecutivos:`, ePg.message);
     }
 
-    // Candidato 4: Consultar en las DEMÁS sedes activas (saSerie)
+    // ── 3. Consultar en las DEMÁS sedes activas (comprobantes físicos reales y saSerie) ──
     const otherServers = allServers.filter(s => s.id && s.id !== currentSrvId);
     await Promise.all(otherServers.map(async (otherSrv) => {
         try {
             const otherPool = await getPool(otherSrv.id, sqlAuth);
+            
+            // Puntero en saSerie de la otra sede
             const otherSerieRes = await otherPool.request().query(`
                 SELECT TOP 1 prox_n 
                 FROM saSerie 
@@ -181,10 +179,38 @@ async function getProximoConsecutivoRetencion(params) {
             `);
             if (otherSerieRes.recordset.length > 0) {
                 const otherN = Number(otherSerieRes.recordset[0].prox_n);
-                if (otherN > 0) candidateNumbers.push(otherN);
+                if (otherN > 0) nextPointers.push(otherN);
             }
 
-            if (docTypeProfit === 'ISLR') {
+            // Consultar comprobantes reales emitidos en la otra sede
+            if (docTypeProfit === 'IVAN') {
+                const otherMaxCompRes = await otherPool.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_c
+                    FROM saPagoRetenIvaReng
+                `);
+                const otherMaxC = Number(otherMaxCompRes.recordset[0]?.max_c || 0);
+                if (otherMaxC > 0) maxIssuedNumbers.push(otherMaxC);
+
+                const otherDocRes = await otherPool.request().query(`
+                    SELECT ISNULL(MAX(
+                        CASE 
+                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) IS NOT NULL 
+                            THEN CAST(RIGHT(LTRIM(RTRIM(num_comprobante)), 8) AS BIGINT) 
+                            ELSE 0 
+                        END
+                    ), 0) AS max_c
+                    FROM saDocumentoCompra
+                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
+                `);
+                const otherDocC = Number(otherDocRes.recordset[0]?.max_c || 0);
+                if (otherDocC > 0) maxIssuedNumbers.push(otherDocC);
+            } else if (docTypeProfit === 'ISLR') {
                 const otherMaxDocRes = await otherPool.request().query(`
                     SELECT ISNULL(MAX(
                         CASE 
@@ -197,30 +223,41 @@ async function getProximoConsecutivoRetencion(params) {
                     WHERE UPPER(RTRIM(co_tipo_doc)) = 'ISLR'
                 `);
                 const maxDocOther = Number(otherMaxDocRes.recordset[0]?.max_n || 0);
-                if (maxDocOther > 0) {
-                    candidateNumbers.push(maxDocOther);
-                }
+                if (maxDocOther > 0) maxIssuedNumbers.push(maxDocOther);
             }
         } catch (eOther) {
             console.warn(`[consecutivoRetenciones] No se pudo leer sede remota ${otherSrv.id}: ${eOther.message}`);
         }
     }));
 
-    // ── 2. Calcular número fiscal a asignar (base actual + 1) ──
-    const maxVal = candidateNumbers.length > 0 ? Math.max(...candidateNumbers) : 1;
-    const assignedN = maxVal + 1;
-    const nextN = assignedN;
+    // ── 4. Calcular número fiscal a asignar ──
+    // Regla SENIAT estricta:
+    // Los comprobantes emitidos en saPagoRetenIvaReng / saDocumentoCompra son la verdad absoluta.
+    // El próximo correlativo asignable es (mayor emitido en cualquier sede) + 1.
+    const maxIssued = maxIssuedNumbers.length > 0 ? Math.max(...maxIssuedNumbers) : 0;
+    
+    // Si hay comprobantes emitidos, el asignado es maxIssued + 1.
+    // Si no hubiera comprobantes emitidos nunca en ninguna sede, usamos el prox_n configurado en saSerie.
+    let assignedN = 1;
+    if (maxIssued > 0) {
+        assignedN = maxIssued + 1;
+    } else if (nextPointers.length > 0) {
+        assignedN = Math.max(...nextPointers);
+    }
 
-    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Base anterior: ${maxVal} | Asignado fiscal: ${assignedN}`);
+    // El próximo correlativo que quedará almacenado para el siguiente documento
+    const nextN = assignedN + 1;
 
-    // ── 3. Actualizar saSerie en la transacción de la sede actual ──
+    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Mayor emitido global: ${maxIssued} | Asignado fiscal: ${assignedN} | Siguiente guardado: ${nextN}`);
+
+    // ── 5. Actualizar saSerie en la sede actual al siguiente número ──
     await runner.request().query(`
         UPDATE saSerie
         SET prox_n = ${nextN}, fe_us_mo = GETDATE()
         WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
     `);
 
-    // ── 4. Actualizar registro central en PostgreSQL ──
+    // ── 6. Actualizar registro central en PostgreSQL ──
     try {
         await pgPool.query(`
             INSERT INTO global_consecutivos (tipo, prox_n, updated_at)
@@ -232,7 +269,7 @@ async function getProximoConsecutivoRetencion(params) {
         console.warn(`[consecutivoRetenciones] No se pudo guardar en PG global_consecutivos:`, ePgUp.message);
     }
 
-    // ── 5. Replicar nextN a TODAS las demás sedes en saSerie ──
+    // ── 7. Replicar nextN a TODAS las demás sedes en saSerie ──
     Promise.allSettled(otherServers.map(async (otherSrv) => {
         try {
             const remotePool = await getPool(otherSrv.id, sqlAuth);
