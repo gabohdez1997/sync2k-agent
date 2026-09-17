@@ -5,18 +5,77 @@
  * entre todas las sedes de Profit Plus (Boca de Río, Paraparal, etc.).
  * 
  * Garantiza que cuando una sede genere una retención (ej. 001):
- * 1. Se tome el mayor correlativo global existente entre todas las sedes y PostgreSQL central.
- * 2. Se asigne dicho número al documento actual.
- * 3. Se incremente el correlativo (ej. a 002) atómicamente en la sede actual.
- * 4. Se replique el nuevo correlativo (002) en saSerie de todas las demás sedes activas.
- * 5. Se registre el correlativo en PostgreSQL (global_consecutivos) como fuente central de verdad.
+ * 1. Se consulte la fuente de verdad central en Supabase Cloud (global_consecutivos).
+ * 2. Se consulte el mayor comprobante físico emitido en Profit Plus (local y demás sedes accesibles)
+ *    para blindar contra desfases si se emiten retenciones directamente desde el Desktop de Profit.
+ * 3. Se asigne el correlativo estricto sin saltos ni duplicados.
+ * 4. Se incremente y sincronice el nuevo correlativo (ej. 002) atómicamente:
+ *    - En saSerie de la sede actual (en la misma transacción del pago).
+ *    - En Supabase Cloud (global_consecutivos) de forma inmediata.
+ *    - En saSerie de las demás sedes remotas y PostgreSQL local.
  */
 
 const { getPool, getServers, getAllActiveServers, pgPool } = require('../db');
 const { DOC_TYPE_CONFIG } = require('./consecutivos');
 
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL || 'https://rwblykcpnduniexbivra.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3Ymx5a2NwbmR1bmlleGJpdnJhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTUxNzI0NCwiZXhwIjoyMDk3MDkzMjQ0fQ.Q04ibUleUEFCPcOsQ73qJI4W8nwDupfwACDeIczFAnw';
+
 /**
- * Inicializa la tabla global_consecutivos en PostgreSQL central si no existe.
+ * Consulta el próximo correlativo registrado centralmente en Supabase Cloud.
+ */
+async function getSupabaseConsecutivo(tipo) {
+    try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/global_consecutivos?tipo=eq.${encodeURIComponent(tipo)}&select=prox_n`, {
+            headers: {
+                apikey: SUPABASE_KEY,
+                Authorization: `Bearer ${SUPABASE_KEY}`
+            }
+        });
+        if (res.ok) {
+            const rows = await res.json();
+            if (rows && rows.length > 0) {
+                const n = Number(rows[0].prox_n);
+                if (Number.isFinite(n) && n > 0) return n;
+            }
+        }
+    } catch (err) {
+        console.warn(`⚠️ [consecutivoRetenciones] Error al consultar Supabase Cloud:`, err.message);
+    }
+    return null;
+}
+
+/**
+ * Actualiza el próximo correlativo en Supabase Cloud (fuente de verdad multi-sede).
+ */
+async function updateSupabaseConsecutivo(tipo, prox_n) {
+    try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/global_consecutivos`, {
+            method: 'POST',
+            headers: {
+                apikey: SUPABASE_KEY,
+                Authorization: `Bearer ${SUPABASE_KEY}`,
+                'Content-Type': 'application/json',
+                'Prefer': 'resolution=merge-duplicates'
+            },
+            body: JSON.stringify({
+                tipo: tipo,
+                prox_n: prox_n,
+                updated_at: new Date().toISOString()
+            })
+        });
+        if (res.ok) {
+            console.log(`☁️ [RETENCIONES SUPABASE] Sincronizado en la nube: ${tipo} -> prox_n=${prox_n}`);
+        } else {
+            console.warn(`⚠️ [RETENCIONES SUPABASE] Falló actualización en Supabase (${res.status}):`, await res.text());
+        }
+    } catch (err) {
+        console.warn(`⚠️ [consecutivoRetenciones] Error al guardar en Supabase Cloud:`, err.message);
+    }
+}
+
+/**
+ * Inicializa la tabla global_consecutivos en PostgreSQL local si existe y está activo.
  */
 let pgTableInitialized = false;
 async function ensurePgTable() {
@@ -31,14 +90,16 @@ async function ensurePgTable() {
         `);
         pgTableInitialized = true;
     } catch (e) {
-        console.warn('⚠️ [consecutivoRetenciones] No se pudo verificar tabla global_consecutivos en PG:', e.message);
+        // PG local es opcional
     }
 }
 
 /**
  * Obtiene el próximo correlativo único sincronizado entre todas las sedes para retenciones.
- * Consulta en el momento exacto el mayor comprobante físico emitido en TODAS las sedes de Profit Plus
- * para evitar desfases si se registran documentos directamente desde el cliente Desktop de Profit.
+ * Consulta en el momento exacto:
+ * 1. Supabase Cloud (fuente centralizada compartida entre todas las sedes).
+ * 2. Comprobantes físicos reales emitidos en Profit Plus (local y remotas accesibles).
+ * 3. saSerie local.
  * 
  * @param {Object} params
  * @param {Object} params.runner - Transacción o pool de la sede actual
@@ -64,7 +125,7 @@ async function getProximoConsecutivoRetencion(params) {
     const profitSerieCode = conf.co_tipo_serie;
     const docTypeProfit = typeKey === 'IVAN_COMPRA' || profitSerieCode === 'C016' ? 'IVAN' : 'ISLR';
     
-    // Obtener TODAS las sedes activas desde PostgreSQL sin limitarse por LOCAL_BRANCH_NAME
+    // Obtener TODAS las sedes activas (consulta Supabase Cloud primero)
     const allServers = await getAllActiveServers();
 
     await ensurePgTable();
@@ -97,7 +158,7 @@ async function getProximoConsecutivoRetencion(params) {
     const maxIssuedNumbers = [];
     const nextPointers = [];
 
-    // ── 1. Consultar comprobantes emitidos en sede local ──
+    // ── 2. Consultar comprobantes físicos emitidos en la sede local de Profit ──
     if (docTypeProfit === 'IVAN') {
         try {
             const localMaxCompRes = await runner.request().query(`
@@ -149,12 +210,13 @@ async function getProximoConsecutivoRetencion(params) {
         }
     }
 
-    // Puntero local en saSerie (es el próximo número configurado)
-    if (Number.isFinite(Number(localMeta.prox_n)) && Number(localMeta.prox_n) > 0) {
-        nextPointers.push(Number(localMeta.prox_n));
+    // ── 3. Consultar en SUPABASE CLOUD (fuente de verdad multi-sede central) ──
+    const supabaseProxN = await getSupabaseConsecutivo(profitSerieCode);
+    if (supabaseProxN && supabaseProxN > 0) {
+        nextPointers.push(supabaseProxN);
     }
 
-    // ── 2. Consultar en PostgreSQL central (global_consecutivos) ──
+    // ── 4. Consultar en PostgreSQL local (global_consecutivos) como fallback ──
     try {
         const pgRes = await pgPool.query(`SELECT prox_n FROM global_consecutivos WHERE tipo = $1`, [profitSerieCode]);
         if (pgRes.rows.length > 0) {
@@ -162,25 +224,14 @@ async function getProximoConsecutivoRetencion(params) {
             if (pgN > 0) nextPointers.push(pgN);
         }
     } catch (ePg) {
-        console.warn(`[consecutivoRetenciones] Advertencia al consultar PG global_consecutivos:`, ePg.message);
+        // PG local opcional
     }
 
-    // ── 3. Consultar en las DEMÁS sedes activas (comprobantes físicos reales y saSerie) ──
+    // ── 5. Consultar en las DEMÁS sedes activas accesibles por SQL ──
     const otherServers = allServers.filter(s => s.id && s.id !== currentSrvId);
     await Promise.all(otherServers.map(async (otherSrv) => {
         try {
             const otherPool = await getPool(otherSrv.id, sqlAuth);
-            
-            // Puntero en saSerie de la otra sede
-            const otherSerieRes = await otherPool.request().query(`
-                SELECT TOP 1 prox_n 
-                FROM saSerie 
-                WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
-            `);
-            if (otherSerieRes.recordset.length > 0) {
-                const otherN = Number(otherSerieRes.recordset[0].prox_n);
-                if (otherN > 0) nextPointers.push(otherN);
-            }
 
             // Consultar comprobantes reales emitidos en la otra sede
             if (docTypeProfit === 'IVAN') {
@@ -226,38 +277,47 @@ async function getProximoConsecutivoRetencion(params) {
                 if (maxDocOther > 0) maxIssuedNumbers.push(maxDocOther);
             }
         } catch (eOther) {
-            console.warn(`[consecutivoRetenciones] No se pudo leer sede remota ${otherSrv.id}: ${eOther.message}`);
+            // Si la otra sede no es alcanzable vía TCP/IP directo, Supabase Cloud actúa como árbitro
         }
     }));
 
-    // ── 4. Calcular número fiscal a asignar ──
-    // Regla SENIAT estricta:
-    // Los comprobantes emitidos en saPagoRetenIvaReng / saDocumentoCompra son la verdad absoluta.
-    // El próximo correlativo asignable es (mayor emitido en cualquier sede) + 1.
+    // ── 6. Calcular número fiscal asignable (Regla estricta SENIAT) ──
+    // Los comprobantes físicos emitidos en saPagoRetenIvaReng / saDocumentoCompra en CUALQUIER sede son la verdad absoluta.
+    // Ningún nuevo comprobante puede duplicar un número físico ya emitido.
     const maxIssued = maxIssuedNumbers.length > 0 ? Math.max(...maxIssuedNumbers) : 0;
-    
-    // Si hay comprobantes emitidos, el asignado es maxIssued + 1.
-    // Si no hubiera comprobantes emitidos nunca en ninguna sede, usamos el prox_n configurado en saSerie.
+    const supabaseN = Number(supabaseProxN) || 0;
+
     let assignedN = 1;
-    if (maxIssued > 0) {
+    if (supabaseN > maxIssued) {
+        // Supabase Cloud tiene un puntero válido y más adelantado
+        assignedN = supabaseN;
+    } else if (maxIssued > 0) {
+        // Si hay documentos físicos emitidos (ej. en Profit Desktop o sede no reportada), avanzamos desde el mayor emitido
         assignedN = maxIssued + 1;
     } else if (nextPointers.length > 0) {
         assignedN = Math.max(...nextPointers);
+    } else {
+        assignedN = Number(localMeta.prox_n) || 1;
     }
 
-    // El próximo correlativo que quedará almacenado para el siguiente documento
+    if (assignedN < 1) assignedN = 1;
+
+    // El siguiente correlativo que debe quedar guardado para el próximo documento
     const nextN = assignedN + 1;
 
-    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Mayor emitido global: ${maxIssued} | Asignado fiscal: ${assignedN} | Siguiente guardado: ${nextN}`);
+    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Mayor físico emitido: ${maxIssued} | Supabase prox_n: ${supabaseN} | Asignado fiscal: ${assignedN} | Siguiente guardado: ${nextN}`);
 
-    // ── 5. Actualizar saSerie en la sede actual al siguiente número ──
+    // ── 7. Actualizar saSerie en la sede actual al siguiente número ──
     await runner.request().query(`
         UPDATE saSerie
         SET prox_n = ${nextN}, fe_us_mo = GETDATE()
         WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
     `);
 
-    // ── 6. Actualizar registro central en PostgreSQL ──
+    // ── 8. Actualizar registro central en Supabase Cloud de inmediato ──
+    await updateSupabaseConsecutivo(profitSerieCode, nextN);
+
+    // ── 9. Actualizar registro central en PostgreSQL local si existe ──
     try {
         await pgPool.query(`
             INSERT INTO global_consecutivos (tipo, prox_n, updated_at)
@@ -266,10 +326,10 @@ async function getProximoConsecutivoRetencion(params) {
             DO UPDATE SET prox_n = GREATEST(global_consecutivos.prox_n, EXCLUDED.prox_n), updated_at = NOW()
         `, [profitSerieCode, nextN]);
     } catch (ePgUp) {
-        console.warn(`[consecutivoRetenciones] No se pudo guardar en PG global_consecutivos:`, ePgUp.message);
+        // PG local opcional
     }
 
-    // ── 7. Replicar nextN a TODAS las demás sedes en saSerie ──
+    // ── 10. Replicar nextN a TODAS las demás sedes en saSerie en segundo plano ──
     Promise.allSettled(otherServers.map(async (otherSrv) => {
         try {
             const remotePool = await getPool(otherSrv.id, sqlAuth);
@@ -281,15 +341,15 @@ async function getProximoConsecutivoRetencion(params) {
             `);
             console.log(`📡 [RETENCIONES] Sede remota ${otherSrv.id} sincronizada: prox_n=${nextN} para ${profitSerieCode}`);
         } catch (errRemote) {
-            console.warn(`⚠️ [RETENCIONES] No se pudo replicar a sede ${otherSrv.id} (${errRemote.message}). Se sincronizará en su próxima lectura.`);
+            // Sincronizará a través de Supabase en su próxima lectura
         }
     })).catch(() => {});
 
-    // ── 6. Formatear y retornar número de documento ──
+    // ── 11. Formatear y retornar número de documento ──
     const numStr = assignedN.toString().padStart(longitud, '0');
     let docNum = `${prefijo}${numStr}${sufijo}`;
 
-    // Si es IVAN, verificar que docNum no colisione físicamente en saDocumentoCompra
+    // Si es IVAN, verificar que docNum no colisione físicamente en saDocumentoCompra de la sede local
     if (docTypeProfit === 'IVAN') {
         try {
             const existsCheck = await runner.request().query(`
@@ -312,7 +372,7 @@ async function getProximoConsecutivoRetencion(params) {
                 `);
                 const nextPhysN = Number(maxPhysRes.recordset[0]?.max_phys || 0) + 1;
                 docNum = `${prefijo}${nextPhysN.toString().padStart(longitud, '0')}${sufijo}`;
-                console.log(`⚠️ [RETENCIONES IVAN] nro_doc físico ajustado a "${docNum}" para evitar duplicidad de Primary Key en saDocumentoCompra (Comprobante fiscal se mantiene en ${assignedN})`);
+                console.log(`⚠️ [RETENCIONES IVAN] nro_doc físico local ajustado a "${docNum}" para evitar duplicidad de PK en saDocumentoCompra (Comprobante fiscal SENIAT se mantiene en ${assignedN})`);
             }
         } catch (eCheck) {
             console.warn(`[consecutivoRetenciones] Advertencia al verificar duplicidad física de nro_doc:`, eCheck.message);

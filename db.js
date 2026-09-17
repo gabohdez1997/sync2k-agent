@@ -2,6 +2,9 @@ const sql = require('mssql');
 const pg = require('pg');
 require('dotenv').config();
 
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL || 'https://rwblykcpnduniexbivra.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3Ymx5a2NwbmR1bmlleGJpdnJhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTUxNzI0NCwiZXhwIjoyMDk3MDkzMjQ0fQ.Q04ibUleUEFCPcOsQ73qJI4W8nwDupfwACDeIczFAnw';
+
 // ── Conexión a PostgreSQL Local (sync2k) ───────────────────────────────────
 // Esta base de datos es alimentada en background por "profit-web/sync-daemon"
 const pgUrl = process.env.LOCAL_PG_URL || 'postgresql://postgres:Galpe2021*@localhost:5432/sync2k';
@@ -70,16 +73,33 @@ async function getPool(serverId, sqlAuth = null) {
     const poolId = serverId;
 
     if (!pools.has(poolId)) {
-        console.log(`🔍 [Agente DB] Buscando sql_config para nodo: ${serverId}...`);
-        
-        // Consultar la base de datos local centralizada en busca de las credenciales MS-SQL de este nodo
-        const { rows } = await pgPool.query(`SELECT name, sql_config FROM branches WHERE id = $1 AND active = true`, [serverId]);
-        
-        if (rows.length === 0) {
+        let branch = null;
+        try {
+            const { rows } = await pgPool.query(`SELECT name, sql_config FROM branches WHERE id = $1 AND active = true`, [serverId]);
+            if (rows.length > 0) branch = rows[0];
+        } catch (eLocal) {
+            console.warn(`[Agente DB] Error consultando PG local para nodo ${serverId}:`, eLocal.message);
+        }
+
+        // Si no está en PG local, buscar directamente en Supabase Cloud
+        if (!branch) {
+            try {
+                const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?id=eq.${encodeURIComponent(serverId)}&active=eq.true&select=name,sql_config`, {
+                    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+                });
+                if (res.ok) {
+                    const cloudRows = await res.json();
+                    if (cloudRows && cloudRows.length > 0) branch = cloudRows[0];
+                }
+            } catch (eCloud) {
+                console.warn(`[Agente DB] Error consultando Supabase Cloud para nodo ${serverId}:`, eCloud.message);
+            }
+        }
+
+        if (!branch) {
             throw new Error(`Nodo con ID "${serverId}" no existe o se encuentra inactivo.`);
         }
 
-        const branch = rows[0];
         const config = branch.sql_config || {};
 
         if (!config.host || !config.database) {
@@ -276,6 +296,27 @@ async function getExchangeRate(pool) {
  */
 async function getAllActiveServers() {
     try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?select=id,name,sql_config,profit_branch_codes,active&active=eq.true`, {
+            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+        });
+        if (res.ok) {
+            const rows = await res.json();
+            if (rows && rows.length > 0) {
+                return rows.map(r => ({
+                    id: r.id,
+                    name: r.name,
+                    server: r.sql_config?.host || r.sql_config?.server,
+                    database: r.sql_config?.database,
+                    sql_config: r.sql_config,
+                    profit_branch_codes: r.profit_branch_codes
+                }));
+            }
+        }
+    } catch (eCloud) {
+        console.warn('⚠️ [Agente DB] Error obteniendo sedes de Supabase Cloud:', eCloud.message);
+    }
+
+    try {
         const { rows } = await pgPool.query('SELECT id, name, sql_config, profit_branch_codes FROM branches WHERE active = true');
         return rows.map(r => ({
             id: r.id,
@@ -286,7 +327,7 @@ async function getAllActiveServers() {
             profit_branch_codes: r.profit_branch_codes
         }));
     } catch (e) {
-        console.warn('⚠️ [Agente DB] Error obteniendo todas las sedes activas de PG:', e.message);
+        console.warn('⚠️ [Agente DB] Error obteniendo todas las sedes activas de PG local:', e.message);
         return cachedServers;
     }
 }
