@@ -1025,7 +1025,7 @@ router.post('/', async (req, res) => {
 
                     await transaction.request()
                         .input('reng_num', sql.Int, 1)
-                        .input('rowguid_reng_cob', sql.UniqueIdentifier, lineGuid)
+                        .input('rowguid_reng_cob', sql.UniqueIdentifier, ivanRengGuid)
                         .input('rif_contribuyente', sql.Char(10), (srv.rif || 'J401750354').substring(0, 10))
                         .input('periodo_impositivo', sql.Decimal(6), Number(periodStr))
                         .input('fecha_documento', sql.SmallDateTime, tsDate)
@@ -1146,7 +1146,7 @@ router.post('/', async (req, res) => {
 
                     await transaction.request()
                         .input('reng_num', sql.Int, 1)
-                        .input('rowguid_reng_cob', sql.UniqueIdentifier, lineGuid)
+                        .input('rowguid_reng_cob', sql.UniqueIdentifier, islrRengGuid)
                         .input('co_islr', sql.Char(6), padProfit(coIslr, 6))
                         .input('monto', sql.Decimal(18, 5), baseIslr)
                         .input('monto_reten', sql.Decimal(18, 5), adjustedMontoRetencion)
