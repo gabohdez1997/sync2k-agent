@@ -1104,73 +1104,93 @@ router.get(['/precios/export-all', '/precios-venta/export-all'], async (req, res
 
         const pool = await getPool(srv.id, req.sqlAuth);
 
-        // Consultar los precios activos y márgenes de los artículos no anulados
+        // Consulta optimizada con OUTER APPLY sobre índices de saArtPrecio y saArtMargen
         const querySQL = `
-            WITH ActivePrices AS (
-                SELECT 
-                    RTRIM(p.co_art) AS co_art,
-                    LTRIM(RTRIM(p.co_precio)) AS co_precio,
-                    p.monto AS precio,
-                    RTRIM(p.co_mone) AS moneda,
-                    p.desde,
-                    p.hasta,
-                    ISNULL(m.monto_min, 0) AS margen_min,
-                    ISNULL(m.monto_max, 0) AS margen_max,
-                    COALESCE(p.fe_us_mo, p.fe_us_in, m.fe_us_mo, m.fe_us_in, p.desde) AS fe_us_mo,
-                    ROW_NUMBER() OVER(
-                        PARTITION BY p.co_art, p.co_precio 
-                        ORDER BY p.desde DESC, COALESCE(p.fe_us_mo, p.fe_us_in) DESC
-                    ) AS rn
-                FROM saArtPrecio p
-                INNER JOIN saArticulo a ON p.co_art = a.co_art
-                LEFT JOIN saArtMargen m ON p.co_art = m.co_art 
-                    AND (LTRIM(RTRIM(m.co_precio)) = LTRIM(RTRIM(p.co_precio)) OR LTRIM(RTRIM(m.co_precio)) = RIGHT('0' + LTRIM(RTRIM(p.co_precio)), 2))
-                WHERE p.Inactivo = 0 
-                  AND a.anulado = 0
-                  AND (p.hasta IS NULL OR GETDATE() <= p.hasta)
-            )
-            SELECT co_art, co_precio, precio, moneda, margen_min, margen_max, fe_us_mo
-            FROM ActivePrices
-            WHERE rn = 1 AND (precio > 0 OR margen_min > 0 OR margen_max > 0)
-            ORDER BY co_art, co_precio
+            SELECT 
+                RTRIM(a.co_art) AS co_art,
+                ISNULL(p1.monto, 0) AS precio_1,
+                ISNULL(m1.monto_min, 0) AS margen_1,
+                ISNULL(p2.monto, 0) AS precio_2,
+                ISNULL(m2.monto_min, 0) AS margen_2,
+                ISNULL(p3.monto, 0) AS precio_3,
+                ISNULL(m3.monto_min, 0) AS margen_3,
+                ISNULL(p4.monto, 0) AS precio_4,
+                ISNULL(m4.monto_min, 0) AS margen_4,
+                ISNULL(p5.monto, 0) AS precio_5,
+                ISNULL(m5.monto_min, 0) AS margen_5,
+                COALESCE(p1.fe_us_mo, p2.fe_us_mo, p3.fe_us_mo, p1.fe_us_in, a.fe_us_mo, a.fe_us_in) AS fe_us_mo,
+                COALESCE(p1.co_mone, p2.co_mone, 'US$') AS co_mone
+            FROM saArticulo a
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (co_precio = '01' OR co_precio = '1' OR co_precio = '1     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p1
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE co_art = a.co_art AND (co_precio = '01' OR co_precio = '1' OR co_precio = '1     ')
+            ) m1
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (co_precio = '02' OR co_precio = '2' OR co_precio = '2     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p2
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE co_art = a.co_art AND (co_precio = '02' OR co_precio = '2' OR co_precio = '2     ')
+            ) m2
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (co_precio = '03' OR co_precio = '3' OR co_precio = '3     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p3
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE co_art = a.co_art AND (co_precio = '03' OR co_precio = '3' OR co_precio = '3     ')
+            ) m3
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (co_precio = '04' OR co_precio = '4' OR co_precio = '4     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p4
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE co_art = a.co_art AND (co_precio = '04' OR co_precio = '4' OR co_precio = '4     ')
+            ) m4
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (co_precio = '05' OR co_precio = '5' OR co_precio = '5     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p5
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE co_art = a.co_art AND (co_precio = '05' OR co_precio = '5' OR co_precio = '5     ')
+            ) m5
+            WHERE a.anulado = 0
+              AND (ISNULL(p1.monto, 0) > 0 OR ISNULL(p2.monto, 0) > 0 OR ISNULL(p3.monto, 0) > 0 OR ISNULL(p4.monto, 0) > 0 OR ISNULL(p5.monto, 0) > 0)
+            ORDER BY a.co_art ASC
         `;
 
         const resData = await pool.request().query(querySQL);
-
-        const articlesMap = new Map();
-        for (const row of resData.recordset) {
-            const co_art = (row.co_art || '').trim().toUpperCase();
-            if (!co_art) continue;
-
-            if (!articlesMap.has(co_art)) {
-                articlesMap.set(co_art, {
-                    co_art,
-                    precio_1: 0, margen_1: 0,
-                    precio_2: 0, margen_2: 0,
-                    precio_3: 0, margen_3: 0,
-                    precio_4: 0, margen_4: 0,
-                    precio_5: 0, margen_5: 0,
-                    co_mone: row.moneda || 'US$',
-                    fe_us_mo: row.fe_us_mo ? new Date(row.fe_us_mo).toISOString() : null
-                });
-            }
-
-            const art = articlesMap.get(co_art);
-            const priceNum = parseInt(row.co_precio, 10);
-            if (priceNum >= 1 && priceNum <= 5) {
-                art[`precio_${priceNum}`] = Number(row.precio) || 0;
-                art[`margen_${priceNum}`] = Number(row.margen_min ?? row.margen_max) || 0;
-            }
-
-            if (row.fe_us_mo) {
-                const rowDate = new Date(row.fe_us_mo).toISOString();
-                if (!art.fe_us_mo || rowDate > art.fe_us_mo) {
-                    art.fe_us_mo = rowDate;
-                }
-            }
-        }
-
-        const data = Array.from(articlesMap.values());
+        const data = (resData.recordset || []).map(r => ({
+            ...r,
+            fe_us_mo: r.fe_us_mo ? new Date(r.fe_us_mo).toISOString() : null
+        }));
 
         return res.status(200).json({
             success: true,
@@ -1200,7 +1220,7 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
 
         const pool = await getPool(srv.id, req.sqlAuth);
 
-        // Cargar artículos existentes en esta sede
+        // Cargar artículos existentes y configuración de moneda / sucursal
         const [existingArtRes, resUSD, resSuc] = await Promise.all([
             pool.request().query('SELECT RTRIM(co_art) AS co_art FROM saArticulo WHERE anulado = 0'),
             pool.request().query("SELECT TOP 1 RTRIM(co_mone) AS co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'"),
@@ -1227,6 +1247,7 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                 const mone = item.co_mone || defaultUsdCode;
                 let anyPriceUpdated = false;
 
+                // Ejecutar actualización para los precios 1 al 5 que tengan valor
                 for (let i = 1; i <= 5; i++) {
                     const precioVal = item[`precio_${i}`];
                     const margenVal = item[`margen_${i}`];
@@ -1250,8 +1271,7 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                             DECLARE @real_co_precio CHAR(6);
                             SELECT TOP 1 @real_co_precio = co_precio 
                             FROM saTipoPrecio 
-                            WHERE LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)) 
-                               OR LTRIM(RTRIM(co_precio)) = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2);
+                            WHERE co_precio = @co_precio OR co_precio = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2);
 
                             IF @real_co_precio IS NULL
                                 SET @real_co_precio = @co_precio;
@@ -1266,8 +1286,8 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                                 co_sucu_mo = @sucu,
                                 co_us_mo = @user,
                                 fe_us_mo = GETDATE()
-                            WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
-                              AND (LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@real_co_precio)) OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)));
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
 
                             IF @@ROWCOUNT = 0
                             BEGIN
@@ -1284,12 +1304,12 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                             END
 
                             -- 2. Actualizar o insertar margen en saArtMargen
-                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND (LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@real_co_precio)) OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio))))
+                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio))
                             BEGIN
                                 UPDATE saArtMargen 
                                 SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
-                                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) 
-                                  AND (LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@real_co_precio)) OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)));
+                                WHERE co_art = @co_art 
+                                  AND (co_precio = @real_co_precio OR co_precio = @co_precio);
                             END
                             ELSE
                             BEGIN
