@@ -1104,6 +1104,16 @@ router.get(['/precios/export-all', '/precios-venta/export-all'], async (req, res
 
         const pool = await getPool(srv.id, req.sqlAuth);
 
+        // Limpieza preventiva: eliminar cualquier precio o margen menor o igual a 0
+        try {
+            await pool.request().query(`
+                DELETE FROM saArtPrecio WHERE monto <= 0;
+                DELETE FROM saArtMargen WHERE monto_min <= 0;
+            `);
+        } catch (eClean) {
+            console.warn('[EXPORT-PRECIOS] Advertencia al limpiar precios <= 0:', eClean.message);
+        }
+
         // Consulta optimizada con OUTER APPLY sobre índices de saArtPrecio y saArtMargen
         // Precios 1 y 2 para inventario general, y hasta 10 tipos de precios para artículos que inician con '09'
         const querySQL = `
@@ -1317,6 +1327,16 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
         let migratedCount = 0;
         const errors = [];
 
+        // 1. Limpieza preventiva en la sede: eliminar cualquier precio o margen que sea menor o igual a 0
+        try {
+            await pool.request().query(`
+                DELETE FROM saArtPrecio WHERE monto <= 0;
+                DELETE FROM saArtMargen WHERE monto_min <= 0;
+            `);
+        } catch (eClean) {
+            console.warn('[IMPORT-PRECIOS] Advertencia al limpiar precios <= 0:', eClean.message);
+        }
+
         for (const item of items) {
             const co_art = (item.co_art || '').trim().toUpperCase();
             if (!co_art || !existingSet.has(co_art)) continue;
@@ -1329,6 +1349,18 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                 // Solo los artículos cuyo código inicia en '09' tienen hasta 10 tipos de precios.
                 const isCode09 = co_art.startsWith('09');
                 const maxPrices = isCode09 ? 10 : 2;
+
+                // Si no es código 09, eliminar cualquier tipo de precio > 2 que pudiera haber quedado
+                if (!isCode09) {
+                    await pool.request()
+                        .input('co_art', sql.Char(30), co_art)
+                        .query(`
+                            DELETE FROM saArtPrecio 
+                            WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN ('01', '1', '02', '2');
+                            DELETE FROM saArtMargen 
+                            WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN ('01', '1', '02', '2');
+                        `);
+                }
 
                 for (let i = 1; i <= maxPrices; i++) {
                     const precioVal = item[`precio_${i}`];
@@ -1358,45 +1390,63 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                             IF @real_co_precio IS NULL
                                 SET @real_co_precio = @co_precio;
 
-                            -- 1. Actualizar o insertar precio en saArtPrecio
-                            UPDATE saArtPrecio SET
-                                monto = @monto,
-                                precioOm = 1,
-                                hasta = NULL,
-                                Inactivo = 0,
-                                co_mone = @mone,
-                                co_sucu_mo = @sucu,
-                                co_us_mo = @user,
-                                fe_us_mo = GETDATE()
-                            WHERE co_art = @co_art
-                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
-
-                            IF @@ROWCOUNT = 0
+                            -- 1. PRECIO: Si es menor o igual a 0, eliminarlo. Si es mayor a 0, actualizar o insertar.
+                            IF @monto <= 0
                             BEGIN
-                                INSERT INTO saArtPrecio (
-                                    co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm,
-                                    co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
-                                    montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
-                                )
-                                VALUES (
-                                    @co_art, @real_co_precio, @mone, GETDATE(), NULL, 0, @monto, 1,
-                                    @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
-                                    0.0, 0.0, 0.0, 0.0, 0.0
-                                );
-                            END
-
-                            -- 2. Actualizar o insertar margen en saArtMargen
-                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio))
-                            BEGIN
-                                UPDATE saArtMargen 
-                                SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
-                                WHERE co_art = @co_art 
+                                DELETE FROM saArtPrecio
+                                WHERE co_art = @co_art
                                   AND (co_precio = @real_co_precio OR co_precio = @co_precio);
                             END
                             ELSE
                             BEGIN
-                                INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                VALUES (@co_art, @real_co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
+                                UPDATE saArtPrecio SET
+                                    monto = @monto,
+                                    precioOm = 1,
+                                    hasta = NULL,
+                                    Inactivo = 0,
+                                    co_mone = @mone,
+                                    co_sucu_mo = @sucu,
+                                    co_us_mo = @user,
+                                    fe_us_mo = GETDATE()
+                                WHERE co_art = @co_art
+                                  AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+
+                                IF @@ROWCOUNT = 0
+                                BEGIN
+                                    INSERT INTO saArtPrecio (
+                                        co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm,
+                                        co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
+                                        montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
+                                    )
+                                    VALUES (
+                                        @co_art, @real_co_precio, @mone, GETDATE(), NULL, 0, @monto, 1,
+                                        @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
+                                        0.0, 0.0, 0.0, 0.0, 0.0
+                                    );
+                                END
+                            END
+
+                            -- 2. MARGEN: Si es menor o igual a 0, eliminarlo. Si es mayor a 0, actualizar o insertar.
+                            IF @margen <= 0
+                            BEGIN
+                                DELETE FROM saArtMargen
+                                WHERE co_art = @co_art
+                                  AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                            END
+                            ELSE
+                            BEGIN
+                                IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio))
+                                BEGIN
+                                    UPDATE saArtMargen 
+                                    SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
+                                    WHERE co_art = @co_art 
+                                      AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                                END
+                                ELSE
+                                BEGIN
+                                    INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                                    VALUES (@co_art, @real_co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
+                                END
                             END
                         `);
 
@@ -2113,151 +2163,105 @@ router.put('/:co_art', async (req, res) => {
             // Regla: Precios 1 y 2 para la mayoría de artículos, y hasta 10 tipos de precios para código '09'
             const isCode09Art = (data.co_art || coArtOri || '').trim().startsWith('09');
             const maxPricesArt = isCode09Art ? 10 : 2;
+
+            if (!isCode09Art) {
+                await pool.request()
+                    .input('co_art', sql.Char(30), data.co_art || coArtOri)
+                    .query(`
+                        DELETE FROM saArtPrecio 
+                        WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN ('01', '1', '02', '2');
+                        DELETE FROM saArtMargen 
+                        WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN ('01', '1', '02', '2');
+                    `);
+            }
+
             for (let i = 1; i <= maxPricesArt; i++) {
                 const margen = data[`margen_${i}`];
                 const precio = data[`precio_${i}`];
 
                 if ((margen !== undefined && margen !== null && margen !== '') ||
                     (precio !== undefined && precio !== null && precio !== '')) {
-                    const numMargen = margen !== undefined && margen !== null && margen !== '' ? Number(margen) : 0;
-                    const numPrecio = precio !== undefined && precio !== null && precio !== '' ? Number(precio) : 0;
-                    const precioId = String(i); // '1', '2', '3', '4', '5' (según saTipoPrecio)
+                    const numMargen = Number(margen) || 0;
+                    const numPrecio = Number(precio) || 0;
+                    const precioId = String(i);
 
-                    const activePriceRes = await pool.request()
+                    const r = pool.request()
                         .input('co_art', sql.Char(30), data.co_art || coArtOri)
                         .input('co_precio', sql.Char(6), precioId)
-                        .query(`
-                            SELECT TOP 1 desde, co_alma_calculado 
-                            FROM saArtPrecio 
-                            WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio
-                            ORDER BY desde DESC
-                        `);
+                        .input('monto', sql.Decimal(18, 5), numPrecio)
+                        .input('margen', sql.Decimal(18, 5), numMargen)
+                        .input('mone', sql.Char(6), usdCode)
+                        .input('sucu', sql.Char(6), defaultAlmacen)
+                        .input('user', sql.Char(6), auditUser);
 
-                    if (activePriceRes.recordset.length === 0) {
-                        // Insertar precio
-                        await pool.request()
-                            .input('co_art', sql.Char(30), data.co_art || coArtOri)
-                            .input('co_precio', sql.Char(6), precioId)
-                            .input('margen', sql.Decimal(18, 5), numMargen)
-                            .input('monto', sql.Decimal(18, 5), numPrecio)
-                            .input('sucu', sql.Char(6), defaultAlmacen)
-                            .input('user', sql.Char(6), auditUser)
-                            .input('mone', sql.Char(6), usdCode)
-                            .query(`
+                    await r.query(`
+                        DECLARE @real_co_precio CHAR(6);
+                        SELECT TOP 1 @real_co_precio = co_precio 
+                        FROM saTipoPrecio 
+                        WHERE co_precio = @co_precio OR co_precio = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2);
+
+                        IF @real_co_precio IS NULL
+                            SET @real_co_precio = @co_precio;
+
+                        -- 1. PRECIO: Si es menor o igual a 0, eliminarlo. Si es mayor a 0, actualizar o insertar.
+                        IF @monto <= 0
+                        BEGIN
+                            DELETE FROM saArtPrecio
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                        END
+                        ELSE
+                        BEGIN
+                            UPDATE saArtPrecio SET
+                                monto = @monto,
+                                precioOm = 1,
+                                hasta = NULL,
+                                Inactivo = 0,
+                                co_mone = @mone,
+                                co_sucu_mo = @sucu,
+                                co_us_mo = @user,
+                                fe_us_mo = GETDATE()
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+
+                            IF @@ROWCOUNT = 0
+                            BEGIN
                                 INSERT INTO saArtPrecio (
-                                    co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, 
+                                    co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm,
                                     co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
                                     montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
                                 )
                                 VALUES (
-                                    @co_art, @co_precio, @mone, GETDATE(), NULL, 0, @monto, 1, 
+                                    @co_art, @real_co_precio, @mone, GETDATE(), NULL, 0, @monto, 1,
                                     @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
                                     0.0, 0.0, 0.0, 0.0, 0.0
                                 );
-                                
+                            END
+                        END
+
+                        -- 2. MARGEN: Si es menor o igual a 0, eliminarlo. Si es mayor a 0, actualizar o insertar.
+                        IF @margen <= 0
+                        BEGIN
+                            DELETE FROM saArtMargen
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                        END
+                        ELSE
+                        BEGIN
+                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio))
+                            BEGIN
+                                UPDATE saArtMargen 
+                                SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
+                                WHERE co_art = @co_art 
+                                  AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                            END
+                            ELSE
+                            BEGIN
                                 INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
-                            `);
-                    } else {
-                        // Actualizar precio existente
-                        const originalDesde = activePriceRes.recordset[0].desde;
-                        const originalAlma = activePriceRes.recordset[0].co_alma_calculado;
-
-                        const updateRes = await pool.request()
-                            .input('co_art', sql.Char(30), data.co_art || coArtOri)
-                            .input('co_precio', sql.Char(6), precioId)
-                            .input('margen', sql.Decimal(18, 5), numMargen)
-                            .input('monto', sql.Decimal(18, 5), numPrecio)
-                            .input('sucu', sql.Char(6), defaultAlmacen)
-                            .input('user', sql.Char(6), auditUser)
-                            .input('mone', sql.Char(6), usdCode)
-                            .input('originalDesde', sql.SmallDateTime, originalDesde)
-                            .input('originalAlma', sql.Char(6), originalAlma)
-                            .query(`
-                                UPDATE saArtPrecio SET
-                                    monto = @monto,
-                                    precioOm = 1,
-                                    hasta = NULL,
-                                    co_mone = @mone,
-                                    co_sucu_mo = @sucu,
-                                    co_us_mo = @user,
-                                    fe_us_mo = GETDATE(),
-                                    montoadi1 = 0.0,
-                                    montoadi2 = 0.0,
-                                    montoadi3 = 0.0,
-                                    montoadi4 = 0.0,
-                                    montoadi5 = 0.0
-                                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) 
-                                  AND LTRIM(RTRIM(co_precio)) = @co_precio
-                                  AND desde = @originalDesde
-                                  AND (co_alma_calculado = @originalAlma OR (co_alma_calculado IS NULL AND @originalAlma IS NULL));
-
-                                IF EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
-                                BEGIN
-                                    UPDATE saArtMargen 
-                                    SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
-                                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio
-                                END
-                                ELSE
-                                BEGIN
-                                    INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                    VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
-                                END
-                            `);
-
-                        if (updateRes.rowsAffected[0] === 0) {
-                            console.log(`⚠️ [AGENT] UPDATE estricto no afectó filas. Intentando UPDATE general por co_art y co_precio...`);
-                            const fallbackUpdateRes = await pool.request()
-                                .input('co_art', sql.Char(30), data.co_art || coArtOri)
-                                .input('co_precio', sql.Char(6), precioId)
-                                .input('monto', sql.Decimal(18, 5), numPrecio)
-                                .input('sucu', sql.Char(6), defaultAlmacen)
-                                .input('user', sql.Char(6), auditUser)
-                                .input('mone', sql.Char(6), usdCode)
-                                .query(`
-                                    UPDATE saArtPrecio SET
-                                        monto = @monto,
-                                        precioOm = 1,
-                                        hasta = NULL,
-                                        co_mone = @mone,
-                                        co_sucu_mo = @sucu,
-                                        co_us_mo = @user,
-                                        fe_us_mo = GETDATE()
-                                    WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) 
-                                      AND LTRIM(RTRIM(co_precio)) = @co_precio;
-                                `);
-
-                            if (fallbackUpdateRes.rowsAffected[0] === 0) {
-                                console.log(`🚀 [AGENT] Ningún UPDATE afectó filas. Creando precio (INSERT)...`);
-                                await pool.request()
-                                    .input('co_art', sql.Char(30), data.co_art || coArtOri)
-                                    .input('co_precio', sql.Char(6), precioId)
-                                    .input('margen', sql.Decimal(18, 5), numMargen)
-                                    .input('monto', sql.Decimal(18, 5), numPrecio)
-                                    .input('sucu', sql.Char(6), defaultAlmacen)
-                                    .input('user', sql.Char(6), auditUser)
-                                    .input('mone', sql.Char(6), usdCode)
-                                    .query(`
-                                        INSERT INTO saArtPrecio (
-                                            co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm, 
-                                            co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
-                                            montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
-                                        )
-                                        VALUES (
-                                            @co_art, @co_precio, @mone, GETDATE(), NULL, 0, @monto, 1, 
-                                            @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
-                                            0.0, 0.0, 0.0, 0.0, 0.0
-                                        );
-                                        
-                                        IF NOT EXISTS (SELECT 1 FROM saArtMargen WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art)) AND LTRIM(RTRIM(co_precio)) = @co_precio)
-                                        BEGIN
-                                            INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
-                                            VALUES (@co_art, @co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
-                                        END
-                                    `);
-                            }
-                        }
-                    }
+                                VALUES (@co_art, @real_co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
+                            END
+                        END
+                    `);
                 }
             }
             console.log(`[UPSERT] Operación completada exitosamente.`);
