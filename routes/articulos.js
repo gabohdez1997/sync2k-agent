@@ -1105,6 +1105,7 @@ router.get(['/precios/export-all', '/precios-venta/export-all'], async (req, res
         const pool = await getPool(srv.id, req.sqlAuth);
 
         // Consulta optimizada con OUTER APPLY sobre índices de saArtPrecio y saArtMargen
+        // Precios 1 y 2 para inventario general, y hasta 10 tipos de precios para artículos que inician con '09'
         const querySQL = `
             SELECT 
                 RTRIM(a.co_art) AS co_art,
@@ -1112,12 +1113,22 @@ router.get(['/precios/export-all', '/precios-venta/export-all'], async (req, res
                 ISNULL(m1.monto_min, 0) AS margen_1,
                 ISNULL(p2.monto, 0) AS precio_2,
                 ISNULL(m2.monto_min, 0) AS margen_2,
-                ISNULL(p3.monto, 0) AS precio_3,
-                ISNULL(m3.monto_min, 0) AS margen_3,
-                ISNULL(p4.monto, 0) AS precio_4,
-                ISNULL(m4.monto_min, 0) AS margen_4,
-                ISNULL(p5.monto, 0) AS precio_5,
-                ISNULL(m5.monto_min, 0) AS margen_5,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p3.monto, 0) ELSE 0 END AS precio_3,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m3.monto_min, 0) ELSE 0 END AS margen_3,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p4.monto, 0) ELSE 0 END AS precio_4,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m4.monto_min, 0) ELSE 0 END AS margen_4,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p5.monto, 0) ELSE 0 END AS precio_5,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m5.monto_min, 0) ELSE 0 END AS margen_5,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p6.monto, 0) ELSE 0 END AS precio_6,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m6.monto_min, 0) ELSE 0 END AS margen_6,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p7.monto, 0) ELSE 0 END AS precio_7,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m7.monto_min, 0) ELSE 0 END AS margen_7,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p8.monto, 0) ELSE 0 END AS precio_8,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m8.monto_min, 0) ELSE 0 END AS margen_8,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p9.monto, 0) ELSE 0 END AS precio_9,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m9.monto_min, 0) ELSE 0 END AS margen_9,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(p10.monto, 0) ELSE 0 END AS precio_10,
+                CASE WHEN a.co_art LIKE '09%' THEN ISNULL(m10.monto_min, 0) ELSE 0 END AS margen_10,
                 COALESCE(p1.fe_us_mo, p2.fe_us_mo, p3.fe_us_mo, p1.fe_us_in, a.fe_us_mo, a.fe_us_in) AS fe_us_mo,
                 COALESCE(p1.co_mone, p2.co_mone, 'US$') AS co_mone
             FROM saArticulo a
@@ -1148,41 +1159,108 @@ router.get(['/precios/export-all', '/precios-venta/export-all'], async (req, res
             OUTER APPLY (
                 SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
                 FROM saArtPrecio 
-                WHERE co_art = a.co_art AND (co_precio = '03' OR co_precio = '3' OR co_precio = '3     ')
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '03' OR co_precio = '3' OR co_precio = '3     ')
                   AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
                 ORDER BY desde DESC
             ) p3
             OUTER APPLY (
                 SELECT TOP 1 monto_min 
                 FROM saArtMargen 
-                WHERE co_art = a.co_art AND (co_precio = '03' OR co_precio = '3' OR co_precio = '3     ')
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '03' OR co_precio = '3' OR co_precio = '3     ')
             ) m3
             OUTER APPLY (
                 SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
                 FROM saArtPrecio 
-                WHERE co_art = a.co_art AND (co_precio = '04' OR co_precio = '4' OR co_precio = '4     ')
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '04' OR co_precio = '4' OR co_precio = '4     ')
                   AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
                 ORDER BY desde DESC
             ) p4
             OUTER APPLY (
                 SELECT TOP 1 monto_min 
                 FROM saArtMargen 
-                WHERE co_art = a.co_art AND (co_precio = '04' OR co_precio = '4' OR co_precio = '4     ')
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '04' OR co_precio = '4' OR co_precio = '4     ')
             ) m4
             OUTER APPLY (
                 SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
                 FROM saArtPrecio 
-                WHERE co_art = a.co_art AND (co_precio = '05' OR co_precio = '5' OR co_precio = '5     ')
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '05' OR co_precio = '5' OR co_precio = '5     ')
                   AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
                 ORDER BY desde DESC
             ) p5
             OUTER APPLY (
                 SELECT TOP 1 monto_min 
                 FROM saArtMargen 
-                WHERE co_art = a.co_art AND (co_precio = '05' OR co_precio = '5' OR co_precio = '5     ')
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '05' OR co_precio = '5' OR co_precio = '5     ')
             ) m5
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '06' OR co_precio = '6' OR co_precio = '6     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p6
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '06' OR co_precio = '6' OR co_precio = '6     ')
+            ) m6
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '07' OR co_precio = '7' OR co_precio = '7     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p7
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '07' OR co_precio = '7' OR co_precio = '7     ')
+            ) m7
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '08' OR co_precio = '8' OR co_precio = '8     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p8
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '08' OR co_precio = '8' OR co_precio = '8     ')
+            ) m8
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '09' OR co_precio = '9' OR co_precio = '9     ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p9
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '09' OR co_precio = '9' OR co_precio = '9     ')
+            ) m9
+            OUTER APPLY (
+                SELECT TOP 1 monto, fe_us_mo, fe_us_in, co_mone 
+                FROM saArtPrecio 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '10' OR co_precio = '10    ')
+                  AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p10
+            OUTER APPLY (
+                SELECT TOP 1 monto_min 
+                FROM saArtMargen 
+                WHERE a.co_art LIKE '09%' AND co_art = a.co_art AND (co_precio = '10' OR co_precio = '10    ')
+            ) m10
             WHERE a.anulado = 0
-              AND (ISNULL(p1.monto, 0) > 0 OR ISNULL(p2.monto, 0) > 0 OR ISNULL(p3.monto, 0) > 0 OR ISNULL(p4.monto, 0) > 0 OR ISNULL(p5.monto, 0) > 0)
+              AND (
+                  ISNULL(p1.monto, 0) > 0 OR ISNULL(p2.monto, 0) > 0
+                  OR (a.co_art LIKE '09%' AND (
+                      ISNULL(p3.monto, 0) > 0 OR ISNULL(p4.monto, 0) > 0 OR ISNULL(p5.monto, 0) > 0 OR
+                      ISNULL(p6.monto, 0) > 0 OR ISNULL(p7.monto, 0) > 0 OR ISNULL(p8.monto, 0) > 0 OR
+                      ISNULL(p9.monto, 0) > 0 OR ISNULL(p10.monto, 0) > 0
+                  ))
+              )
             ORDER BY a.co_art ASC
         `;
 
@@ -1247,8 +1325,12 @@ router.post(['/precios/import-batch', '/precios-venta/import-batch'], async (req
                 const mone = item.co_mone || defaultUsdCode;
                 let anyPriceUpdated = false;
 
-                // Ejecutar actualización para los precios 1 al 5 que tengan valor
-                for (let i = 1; i <= 5; i++) {
+                // Regla de negocio: la gran mayoría de artículos solo tienen precio 1 y 2.
+                // Solo los artículos cuyo código inicia en '09' tienen hasta 10 tipos de precios.
+                const isCode09 = co_art.startsWith('09');
+                const maxPrices = isCode09 ? 10 : 2;
+
+                for (let i = 1; i <= maxPrices; i++) {
                     const precioVal = item[`precio_${i}`];
                     const margenVal = item[`margen_${i}`];
 
@@ -2028,8 +2110,10 @@ router.put('/:co_art', async (req, res) => {
             }
 
             // --- 3. Guardar Precios y Márgenes (saArtPrecio) ---
-            // Revisamos los tipos de precio 1, 2, 3, 4 y 5
-            for (let i = 1; i <= 5; i++) {
+            // Regla: Precios 1 y 2 para la mayoría de artículos, y hasta 10 tipos de precios para código '09'
+            const isCode09Art = (data.co_art || coArtOri || '').trim().startsWith('09');
+            const maxPricesArt = isCode09Art ? 10 : 2;
+            for (let i = 1; i <= maxPricesArt; i++) {
                 const margen = data[`margen_${i}`];
                 const precio = data[`precio_${i}`];
 
