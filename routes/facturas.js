@@ -752,4 +752,212 @@ router.post('/', async (req, res) => {
     return writeResponse(res, outcome);
 });
 
+// =========================================================================
+// ELIMINAR FACTURA DE VENTA
+// =========================================================================
+const eliminarFacturaVentaHandler = async (req, res) => {
+    try {
+        const { doc_num } = req.params;
+        const { sede } = req.query;
+
+        console.log(`🗑️ [FACTURA VENTA] Petición de eliminación para factura ${doc_num} (sede: ${sede || 'todas/default'})`);
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            // 1. Verificar existencia de la factura
+            const resH = await pool.request()
+                .input('doc_num', sql.VarChar, doc_num)
+                .query(`
+                    SELECT doc_num, anulado, saldo, total_neto, RTRIM(ISNULL(status, '0')) AS status
+                    FROM saFacturaVenta
+                    WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                `);
+
+            if (!resH.recordset.length) {
+                throw new Error(`La Factura de Venta "${doc_num}" no existe.`);
+            }
+
+            const head = resH.recordset[0];
+
+            // 2. Verificar que no tenga cobros asociados en Cuentas por Cobrar
+            const resCobros = await pool.request()
+                .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                .query(`
+                    SELECT TOP 1 cob_num
+                    FROM saCobroDocReng
+                    WHERE LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@doc_num))
+                      AND co_tipo_doc = 'FACT'
+                `);
+
+            if (resCobros.recordset.length > 0) {
+                const cobNum = resCobros.recordset[0].cob_num;
+                throw new Error(`No se puede eliminar la factura ${doc_num} porque tiene el cobro N° ${cobNum?.trim()} asociado. Anule o elimine el cobro primero.`);
+            }
+
+            // 3. Verificar que no tenga despachos asociados
+            const resDesp = await pool.request()
+                .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                .query(`
+                    SELECT TOP 1 num_doc
+                    FROM saNotaDespachoVentaReng
+                    WHERE LTRIM(RTRIM(num_doc)) = LTRIM(RTRIM(@doc_num))
+                      AND tipo_doc = 'FACT'
+                `);
+
+            if (resDesp.recordset.length > 0 || head.status === '1' || head.status === '2') {
+                throw new Error(`No se puede eliminar la factura ${doc_num} porque se encuentra parcial o totalmente despachada. Anule el despacho primero.`);
+            }
+
+            // 4. Obtener renglones de la factura
+            const resL = await pool.request()
+                .input('doc_num', sql.VarChar, doc_num)
+                .query(`
+                    SELECT reng_num, co_art, co_alma, co_uni, total_art, pendiente, rowguid,
+                           RTRIM(tipo_doc) AS tipo_doc, RTRIM(num_doc) AS num_doc, rowguid_doc
+                    FROM saFacturaVentaReng
+                    WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                `);
+
+            const lines = resL.recordset;
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+
+                // 5. Si no estaba anulada, devolver el stock físico y restaurar pedidos pendientes
+                if (!head.anulado) {
+                    for (const line of lines) {
+                        // Devolver stock físico ACT
+                        const rStock = new sql.Request(transaction);
+                        rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                        rStock.input('sCo_Art',               sql.Char(30), line.co_art);
+                        rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                        rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+                        rStock.input('sTipoStock',            sql.Char(4),  'ACT');
+                        rStock.input('bSumarStock',           sql.Bit,      1);
+                        rStock.input('bPermiteStockNegativo', sql.Bit,      1);
+                        await rStock.execute('pStockActualizar');
+
+                        // Restar stock por despachar (DES) si tenía pendiente
+                        const pendingQty = Number(line.pendiente || line.total_art || 0);
+                        if (pendingQty > 0) {
+                            const desCheck = await transaction.request()
+                                .input('co_art', sql.Char(30), line.co_art)
+                                .input('co_alma', sql.Char(6), line.co_alma)
+                                .query(`
+                                    SELECT ISNULL(stock, 0) AS stock_des
+                                    FROM saStockAlmacen
+                                    WHERE co_art = @co_art AND co_alma = @co_alma AND RTRIM(tipo) = 'DES'
+                                `);
+                            const currentDes = Number(desCheck.recordset[0]?.stock_des || 0);
+                            const qtyToSubtract = Math.min(pendingQty, Math.max(currentDes, 0));
+                            if (qtyToSubtract > 0) {
+                                const rStockDes = new sql.Request(transaction);
+                                rStockDes.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                                rStockDes.input('sCo_Art',               sql.Char(30), line.co_art);
+                                rStockDes.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                                rStockDes.input('deCantidad',            sql.Decimal(18, 5), qtyToSubtract);
+                                rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                                rStockDes.input('bSumarStock',           sql.Bit,      0);
+                                rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                                await rStockDes.execute('pStockActualizar');
+                            }
+                        }
+
+                        // Si venía de Pedido, restaurar pendiente y volver a comprometer stock (COM)
+                        if (['PCLI', 'PEDI', 'PED', 'PVEN'].includes(line.tipo_doc) && line.rowguid_doc && line.num_doc) {
+                            const rStockCom = new sql.Request(transaction);
+                            rStockCom.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+                            rStockCom.input('sCo_Art',               sql.Char(30), line.co_art);
+                            rStockCom.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+                            rStockCom.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+                            rStockCom.input('sTipoStock',            sql.Char(4),  'COM');
+                            rStockCom.input('bSumarStock',           sql.Bit,      1);
+                            rStockCom.input('bPermiteStockNegativo', sql.Bit,      1);
+                            await rStockCom.execute('pStockActualizar');
+
+                            const rRevert = new sql.Request(transaction);
+                            rRevert.input('qty', sql.Decimal(18, 5), line.total_art);
+                            rRevert.input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc);
+                            rRevert.input('num_doc', sql.Char(20), padProfit(line.num_doc, 20));
+                            rRevert.input('auditUser', sql.Char(6), padProfit(auditUser, 6));
+
+                            await rRevert.query(`
+                                UPDATE saPedidoVentaReng
+                                SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
+                                    fe_us_mo = GETDATE(),
+                                    co_us_mo = @auditUser
+                                WHERE rowguid = @rowguid_doc AND doc_num = @num_doc;
+
+                                DECLARE @total_qty DECIMAL(18,5), @pending_qty DECIMAL(18,5);
+                                SELECT @total_qty = SUM(total_art), @pending_qty = SUM(pendiente)
+                                FROM saPedidoVentaReng
+                                WHERE doc_num = @num_doc;
+
+                                UPDATE saPedidoVenta
+                                SET status = CASE 
+                                    WHEN @pending_qty = 0 THEN '2'
+                                    WHEN @pending_qty < @total_qty THEN '1'
+                                    ELSE '0'
+                                END,
+                                fe_us_mo = GETDATE(),
+                                co_us_mo = @auditUser
+                                WHERE doc_num = @num_doc;
+                            `);
+                        }
+                    }
+                }
+
+                // 6. Eliminar IGTF si existía registro
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoVentaInfoIGTF
+                        WHERE rowguid IN (
+                            SELECT rowguid FROM saDocumentoVenta
+                            WHERE co_tipo_doc = 'FACT' AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@doc_num))
+                        );
+                    `);
+
+                // 7. Eliminar documento de saDocumentoVenta
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoVenta
+                        WHERE co_tipo_doc = 'FACT' AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@doc_num));
+                    `);
+
+                // 8. Eliminar renglones saFacturaVentaReng
+                await transaction.request()
+                    .input('doc_num', sql.VarChar, doc_num)
+                    .query(`
+                        DELETE FROM saFacturaVentaReng
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num));
+                    `);
+
+                // 9. Eliminar cabecera saFacturaVenta
+                await transaction.request()
+                    .input('doc_num', sql.VarChar, doc_num)
+                    .query(`
+                        DELETE FROM saFacturaVenta
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num));
+                    `);
+
+                await transaction.commit();
+                return { success: true, doc_num, message: `Factura ${doc_num} eliminada exitosamente.` };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al eliminar factura.', error: error.message });
+    }
+};
+
+router.delete('/:doc_num', eliminarFacturaVentaHandler);
+router.post('/:doc_num/eliminar', eliminarFacturaVentaHandler);
+
 module.exports = router;

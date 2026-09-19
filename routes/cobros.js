@@ -2136,4 +2136,149 @@ router.post('/sync-vendedores', async (req, res) => {
     return writeResponse(res, outcome);
 });
 
+// =========================================================================
+// ELIMINAR COBRO
+// =========================================================================
+const eliminarCobroHandler = async (req, res) => {
+    try {
+        const { cob_num } = req.params;
+        const { sede } = req.query;
+
+        console.log(`🗑️ [COBROS] Petición de eliminación para cobro ${cob_num} (sede: ${sede || 'todas/default'})`);
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool, srv) => {
+            // 1. Verificar existencia del cobro
+            const resCob = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT cob_num, anulado, RTRIM(co_cli) AS co_cli, RTRIM(co_sucu_in) AS co_sucu_in
+                    FROM saCobro
+                    WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                `);
+
+            if (!resCob.recordset.length) {
+                throw new Error(`El cobro "${cob_num}" no existe.`);
+            }
+
+            const cob = resCob.recordset[0];
+            const sucuCode = cob.co_sucu_in || '01';
+            const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
+
+            // 2. Obtener renglones de documentos asociados
+            const resReng = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT RTRIM(co_tipo_doc) AS co_tipo_doc, RTRIM(nro_doc) AS nro_doc, mont_cob
+                    FROM saCobroDocReng
+                    WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
+                `);
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                // 3. Si no estaba anulado, revertir saldo de los documentos cobrados
+                if (!cob.anulado) {
+                    for (const line of resReng.recordset) {
+                        const totalRebaje = Number(line.mont_cob || 0);
+                        if (totalRebaje > 0) {
+                            await transaction.request()
+                                .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
+                                .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                                .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                                .query(`
+                                    UPDATE saDocumentoVenta
+                                    SET saldo = saldo + @rebaje,
+                                        fe_us_mo = GETDATE(),
+                                        co_us_mo = @auditUser
+                                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                                `);
+
+                            if (line.co_tipo_doc.trim().toUpperCase() === 'FACT') {
+                                await transaction.request()
+                                    .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                                    .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                                    .query(`
+                                        UPDATE saFacturaVenta
+                                        SET saldo = saldo + @rebaje,
+                                            fe_us_mo = GETDATE(),
+                                            co_us_mo = @auditUser
+                                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
+                                    `);
+                            }
+                        }
+                    }
+
+                    // Anular/revertir movimientos de caja
+                    try {
+                        await transaction.request()
+                            .input('sNro_Cobro', sql.Char(20), padProfit(cob_num, 20))
+                            .input('sCo_Us_Mo', sql.Char(6), padProfit(auditUser, 6))
+                            .input('sCo_Sucu_Mo', sql.Char(6), padProfit(sucuCode, 6))
+                            .input('sRevisado', sql.Char(1), null)
+                            .input('sTrasnfe', sql.Char(1), null)
+                            .execute('pv_ActualizarMovCajaAsocCobroAnular');
+                    } catch (eMovCaja) {
+                        console.warn(`[ELIMINAR COBRO] pv_ActualizarMovCajaAsocCobroAnular:`, eMovCaja.message);
+                    }
+                }
+
+                // 4. Eliminar movimientos de banco asociados
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saMovimientoBanco
+                        WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'COB';
+                    `);
+
+                // 5. Eliminar documentos de retención o diferenciales creados por el cobro
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoVenta
+                        WHERE DOC_ORIG = 'COBRO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num));
+                    `);
+
+                // 6. Eliminar formas de pago (saCobroTPReng) y giros (saGiroVenta)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saCobroTPReng WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                        DELETE FROM saGiroVenta WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                    `);
+
+                // 7. Eliminar renglones de documentos (saCobroDocReng)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saCobroDocReng WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                    `);
+
+                // 8. Eliminar cabecera (saCobro)
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saCobro WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                    `);
+
+                await transaction.commit();
+                return { success: true, cob_num, message: `Cobro ${cob_num} eliminado exitosamente.` };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al eliminar cobro.', error: error.message });
+    }
+};
+
+router.delete('/:cob_num', eliminarCobroHandler);
+router.post('/:cob_num/eliminar', eliminarCobroHandler);
+
 module.exports = router;
