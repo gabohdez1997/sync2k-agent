@@ -2860,4 +2860,303 @@ router.post('/sync', async (req, res) => {
     }
 });
 
+// =========================================================================
+// PREVIEW CAMBIOS DE PRECIOS POR VARIACIÓN DE COSTOS
+// =========================================================================
+router.post('/preview-price-changes', async (req, res) => {
+    try {
+        const { sede, items } = req.body;
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            return res.json({ success: true, hasChanges: false, changes: [] });
+        }
+
+        const servers = getServers();
+        const targetSede = sede ? servers.find(s => s.id === sede) : servers[0];
+        if (!targetSede) {
+            return res.status(404).json({ success: false, message: `Sede "${sede}" no encontrada.` });
+        }
+
+        const pool = await getPool(targetSede.id, req.sqlAuth);
+
+        // Filtrar y limpiar códigos de artículos
+        const validItems = items.filter(it => it && it.co_art && String(it.co_art).trim().length > 0);
+        if (validItems.length === 0) {
+            return res.json({ success: true, hasChanges: false, changes: [] });
+        }
+
+        const coArts = [...new Set(validItems.map(it => String(it.co_art).trim()))];
+        const idsClause = coArts.map(id => `'${id.replace(/'/g, "''")}'`).join(',');
+
+        // 1. Obtener datos de artículos, último costo de compra, precios y márgenes
+        const [resArt, resCostos, resPrecios] = await Promise.all([
+            pool.request().query(`
+                SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS art_des,
+                       ult_cos_om, ult_cos_un, cost_pro, cost_pro_om
+                FROM saArticulo
+                WHERE LTRIM(RTRIM(co_art)) IN (${idsClause})
+            `),
+            pool.request().query(`
+                SELECT r.co_art, r.cost_unit_om, r.cost_unit, r.fec_emis, r.co_mone
+                FROM (
+                    SELECT RTRIM(fr.co_art) AS co_art,
+                           CASE 
+                                WHEN RTRIM(fn.co_mone) = 'BS' THEN (fr.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= fn.fec_emis ORDER BY fecha DESC), 0)) 
+                                ELSE fr.cost_unit_om 
+                           END AS cost_unit_om,
+                           fr.cost_unit,
+                           fn.fec_emis,
+                           RTRIM(fn.co_mone) AS co_mone,
+                           ROW_NUMBER() OVER(PARTITION BY fr.co_art ORDER BY fn.fec_emis DESC) as rn
+                    FROM saFacturaCompraReng fr 
+                    INNER JOIN saFacturaCompra fn ON fr.doc_num = fn.doc_num
+                    WHERE LTRIM(RTRIM(fr.co_art)) IN (${idsClause}) AND fn.anulado = 0
+                ) r
+                WHERE r.rn = 1
+            `).catch(err => {
+                console.warn('[preview-price-changes] Error obteniendo último costo:', err.message);
+                return { recordset: [] };
+            }),
+            pool.request().query(`
+                WITH UP AS (
+                    SELECT RTRIM(p.co_art) AS co_art, RTRIM(p.co_precio) AS id_precio,
+                           p.monto AS precio, RTRIM(p.co_mone) AS moneda,
+                           ISNULL(m.monto_min, 0) AS margen,
+                           ROW_NUMBER() OVER(PARTITION BY p.co_art, p.co_precio ORDER BY p.desde DESC) AS rn
+                    FROM saArtPrecio p
+                    LEFT JOIN saArtMargen m ON p.co_art = m.co_art AND p.co_precio = m.co_precio
+                    WHERE LTRIM(RTRIM(p.co_art)) IN (${idsClause})
+                      AND p.Inactivo = 0 AND GETDATE() >= p.desde AND (p.hasta IS NULL OR GETDATE() <= p.hasta)
+                )
+                SELECT co_art, id_precio, precio, moneda, margen FROM UP WHERE rn = 1
+            `)
+        ]);
+
+        const artMap = {};
+        resArt.recordset.forEach(a => { artMap[a.co_art] = a; });
+
+        const costMap = {};
+        resCostos.recordset.forEach(c => { costMap[c.co_art] = Number(c.cost_unit_om) || 0; });
+
+        const precioMap = {};
+        resPrecios.recordset.forEach(p => {
+            if (!precioMap[p.co_art]) precioMap[p.co_art] = {};
+            const numKey = parseInt(p.id_precio, 10);
+            precioMap[p.co_art][p.id_precio] = p;
+            if (!isNaN(numKey)) {
+                precioMap[p.co_art][String(numKey)] = p;
+                precioMap[p.co_art][String(numKey).padStart(2, '0')] = p;
+            }
+        });
+
+        const changes = [];
+
+        for (const item of validItems) {
+            const coArt = String(item.co_art).trim();
+            const artInfo = artMap[coArt] || {};
+            const artDes = item.art_des || artInfo.art_des || coArt;
+
+            // Determinar costo anterior (USD)
+            let costoAnterior = costMap[coArt];
+            if (costoAnterior === undefined || costoAnterior === null || isNaN(costoAnterior)) {
+                costoAnterior = Number(artInfo.ult_cos_om || artInfo.cost_pro_om || 0);
+            }
+            costoAnterior = Number(costoAnterior) || 0;
+
+            // Determinar nuevo costo (USD)
+            const costoNuevo = Number(item.nuevo_costo_usd != null ? item.nuevo_costo_usd : (item.costo_usd != null ? item.costo_usd : (item.cost_unit_om != null ? item.cost_unit_om : item.cost_unit))) || 0;
+
+            if (costoNuevo <= 0) continue;
+
+            const diffCosto = Math.abs(costoNuevo - costoAnterior);
+            const costoCambio = costoAnterior > 0 ? (diffCosto / costoAnterior > 0.005) : true;
+
+            if (!costoCambio) continue;
+
+            const isCode09 = coArt.startsWith('09');
+            const maxPrices = isCode09 ? 10 : 2;
+            const preciosComparativa = [];
+
+            for (let i = 1; i <= maxPrices; i++) {
+                const strKey = String(i);
+                const padKey = strKey.padStart(2, '0');
+                const existing = precioMap[coArt]?.[strKey] || precioMap[coArt]?.[padKey];
+
+                const precioAnterior = Number(existing?.precio) || 0;
+                const margen = Number(existing?.margen) || 0;
+
+                let precioNuevo = 0;
+                if (margen > 0) {
+                    precioNuevo = Math.round((costoNuevo * (1 + (margen / 100))) * 100) / 100;
+                } else if (precioAnterior > 0 && costoAnterior > 0) {
+                    precioNuevo = Math.round((precioAnterior * (costoNuevo / costoAnterior)) * 100) / 100;
+                } else {
+                    precioNuevo = precioAnterior;
+                }
+
+                const varPct = precioAnterior > 0 
+                    ? Math.round((((precioNuevo - precioAnterior) / precioAnterior) * 100) * 100) / 100 
+                    : 0;
+
+                preciosComparativa.push({
+                    id_precio: padKey,
+                    tipo_nombre: `Precio ${i}`,
+                    precio_anterior: precioAnterior,
+                    precio_nuevo: precioNuevo,
+                    margen: margen,
+                    variacion_pct: varPct
+                });
+            }
+
+            const costoVarPct = costoAnterior > 0 
+                ? Math.round((((costoNuevo - costoAnterior) / costoAnterior) * 100) * 100) / 100 
+                : 100;
+
+            changes.push({
+                co_art: coArt,
+                art_des: artDes,
+                costo_anterior_usd: costoAnterior,
+                costo_nuevo_usd: costoNuevo,
+                costo_variacion_pct: costoVarPct,
+                precios: preciosComparativa
+            });
+        }
+
+        return res.json({
+            success: true,
+            hasChanges: changes.length > 0,
+            changes
+        });
+    } catch (err) {
+        console.error('[POST /articulos/preview-price-changes] Error:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// =========================================================================
+// BATCH UPDATE PRECIOS Y MÁRGENES (TARGETED O BROADCAST)
+// =========================================================================
+router.post('/batch-update-prices', async (req, res) => {
+    try {
+        const { items } = req.body;
+        const sede = req.query.sede || null; // null = broadcast a todas las sedes
+
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ success: false, message: 'Se requiere un arreglo de items con precios a actualizar.' });
+        }
+
+        const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 6).toUpperCase();
+
+        const outcome = await executeWrite(sede, req.sqlAuth, async (pool, srv) => {
+            const defaultAlmacen = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
+            const resUSD = await pool.request().query(
+                `SELECT TOP 1 RTRIM(co_mone) AS co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') OR mone_des LIKE '%Dolar%'`
+            );
+            const usdCode = resUSD.recordset[0]?.co_mone || 'USD';
+
+            let updatedCount = 0;
+
+            for (const item of items) {
+                const coArt = String(item.co_art || '').trim();
+                if (!coArt || !Array.isArray(item.precios)) continue;
+
+                const isCode09 = coArt.startsWith('09');
+                const maxPrices = isCode09 ? 10 : 2;
+
+                for (const p of item.precios) {
+                    const numPrecio = parseInt(p.id_precio, 10);
+                    if (isNaN(numPrecio) || numPrecio < 1 || numPrecio > maxPrices) continue;
+
+                    const precioMonto = Number(p.precio_nuevo != null ? p.precio_nuevo : (p.precio != null ? p.precio : 0)) || 0;
+                    const margenMonto = Number(p.margen != null ? p.margen : 0) || 0;
+                    const precioId = String(numPrecio);
+
+                    const r = pool.request()
+                        .input('co_art', sql.Char(30), padProfit(coArt, 30))
+                        .input('co_precio', sql.Char(6), precioId)
+                        .input('monto', sql.Decimal(18, 5), precioMonto)
+                        .input('margen', sql.Decimal(18, 5), margenMonto)
+                        .input('mone', sql.Char(6), padProfit(usdCode, 6))
+                        .input('sucu', sql.Char(6), padProfit(defaultAlmacen, 6))
+                        .input('user', sql.Char(6), padProfit(auditUser, 6));
+
+                    await r.query(`
+                        DECLARE @real_co_precio CHAR(6);
+                        SELECT TOP 1 @real_co_precio = co_precio 
+                        FROM saTipoPrecio 
+                        WHERE co_precio = @co_precio OR co_precio = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2);
+
+                        IF @real_co_precio IS NULL
+                            SET @real_co_precio = @co_precio;
+
+                        IF @monto <= 0
+                        BEGIN
+                            DELETE FROM saArtPrecio
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                        END
+                        ELSE
+                        BEGIN
+                            UPDATE saArtPrecio SET
+                                monto = @monto,
+                                precioOm = 1,
+                                hasta = NULL,
+                                Inactivo = 0,
+                                co_mone = @mone,
+                                co_sucu_mo = @sucu,
+                                co_us_mo = @user,
+                                fe_us_mo = GETDATE()
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+
+                            IF @@ROWCOUNT = 0
+                            BEGIN
+                                INSERT INTO saArtPrecio (
+                                    co_art, co_precio, co_mone, desde, hasta, Inactivo, monto, precioOm,
+                                    co_us_in, fe_us_in, co_us_mo, fe_us_mo, co_sucu_in, co_sucu_mo,
+                                    montoadi1, montoadi2, montoadi3, montoadi4, montoadi5
+                                )
+                                VALUES (
+                                    @co_art, @real_co_precio, @mone, GETDATE(), NULL, 0, @monto, 1,
+                                    @user, GETDATE(), @user, GETDATE(), @sucu, @sucu,
+                                    0.0, 0.0, 0.0, 0.0, 0.0
+                                );
+                            END
+                        END
+
+                        IF @margen <= 0
+                        BEGIN
+                            DELETE FROM saArtMargen
+                            WHERE co_art = @co_art
+                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                        END
+                        ELSE
+                        BEGIN
+                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio))
+                            BEGIN
+                                UPDATE saArtMargen 
+                                SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
+                                WHERE co_art = @co_art 
+                                  AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                            END
+                            ELSE
+                            BEGIN
+                                INSERT INTO saArtMargen (co_art, co_precio, monto_min, monto_max, co_us_in, fe_us_in, co_us_mo, fe_us_mo)
+                                VALUES (@co_art, @real_co_precio, @margen, @margen, @user, GETDATE(), @user, GETDATE());
+                            END
+                        END
+                    `);
+                }
+                updatedCount++;
+            }
+
+            return { success: true, updated_articles: updatedCount };
+        });
+
+        return writeResponse(res, outcome);
+    } catch (err) {
+        console.error('[POST /articulos/batch-update-prices] Error:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 module.exports = router;

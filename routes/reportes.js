@@ -49,6 +49,7 @@ router.get('/cxc', async (req, res) => {
         const limit = parseInt(req.query.limit) || 10;
         const search = (req.query.search || "").trim();
         const co_ven = (req.query.co_ven || "").trim();
+        const co_us_in = (req.query.co_us_in || "").trim();
         const tipo_doc = (req.query.tipo_doc || "").trim();
         const status = req.query.status || "all"; // all, vencidos, por_vencer
         const sede = req.query.sede || "";
@@ -101,9 +102,10 @@ router.get('/cxc', async (req, res) => {
                     whereClauses.push("(d.nro_doc LIKE @search OR d.co_cli LIKE @search OR c.cli_des LIKE @search)");
                 }
 
-                if (co_ven !== "") {
-                    r.input('co_ven', sql.VarChar, co_ven.toUpperCase());
-                    whereClauses.push("LTRIM(RTRIM(d.co_ven)) = @co_ven");
+                const userFilter = co_us_in || co_ven;
+                if (userFilter !== "") {
+                    r.input('user_filter', sql.VarChar, userFilter.toUpperCase());
+                    whereClauses.push("(LTRIM(RTRIM(d.co_us_in)) = @user_filter OR LTRIM(RTRIM(d.co_ven)) = @user_filter)");
                 }
 
                 if (tipo_doc !== "" && tipo_doc !== "all") {
@@ -343,6 +345,7 @@ router.get('/cxp', async (req, res) => {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
         const search = (req.query.search || "").trim();
+        const co_us_in = (req.query.co_us_in || "").trim();
         const tipo_doc = (req.query.tipo_doc || "").trim();
         const status = req.query.status || "all"; // all, vencidos, por_vencer
         const sede = req.query.sede || "";
@@ -393,6 +396,11 @@ router.get('/cxp', async (req, res) => {
                 if (search !== "") {
                     r.input('search', sql.VarChar, `%${search}%`);
                     whereClauses.push("(d.nro_doc LIKE @search OR d.co_prov LIKE @search OR p.prov_des LIKE @search)");
+                }
+
+                if (co_us_in !== "") {
+                    r.input('co_us_in', sql.VarChar, co_us_in.toUpperCase());
+                    whereClauses.push("LTRIM(RTRIM(d.co_us_in)) = @co_us_in");
                 }
 
                 if (tipo_doc !== "" && tipo_doc !== "all") {
@@ -607,6 +615,7 @@ router.get('/cuenta-detallada', async (req, res) => {
         const limit = parseInt(req.query.limit) || 10;
         const search = (req.query.search || "").trim();
         const co_ven = (req.query.co_ven || "").trim();
+        const co_us_in = (req.query.co_us_in || "").trim();
         const status = req.query.status || "all";
         const sede = req.query.sede || "";
 
@@ -652,9 +661,10 @@ router.get('/cuenta-detallada', async (req, res) => {
                     whereClauses.push("(d.nro_doc LIKE @search OR d.co_cli LIKE @search OR d.cli_des LIKE @search)");
                 }
 
-                if (co_ven !== "") {
-                    r.input('co_ven', sql.VarChar, co_ven.toUpperCase());
-                    whereClauses.push("LTRIM(RTRIM(d.co_ven)) = @co_ven");
+                const userFilter = co_us_in || co_ven;
+                if (userFilter !== "") {
+                    r.input('user_filter', sql.VarChar, userFilter.toUpperCase());
+                    whereClauses.push("(LTRIM(RTRIM(d.co_us_in)) = @user_filter OR LTRIM(RTRIM(d.co_ven)) = @user_filter)");
                 }
 
                 if (status === "vencidos") {
@@ -676,6 +686,7 @@ router.get('/cuenta-detallada', async (req, res) => {
                         d.saldo, 
                         d.anulado, 
                         d.co_ven, 
+                        d.co_us_in,
                         d.co_mone, 
                         d.doc_tasa,
                         d.tasa_doc_orig,
@@ -698,6 +709,7 @@ router.get('/cuenta-detallada', async (req, res) => {
                             d.saldo, 
                             d.anulado, 
                             RTRIM(d.co_ven) AS co_ven, 
+                            RTRIM(d.co_us_in) AS co_us_in,
                             RTRIM(d.co_mone) AS co_mone, 
                             d.tasa AS doc_tasa,
                             COALESCE(

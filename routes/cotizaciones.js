@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, co_cli, co_ven, fec_d, fec_h, search, only_available } = req.query;
+        const { sede, doc_num, co_cli, co_ven, co_us_in, fec_d, fec_h, search, only_available } = req.query;
         
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
@@ -41,9 +41,10 @@ router.get('/', async (req, res) => {
                     request.input('search_all', sql.VarChar, `%${search}%`);
                     whereClauses.push("(c.doc_num LIKE @search_all OR c.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all OR cl.rif LIKE @search_all OR c.descrip LIKE @search_all)");
                 }
-                if (co_ven) {
-                    request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
-                    whereClauses.push("LTRIM(RTRIM(c.co_ven)) = @co_ven_filter");
+                const userFilter = co_us_in || co_ven;
+                if (userFilter) {
+                    request.input('user_filter', sql.VarChar, userFilter.trim().toUpperCase());
+                    whereClauses.push("(LTRIM(RTRIM(c.co_us_in)) = @user_filter OR LTRIM(RTRIM(c.co_ven)) = @user_filter)");
                 }
                 if (fec_d) {
                     request.input('fec_d', sql.SmallDateTime, fec_d);

@@ -166,7 +166,7 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, nro_fact, n_control, co_prov, fec_d, fec_h, search, status } = req.query;
+        const { sede, doc_num, nro_fact, n_control, co_prov, co_us_in, fec_d, fec_h, search, status } = req.query;
         
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
@@ -192,6 +192,10 @@ router.get('/', async (req, res) => {
                 if (co_prov) {
                     request.input('co_prov_search', sql.VarChar, `%${co_prov}%`);
                     whereClauses.push("(f.co_prov LIKE @co_prov_search OR p.prov_des LIKE @co_prov_search OR p.rif LIKE @co_prov_search)");
+                }
+                if (co_us_in) {
+                    request.input('co_us_in_filter', sql.VarChar, co_us_in.trim().toUpperCase());
+                    whereClauses.push("LTRIM(RTRIM(f.co_us_in)) = @co_us_in_filter");
                 }
                 if (search) {
                     request.input('search_all', sql.VarChar, `%${search}%`);
@@ -545,6 +549,26 @@ router.post('/', async (req, res) => {
 
             await reqH.execute('pInsertarFacturaCompra');
 
+            // 4.1 Snapshot de precios y márgenes previos para rollback si update_prices === false
+            const coArtsInFactura = [...new Set(payload.renglones.map(r => r.co_art).filter(Boolean))];
+            let snapshotPrecios = [];
+            if (coArtsInFactura.length > 0) {
+                const idsPrecios = coArtsInFactura.map(id => `'${id.replace(/'/g, "''")}'`).join(',');
+                try {
+                    const snapRes = await pool.request().query(`
+                        SELECT RTRIM(p.co_art) AS co_art, RTRIM(p.co_precio) AS co_precio, p.monto, p.co_mone,
+                               ISNULL(m.monto_min, 0) AS monto_min, ISNULL(m.monto_max, 0) AS monto_max
+                        FROM saArtPrecio p
+                        LEFT JOIN saArtMargen m ON p.co_art = m.co_art AND p.co_precio = m.co_precio
+                        WHERE LTRIM(RTRIM(p.co_art)) IN (${idsPrecios})
+                    `);
+                    snapshotPrecios = snapRes.recordset || [];
+                    console.log(`📸 [FACTURA COMPRA] Snapshot de precios tomado para ${snapshotPrecios.length} registros.`);
+                } catch (snapErr) {
+                    console.warn(`⚠️ [FACTURA COMPRA] Error obteniendo snapshot de precios: ${snapErr.message}`);
+                }
+            }
+
             // 5. Insertar Renglones
             let rengNum = 1;
             const recepcionesAfectadas = new Set();
@@ -757,6 +781,38 @@ router.post('/', async (req, res) => {
                 rengNum++;
             }
 
+            // 5.1 ROLLBACK DE PRECIOS SI EL USUARIO DECIDIÓ NO ACTUALIZARLOS
+            // La función nativa de Profit Plus (pInsertarRenglonesFacturaCompra) actualiza costos y precios.
+            // Si el usuario decide no hacerlo, ejecutamos un 2do update para hacer rollback a los precios originales.
+            if (payload.update_prices === false && snapshotPrecios.length > 0) {
+                console.log(`🔄 [FACTURA COMPRA] update_prices = false. Ejecutando 2do UPDATE para rollback de precios a valores originales...`);
+                for (const snap of snapshotPrecios) {
+                    const rbReq = new sql.Request(transaction);
+                    rbReq.input('co_art', sql.Char(30), padProfit(snap.co_art, 30));
+                    rbReq.input('co_precio', sql.Char(6), padProfit(snap.co_precio, 6));
+                    rbReq.input('monto', sql.Decimal(18, 5), snap.monto);
+                    rbReq.input('margen', sql.Decimal(18, 5), snap.monto_min);
+                    rbReq.input('user', sql.Char(6), padProfit(auditUser, 6));
+                    await rbReq.query(`
+                        UPDATE saArtPrecio
+                        SET monto = @monto,
+                            co_us_mo = @user,
+                            fe_us_mo = GETDATE()
+                        WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
+                          AND LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio));
+
+                        UPDATE saArtMargen
+                        SET monto_min = @margen,
+                            monto_max = @margen,
+                            co_us_mo = @user,
+                            fe_us_mo = GETDATE()
+                        WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art))
+                          AND LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio));
+                    `);
+                }
+                console.log(`✅ [FACTURA COMPRA] Rollback de precios completado exitosamente para ${snapshotPrecios.length} registros.`);
+            }
+
             // 6. Actualizar status de las recepciones afectadas
             for (const nrecDoc of recepcionesAfectadas) {
                 const statusReq = new sql.Request(transaction);
@@ -915,6 +971,68 @@ router.post('/', async (req, res) => {
 
             await transaction.commit();
             console.log(`✅ [FACTURA COMPRA] Documento ${docNum} creado con éxito.`);
+
+            // Si el usuario aceptó actualizar precios y tiene broadcast activado, propagar a las demás sedes
+            if (payload.update_prices === true && payload.broadcast_prices !== false && Array.isArray(payload.price_updates) && payload.price_updates.length > 0) {
+                const otherServers = getServers().filter(s => s.id !== srv.id);
+                if (otherServers.length > 0) {
+                    console.log(`📡 [FACTURA COMPRA] Propagando precios a ${otherServers.length} sedes adicionales (Broadcast)...`);
+                    for (const otherSrv of otherServers) {
+                        try {
+                            const oPool = await getPool(otherSrv.id, req.sqlAuth);
+                            for (const it of payload.price_updates) {
+                                const coArt = String(it.co_art || '').trim();
+                                if (!coArt || !Array.isArray(it.precios)) continue;
+                                for (const p of it.precios) {
+                                    const numPrecio = parseInt(p.id_precio, 10);
+                                    if (isNaN(numPrecio)) continue;
+                                    const precioMonto = Number(p.precio_nuevo != null ? p.precio_nuevo : p.precio) || 0;
+                                    const margenMonto = Number(p.margen) || 0;
+                                    const precioId = String(numPrecio);
+                                    const rOther = oPool.request()
+                                        .input('co_art', sql.Char(30), padProfit(coArt, 30))
+                                        .input('co_precio', sql.Char(6), precioId)
+                                        .input('monto', sql.Decimal(18, 5), precioMonto)
+                                        .input('margen', sql.Decimal(18, 5), margenMonto)
+                                        .input('user', sql.Char(6), padProfit(auditUser, 6));
+
+                                    await rOther.query(`
+                                        DECLARE @real_co_precio CHAR(6);
+                                        SELECT TOP 1 @real_co_precio = co_precio 
+                                        FROM saTipoPrecio 
+                                        WHERE co_precio = @co_precio OR co_precio = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2);
+                                        IF @real_co_precio IS NULL SET @real_co_precio = @co_precio;
+
+                                        IF @monto <= 0
+                                        BEGIN
+                                            DELETE FROM saArtPrecio WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                                        END
+                                        ELSE
+                                        BEGIN
+                                            UPDATE saArtPrecio SET monto = @monto, fe_us_mo = GETDATE(), co_us_mo = @user
+                                            WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                                        END
+
+                                        IF @margen <= 0
+                                        BEGIN
+                                            DELETE FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                                        END
+                                        ELSE
+                                        BEGIN
+                                            UPDATE saArtMargen SET monto_min = @margen, monto_max = @margen, fe_us_mo = GETDATE(), co_us_mo = @user
+                                            WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                                        END
+                                    `);
+                                }
+                            }
+                            console.log(`✅ [FACTURA COMPRA] Precios propagados con éxito a sede ${otherSrv.id} (${otherSrv.name}).`);
+                        } catch (broadErr) {
+                            console.warn(`⚠️ [FACTURA COMPRA] Error al propagar precios a sede ${otherSrv.id}: ${broadErr.message}`);
+                        }
+                    }
+                }
+            }
+
             return {
                 success: true,
                 doc_num: docNum,
@@ -1052,6 +1170,188 @@ router.post('/:doc_num/anular', async (req, res) => {
         return writeResponse(res, outcome);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al anular Factura de Compra.', error: error.message });
+    }
+});
+
+// =========================================================================
+// 6. ELIMINAR FACTURA DE COMPRA
+// =========================================================================
+router.delete('/:doc_num', async (req, res) => {
+    try {
+        const { doc_num } = req.params;
+        const { sede } = req.query;
+
+        console.log(`🗑️ [FACTURA COMPRA] Petición de eliminación para factura ${doc_num} (sede: ${sede || 'todas/default'})`);
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool, srv) => {
+            const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 6).toUpperCase();
+            const defSucu = (srv.profit_branch_codes || []).find(b => b.is_default)?.code || (srv.profit_branch_codes || [])[0]?.code || '01';
+
+            // 1. Verificar existencia de la factura
+            const resH = await pool.request()
+                .input('doc_num', sql.VarChar, doc_num)
+                .query(`
+                    SELECT doc_num, validador, rowguid, anulado, saldo, total_neto,
+                           RTRIM(co_sucu_in) AS co_sucu_in, RTRIM(nro_fact) AS nro_fact
+                    FROM saFacturaCompra
+                    WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                `);
+
+            if (!resH.recordset.length) {
+                throw new Error(`La Factura de Compra "${doc_num}" no existe.`);
+            }
+
+            const head = resH.recordset[0];
+
+            // 2. Verificar que no tenga pagos asociados en Cuentas por Pagar
+            const resPagos = await pool.request()
+                .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                .query(`
+                    SELECT TOP 1 cob_num
+                    FROM saPagoDocReng
+                    WHERE LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@doc_num))
+                      AND co_tipo_doc = 'FACT'
+                `);
+
+            if (resPagos.recordset.length > 0) {
+                const cobNum = resPagos.recordset[0].cob_num;
+                throw new Error(`No se puede eliminar la factura ${doc_num} porque tiene el pago N° ${cobNum?.trim()} asociado en Cuentas por Pagar. Anule o elimine el pago primero.`);
+            }
+
+            // 3. Obtener renglones de la factura
+            const resL = await pool.request()
+                .input('doc_num', sql.VarChar, doc_num)
+                .query(`
+                    SELECT reng_num, co_art, total_art, RTRIM(tipo_doc) AS tipo_doc,
+                           RTRIM(num_doc) AS num_doc, rowguid_doc, rowguid
+                    FROM saFacturaCompraReng
+                    WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+                `);
+
+            const lines = resL.recordset;
+
+            const transaction = new sql.Transaction(pool);
+            await transaction.begin();
+
+            try {
+                // 4. Revertir pendientes en notas de recepción origen
+                const recepcionesAfectadas = new Set();
+                for (const line of lines) {
+                    if (line.tipo_doc === 'NREC' && line.num_doc) {
+                        recepcionesAfectadas.add(line.num_doc);
+                        const rRevert = new sql.Request(transaction);
+                        rRevert.input('qty', sql.Decimal(18, 5), line.total_art);
+                        rRevert.input('num_doc', sql.Char(20), padProfit(line.num_doc, 20));
+                        rRevert.input('co_art', sql.Char(30), padProfit(line.co_art, 30));
+
+                        if (line.rowguid_doc) {
+                            rRevert.input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc);
+                            await rRevert.query(`
+                                UPDATE saNotaRecepcionCompraReng
+                                SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
+                                    fe_us_mo = GETDATE()
+                                WHERE rowguid = @rowguid_doc;
+                            `);
+                        } else {
+                            await rRevert.query(`
+                                UPDATE saNotaRecepcionCompraReng
+                                SET pendiente = CASE WHEN pendiente + @qty > total_art THEN total_art ELSE pendiente + @qty END,
+                                    fe_us_mo = GETDATE()
+                                WHERE doc_num = @num_doc AND co_art = @co_art;
+                            `);
+                        }
+                    }
+                }
+
+                // Actualizar status de las recepciones afectadas
+                for (const nrecDoc of recepcionesAfectadas) {
+                    const statusReq = new sql.Request(transaction);
+                    statusReq.input('doc_num', sql.Char(20), padProfit(nrecDoc, 20));
+                    await statusReq.query(`
+                        DECLARE @total_qty DECIMAL(18,5), @pending_qty DECIMAL(18,5);
+                        SELECT @total_qty = ISNULL(SUM(total_art), 0), @pending_qty = ISNULL(SUM(pendiente), 0)
+                        FROM saNotaRecepcionCompraReng
+                        WHERE doc_num = @doc_num;
+
+                        UPDATE saNotaRecepcionCompra
+                        SET status = CASE 
+                            WHEN @pending_qty = 0 THEN '2'
+                            WHEN @pending_qty < @total_qty THEN '1'
+                            ELSE '0'
+                        END,
+                        fe_us_mo = GETDATE()
+                        WHERE doc_num = @doc_num;
+                    `);
+                }
+
+                // 5. Eliminar contraparte en saDocumentoCompra (Cuentas por Pagar)
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoCompra
+                        WHERE LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@doc_num))
+                          AND co_tipo_doc = 'FACT';
+                    `);
+
+                // 6. Eliminar Renglones de la Factura de Compra
+                for (const line of lines) {
+                    try {
+                        const rDelLine = new sql.Request(transaction);
+                        rDelLine.input('iReng_NumOri', sql.Int, line.reng_num);
+                        rDelLine.input('sDoc_NumOri', sql.Char(20), padProfit(doc_num, 20));
+                        rDelLine.input('sMaquina', sql.VarChar(60), 'SYNC2K');
+                        rDelLine.input('sCo_Us_Mo', sql.Char(6), padProfit(auditUser, 6));
+                        rDelLine.input('sCo_Sucu_Mo', sql.Char(6), padProfit(defSucu, 6));
+                        rDelLine.input('gRowguid', sql.UniqueIdentifier, line.rowguid);
+                        await rDelLine.execute('pEliminarRenglonesFacturaCompra');
+                    } catch (spLineErr) {
+                        console.warn(`⚠️ [FACTURA COMPRA] pEliminarRenglonesFacturaCompra falló renglón ${line.reng_num}: ${spLineErr.message}. Usando DELETE directo.`);
+                        await transaction.request()
+                            .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                            .input('reng_num', sql.Int, line.reng_num)
+                            .query(`
+                                IF OBJECT_ID('saFacturaCompraRengExt', 'U') IS NOT NULL
+                                    DELETE FROM saFacturaCompraRengExt WHERE rowguid_reng = (SELECT rowguid FROM saFacturaCompraReng WHERE doc_num = @doc_num AND reng_num = @reng_num);
+                                DELETE FROM saFacturaCompraReng WHERE doc_num = @doc_num AND reng_num = @reng_num;
+                            `);
+                    }
+                }
+
+                // 7. Eliminar Cabecera de la Factura de Compra
+                try {
+                    const rDelHead = new sql.Request(transaction);
+                    rDelHead.input('sDoc_NumOri', sql.Char(20), padProfit(doc_num, 20));
+                    rDelHead.input('sMaquina', sql.VarChar(60), 'SYNC2K');
+                    rDelHead.input('sCo_Us_Mo', sql.Char(6), padProfit(auditUser, 6));
+                    rDelHead.input('sCo_Sucu_Mo', sql.Char(6), padProfit(defSucu, 6));
+                    if (head.validador) rDelHead.input('tsvalidador', sql.VarBinary, head.validador);
+                    rDelHead.input('gRowguid', sql.UniqueIdentifier, head.rowguid);
+                    await rDelHead.execute('pEliminarFacturaCompra');
+                } catch (spHeadErr) {
+                    console.warn(`⚠️ [FACTURA COMPRA] pEliminarFacturaCompra falló: ${spHeadErr.message}. Usando DELETE directo.`);
+                    await transaction.request()
+                        .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
+                        .input('rowguid', sql.UniqueIdentifier, head.rowguid)
+                        .query(`
+                            IF OBJECT_ID('saFacturaCompraExt', 'U') IS NOT NULL
+                                DELETE FROM saFacturaCompraExt WHERE rowguid_doc = @rowguid;
+                            DELETE FROM saFacturaCompra WHERE doc_num = @doc_num;
+                        `);
+                }
+
+                await transaction.commit();
+                console.log(`🗑️ [FACTURA COMPRA] Factura ${doc_num} eliminada exitosamente.`);
+                return { success: true, doc_num: doc_num, message: `Factura ${doc_num} eliminada exitosamente.` };
+            } catch (err) {
+                if (transaction._aborted === false) await transaction.rollback();
+                throw err;
+            }
+        });
+
+        return writeResponse(res, outcome);
+    } catch (error) {
+        console.error('[DELETE /facturas-compras/:doc_num] Error:', error);
+        res.status(500).json({ success: false, message: 'Error al eliminar Factura de Compra.', error: error.message });
     }
 });
 

@@ -292,13 +292,14 @@ router.get('/', async (req, res) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const co_ven = req.query.co_ven;
+                const co_us_in = req.query.co_us_in || co_ven;
 
                 let whereSQL = "WHERE cli.inactivo = 0 ";
                 const request = pool.request();
 
-                if (co_ven) {
-                    request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
-                    whereSQL += " AND LTRIM(RTRIM(cli.co_ven)) = @co_ven_filter ";
+                if (co_us_in) {
+                    request.input('user_filter', sql.VarChar, co_us_in.trim().toUpperCase());
+                    whereSQL += " AND (LTRIM(RTRIM(cli.co_us_in)) = @user_filter OR LTRIM(RTRIM(cli.co_ven)) = @user_filter) ";
                 }
 
                 // Fetch Total Count
@@ -325,7 +326,10 @@ router.get('/', async (req, res) => {
                      OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`
                 );
                 return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
-            } catch (e) { return []; }
+            } catch (e) {
+                console.error(`Error al listar clientes en sede ${srv.id}:`, e.message);
+                return [];
+            }
         }));
 
         const combined = [].concat(...allData);
@@ -343,7 +347,7 @@ router.get('/', async (req, res) => {
             data: items
         });
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+        res.status(500).json({ success: false, message: 'Error interno al consultar clientes.', error: error.message });
     }
 });
 
@@ -358,7 +362,7 @@ router.get('/search', async (req, res) => {
         const FIELD_MAP = {
             co_cli: 'co_cli', descripcion: 'cli_des', rif: 'rif',
             direccion: 'direc1', telefonos: 'telefonos', email: 'email',
-            co_ven: 'co_ven'
+            co_ven: 'co_ven', co_us_in: 'co_us_in'
         };
 
         const filters = Object.entries(req.query)
@@ -369,7 +373,7 @@ router.get('/search', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
 
         const whereClause = 'WHERE cli.inactivo = 0 ' + filters.map(f => {
-            if (f.param === 'co_ven') return `AND LTRIM(RTRIM(cli.${f.column})) = @${f.param}`;
+            if (f.param === 'co_ven' || f.param === 'co_us_in') return `AND (LTRIM(RTRIM(cli.co_us_in)) = @${f.param} OR LTRIM(RTRIM(cli.co_ven)) = @${f.param})`;
             return `AND cli.${f.column} LIKE '%' + @${f.param} + '%'`;
         }).join(' ');
         let servers = getServers();
