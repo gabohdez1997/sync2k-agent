@@ -586,12 +586,12 @@ router.post('/', async (req, res) => {
                 const porcDesc = Number(item.porc_desc) || 0;
                 const montoDesc = Math.round((subtotal * (porcDesc / 100)) * 100) / 100;
                 const netoReng = subtotal - montoDesc;
-                // Profit Plus: '1' = General (16%), '2' = Reducida (8%), '3' = Adicional (31%), '7'/'6' = Exento (0%)
+                // Profit Plus Compras: '1' = General (16%), '2' = Reducida (8%), '3' = Adicional (31%), '6' = Compra Exenta (0%)
                 let tipoImp = item.tipo_imp ? String(item.tipo_imp).trim().substring(0, 1) : '1';
                 const porcImp = Number(item.porc_imp) || 0;
                 if (porcImp === 0) {
-                    tipoImp = (tipoImp === '6' || tipoImp === '7') ? tipoImp : '7';
-                } else if (!['1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(tipoImp)) {
+                    tipoImp = (tipoImp === '7') ? '7' : '6'; // '6' = Compra Exenta
+                } else if (tipoImp === '5' || !['1', '2', '3'].includes(tipoImp)) {
                     tipoImp = '1';
                 }
                 const montoImp = Math.round((netoReng * (porcImp / 100)) * 100) / 100;

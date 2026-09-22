@@ -2888,10 +2888,9 @@ router.post('/preview-price-changes', async (req, res) => {
         const idsClause = coArts.map(id => `'${id.replace(/'/g, "''")}'`).join(',');
 
         // 1. Obtener datos de artículos, último costo de compra, precios y márgenes
-        const [resArt, resCostos, resPrecios] = await Promise.all([
+        const [resArt, resCostos, resCostosNrec, resPrecios] = await Promise.all([
             pool.request().query(`
-                SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS art_des,
-                       ult_cos_om, ult_cos_un, cost_pro, cost_pro_om
+                SELECT RTRIM(co_art) AS co_art, RTRIM(art_des) AS art_des
                 FROM saArticulo
                 WHERE LTRIM(RTRIM(co_art)) IN (${idsClause})
             `),
@@ -2913,19 +2912,41 @@ router.post('/preview-price-changes', async (req, res) => {
                 ) r
                 WHERE r.rn = 1
             `).catch(err => {
-                console.warn('[preview-price-changes] Error obteniendo último costo:', err.message);
+                console.warn('[preview-price-changes] Error obteniendo último costo en facturas:', err.message);
+                return { recordset: [] };
+            }),
+            pool.request().query(`
+                SELECT r.co_art, r.cost_unit_om, r.cost_unit, r.fec_emis
+                FROM (
+                    SELECT RTRIM(nr.co_art) AS co_art,
+                           CASE 
+                                WHEN RTRIM(nh.co_mone) = 'BS' THEN (nr.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= nh.fec_emis ORDER BY fecha DESC), 0)) 
+                                ELSE nr.cost_unit_om 
+                           END AS cost_unit_om,
+                           nr.cost_unit,
+                           nh.fec_emis,
+                           ROW_NUMBER() OVER(PARTITION BY nr.co_art ORDER BY nh.fec_emis DESC) as rn
+                    FROM saNotaRecepcionCompraReng nr 
+                    INNER JOIN saNotaRecepcionCompra nh ON nr.doc_num = nh.doc_num
+                    WHERE LTRIM(RTRIM(nr.co_art)) IN (${idsClause}) AND nh.anulado = 0
+                ) r
+                WHERE r.rn = 1
+            `).catch(err => {
+                console.warn('[preview-price-changes] Error obteniendo último costo en recepciones:', err.message);
                 return { recordset: [] };
             }),
             pool.request().query(`
                 WITH UP AS (
                     SELECT RTRIM(p.co_art) AS co_art, RTRIM(p.co_precio) AS id_precio,
                            p.monto AS precio, RTRIM(p.co_mone) AS moneda,
-                           ISNULL(m.monto_min, 0) AS margen,
+                           COALESCE(NULLIF(m.monto_min, 0), NULLIF(m.monto_max, 0), 0) AS margen,
                            ROW_NUMBER() OVER(PARTITION BY p.co_art, p.co_precio ORDER BY p.desde DESC) AS rn
                     FROM saArtPrecio p
-                    LEFT JOIN saArtMargen m ON p.co_art = m.co_art AND p.co_precio = m.co_precio
+                    LEFT JOIN saArtMargen m ON LTRIM(RTRIM(p.co_art)) = LTRIM(RTRIM(m.co_art))
+                         AND (LTRIM(RTRIM(p.co_precio)) = LTRIM(RTRIM(m.co_precio))
+                              OR RIGHT('0' + LTRIM(RTRIM(p.co_precio)), 2) = RIGHT('0' + LTRIM(RTRIM(m.co_precio)), 2))
                     WHERE LTRIM(RTRIM(p.co_art)) IN (${idsClause})
-                      AND p.Inactivo = 0 AND GETDATE() >= p.desde AND (p.hasta IS NULL OR GETDATE() <= p.hasta)
+                      AND p.Inactivo = 0
                 )
                 SELECT co_art, id_precio, precio, moneda, margen FROM UP WHERE rn = 1
             `)
@@ -2936,6 +2957,9 @@ router.post('/preview-price-changes', async (req, res) => {
 
         const costMap = {};
         resCostos.recordset.forEach(c => { costMap[c.co_art] = Number(c.cost_unit_om) || 0; });
+
+        const costNrecMap = {};
+        resCostosNrec.recordset.forEach(c => { costNrecMap[c.co_art] = Number(c.cost_unit_om) || 0; });
 
         const precioMap = {};
         resPrecios.recordset.forEach(p => {
@@ -2956,11 +2980,17 @@ router.post('/preview-price-changes', async (req, res) => {
             const artDes = item.art_des || artInfo.art_des || coArt;
 
             // Determinar costo anterior (USD)
-            let costoAnterior = costMap[coArt];
-            if (costoAnterior === undefined || costoAnterior === null || isNaN(costoAnterior)) {
-                costoAnterior = Number(artInfo.ult_cos_om || artInfo.cost_pro_om || 0);
+            let costoAnterior = costMap[coArt] || costNrecMap[coArt] || 0;
+
+            // Si no tiene costo anterior en Facturas ni Recepciones, fallback a cálculo de Precio 2 / Margen 2 (o Precio 1 / Margen 1)
+            if (costoAnterior <= 0) {
+                const p2Obj = precioMap[coArt]?.['02'] || precioMap[coArt]?.['2'] || precioMap[coArt]?.['01'] || precioMap[coArt]?.['1'];
+                const p2 = Number(p2Obj?.precio) || 0;
+                const m2 = Number(p2Obj?.margen) || 0;
+                if (p2 > 0 && m2 > 0) {
+                    costoAnterior = Number((p2 / (1 + (m2 / 100))).toFixed(4));
+                }
             }
-            costoAnterior = Number(costoAnterior) || 0;
 
             // Determinar nuevo costo (USD)
             const costoNuevo = Number(item.nuevo_costo_usd != null ? item.nuevo_costo_usd : (item.costo_usd != null ? item.costo_usd : (item.cost_unit_om != null ? item.cost_unit_om : item.cost_unit))) || 0;

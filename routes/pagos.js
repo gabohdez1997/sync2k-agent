@@ -153,7 +153,33 @@ router.get('/facturas/pendientes', async (req, res) => {
                            pr.contribu_e, pr.porc_esp,
                            RTRIM(d.co_us_in) AS co_us_in,
                            ISNULL(d.otros1, 0) AS otros1,
-                           ISNULL(CASE WHEN d.porc_imp > 0 THEN (d.total_neto - d.monto_imp) ELSE 0 END, 0) AS base_imponible
+                           ISNULL(CASE WHEN d.porc_imp > 0 THEN (d.total_neto - d.monto_imp) ELSE 0 END, 0) AS base_imponible,
+                           ISNULL((SELECT SUM(pdr.monto_retencion_iva) 
+                                   FROM saPagoDocReng pdr 
+                                   INNER JOIN saPago p ON pdr.cob_num = p.cob_num 
+                                   WHERE p.anulado = 0 
+                                     AND LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_iva_bs,
+                           ISNULL((SELECT SUM(pdr.monto_retencion) 
+                                   FROM saPagoDocReng pdr 
+                                   INNER JOIN saPago p ON pdr.cob_num = p.cob_num 
+                                   WHERE p.anulado = 0 
+                                     AND LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_islr_bs,
+                           ISNULL((SELECT TOP 1 RTRIM(dc.nro_doc) 
+                                   FROM saPagoDocReng pdr 
+                                   INNER JOIN saPago p ON pdr.cob_num = p.cob_num 
+                                   INNER JOIN saDocumentoCompra dc ON dc.doc_orig = 'PAGO' AND LTRIM(RTRIM(dc.nro_orig)) = LTRIM(RTRIM(p.cob_num)) AND UPPER(RTRIM(dc.co_tipo_doc)) = 'IVAN' 
+                                   WHERE p.anulado = 0 
+                                     AND LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_iva,
+                           ISNULL((SELECT TOP 1 RTRIM(dc.nro_doc) 
+                                   FROM saPagoDocReng pdr 
+                                   INNER JOIN saPago p ON pdr.cob_num = p.cob_num 
+                                   INNER JOIN saDocumentoCompra dc ON dc.doc_orig = 'PAGO' AND LTRIM(RTRIM(dc.nro_orig)) = LTRIM(RTRIM(p.cob_num)) AND UPPER(RTRIM(dc.co_tipo_doc)) = 'ISLR' 
+                                   WHERE p.anulado = 0 
+                                     AND LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_islr
                     FROM saDocumentoCompra d
                     INNER JOIN saProveedor pr ON d.co_prov = pr.co_prov
                     WHERE ${whereSQL}

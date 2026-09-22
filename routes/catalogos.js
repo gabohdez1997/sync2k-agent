@@ -970,7 +970,7 @@ router.get('/cuentas_bancarias', (req, res) =>
 // ── Bancos ──────────────────────────────────────────────────────────────────
 router.get('/bancos', (req, res) =>
     catalogEndpoint(req, res,
-        `SELECT RTRIM(co_ban) AS co_ban, RTRIM(des_ban) AS ban_des FROM saBanco`,
+        `SELECT RTRIM(co_ban) AS co_ban, RTRIM(des_ban) AS ban_des, RTRIM(des_ban) AS des_ban FROM saBanco`,
         'co_ban', 'ban_des'
     )
 );

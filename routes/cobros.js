@@ -154,7 +154,33 @@ router.get('/facturas/pendientes', async (req, res) => {
                                FROM saFacturaVentaReng r
                                WHERE LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
                                  AND LTRIM(RTRIM(r.co_art)) LIKE '09%'
-                           ) ELSE 0 END, 0) AS base_islr_default
+                           ) ELSE 0 END, 0) AS base_islr_default,
+                           ISNULL((SELECT SUM(cdr.monto_retencion_iva) 
+                                   FROM saCobroDocReng cdr 
+                                   INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
+                                   WHERE c.anulado = 0 
+                                     AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_iva_bs,
+                           ISNULL((SELECT SUM(cdr.monto_retencion) 
+                                   FROM saCobroDocReng cdr 
+                                   INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
+                                   WHERE c.anulado = 0 
+                                     AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_islr_bs,
+                           ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
+                                   FROM saCobroDocReng cdr 
+                                   INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
+                                   INNER JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO' AND LTRIM(RTRIM(dv.nro_orig)) = LTRIM(RTRIM(c.cob_num)) AND UPPER(RTRIM(dv.co_tipo_doc)) = 'IVAN' 
+                                   WHERE c.anulado = 0 
+                                     AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_iva,
+                           ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
+                                   FROM saCobroDocReng cdr 
+                                   INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
+                                   INNER JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO' AND LTRIM(RTRIM(dv.nro_orig)) = LTRIM(RTRIM(c.cob_num)) AND UPPER(RTRIM(dv.co_tipo_doc)) = 'ISLR' 
+                                   WHERE c.anulado = 0 
+                                     AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                     AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_islr
                     FROM saDocumentoVenta d
                     INNER JOIN saCliente c ON d.co_cli = c.co_cli
                     LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
@@ -673,6 +699,16 @@ router.post('/', async (req, res) => {
                         finalMontCob = Math.max(0, finalMontCob - excess);
                         diffBs = diffBs + excess;
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                    } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
+                        // Tolerancia de redondeo al saldar en divisa:
+                        // Si la diferencia restante es menor a 0.01 USD (o menor a 5 Bs),
+                        // amortizar automáticamente el 100% del saldo en Bs del documento
+                        const diffPendingBs = docSaldo - totalRebaje;
+                        const diffPendingUsd = rateCobro > 0 ? (diffPendingBs / rateCobro) : 0;
+                        if (diffPendingUsd < 0.01 || diffPendingBs <= 5.0) {
+                            finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
+                            totalRebaje = docSaldo;
+                        }
                     }
                 }
 

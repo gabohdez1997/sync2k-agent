@@ -871,7 +871,14 @@ router.post('/', async (req, res) => {
                     rL.input('sCo_Uni',            sql.Char(6),          padProfit(finalUni, 6));
                     rL.input('sSCo_Uni',           sql.Char(6),          null);
                     rL.input('sCo_Alma',           sql.Char(6),          padProfit(targetAlma, 6));
-                    rL.input('sTipo_Imp',          sql.Char(1),          item.tipo_imp || '1');
+                    // Profit Plus Compras: '1' = General (16%), '2' = Reducida (8%), '3' = Adicional (31%), '6' = Compra Exenta (0%)
+                    let finalTipoImp = String(item.tipo_imp || (item.pImp > 0 ? '1' : '6')).trim();
+                    if (finalTipoImp === '5' || item.pImp === 0) {
+                        finalTipoImp = item.pImp > 0 ? '1' : '6';
+                    } else if (item.pImp > 0 && finalTipoImp !== '2' && finalTipoImp !== '3') {
+                        finalTipoImp = '1';
+                    }
+                    rL.input('sTipo_Imp',          sql.Char(1),          finalTipoImp);
                     rL.input('sTipo_Imp2',         sql.Char(1),          null);
                     rL.input('sTipo_Imp3',         sql.Char(1),          null);
                     rL.input('sTipo_Doc',          sql.Char(4),          originDocNum ? 'OCOM' : null);
