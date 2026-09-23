@@ -460,7 +460,7 @@ router.post('/', async (req, res) => {
             totalNeto += (netoReng + montoImp);
         }
 
-        const descGlobalPorc = Number(payload.porc_desc_glob) || 0;
+        const descGlobalPorc = Number(payload.porc_desc_glob != null ? payload.porc_desc_glob : (payload.descuento_global_porc != null ? payload.descuento_global_porc : payload.descuento_global)) || 0;
         const descGlobalMonto = Math.round((totalBruto * (descGlobalPorc / 100)) * 100) / 100;
         totalNeto -= descGlobalMonto;
         const saldo = totalNeto;
@@ -1040,7 +1040,11 @@ router.post('/', async (req, res) => {
                 total_neto: totalNeto
             };
         } catch (err) {
-            if (transaction._aborted === false) await transaction.rollback();
+            try {
+                if (transaction && transaction._aborted === false) await transaction.rollback();
+            } catch (rbErr) {
+                console.warn('⚠️ [FACTURA COMPRA] Error al hacer rollback (transacción cerrada o abortada):', rbErr.message);
+            }
             throw err;
         }
     });
