@@ -426,8 +426,8 @@ router.post('/', async (req, res) => {
         const diasCred = Number(resCond.recordset[0]?.dias_cred) || 0;
 
         const ts = new Date();
-        const fecEmis = payload.fec_emis ? new Date(`${safeDate(payload.fec_emis)}T00:00:00`) : ts;
-        let fecVenc = payload.fec_venc ? new Date(`${safeDate(payload.fec_venc)}T00:00:00`) : new Date(fecEmis.getTime() + (diasCred * 86400000));
+        const fecEmis = payload.fec_emis ? new Date(`${safeDate(payload.fec_emis)}T12:00:00`) : ts;
+        let fecVenc = payload.fec_venc ? new Date(`${safeDate(payload.fec_venc)}T12:00:00`) : new Date(fecEmis.getTime() + (diasCred * 86400000));
         if (fecVenc < fecEmis) fecVenc = fecEmis;
         let fecReg = ts;
         if (fecReg < fecEmis) fecReg = fecEmis;
@@ -444,8 +444,8 @@ router.post('/', async (req, res) => {
             const cant = Number(item.total_art || item.cantidad) || 0;
             if (cant <= 0) continue;
 
-            const unitCostUSD = Number(item.cost_unit_om != null ? item.cost_unit_om : (item.cost_unit || item.costo)) || 0;
-            const costUnitBs = Math.round((unitCostUSD * tasaDoc) * 100000) / 100000;
+            const unitCostUSD = Number(item.cost_unit_om != null ? item.cost_unit_om : (item.cost_unit ? (Number(item.cost_unit) / tasaDoc) : (item.costo || 0)));
+            const costUnitBs = item.cost_unit != null ? Math.round(Number(item.cost_unit) * 100000) / 100000 : Math.round((unitCostUSD * tasaDoc) * 100000) / 100000;
             const costUnit = costUnitBs;
 
             const subtotal = Math.round((cant * costUnit) * 100) / 100;
@@ -577,9 +577,9 @@ router.post('/', async (req, res) => {
                 const cant = Number(item.total_art || item.cantidad) || 0;
                 if (cant <= 0) continue;
 
-                const unitCostUSD = Number(item.cost_unit_om != null ? item.cost_unit_om : (item.cost_unit || item.costo)) || 0;
-                const costUnitBs = Math.round((unitCostUSD * tasaDoc) * 100000) / 100000;
-                const costUnitOM = unitCostUSD;
+                const unitCostUSD = Number(item.cost_unit_om != null ? item.cost_unit_om : (item.cost_unit ? (Number(item.cost_unit) / tasaDoc) : (item.costo || 0)));
+                const costUnitBs = item.cost_unit != null ? Math.round(Number(item.cost_unit) * 100000) / 100000 : Math.round((unitCostUSD * tasaDoc) * 100000) / 100000;
+                const costUnitOM = Math.round(unitCostUSD * 100000) / 100000;
                 const costUnit = costUnitBs;
 
                 const subtotal = Math.round((cant * costUnit) * 100) / 100;
@@ -707,7 +707,7 @@ router.post('/', async (req, res) => {
                     directReq.input('pendiente', sql.Decimal(18, 5), cant);
                     directReq.input('porc_desc', sql.Char(15), String(porcDesc));
                     directReq.input('dis_cen', sql.VarChar(sql.MAX), null);
-                    directReq.input('co_sucu_in', sql.Char(6), padProfit(coSucu, 6));
+                    directReq.input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6));
                     directReq.input('co_us_in', sql.Char(6), padProfit(auditUser, 6));
                     directReq.input('maquina', sql.VarChar(60), 'SYNC2K');
                     directReq.input('costo_adi1', sql.Decimal(18, 5), 0);
