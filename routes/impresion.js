@@ -349,6 +349,144 @@ router.post('/imprimir', async (req, res) => {
     }
 });
 
+// Helper para construir el ticket compacto de notificación de anulación/eliminación
+function buildCancellationTicket(invoice, actionType = 'ANULACION') {
+    const width = 42;
+    let t = "";
+
+    // 1. Inicialización y Encabezado
+    t += CMD_INIT;
+    t += CMD_CENTER;
+    t += CMD_BOLD_ON;
+    t += CMD_DOUBLE_SIZE;
+    t += `${cleanAscii(invoice.branch_name || 'INVERSIONES GALPE').toUpperCase()}\n`;
+    t += CMD_NORMAL_SIZE;
+    t += CMD_BOLD_OFF;
+    t += `RIF: ${cleanAscii(invoice.branch_rif || 'J-00000000-0')}\n`;
+    t += "-".repeat(width) + "\n";
+
+    // 2. Título de Notificación Destacado
+    const action = String(actionType || invoice.action_type || invoice.action || 'ANULACION').toUpperCase();
+    const isDelete = action.includes('ELIMIN') || action === 'DELETE';
+    const titleText = isDelete ? 'FACTURA ELIMINADA' : 'FACTURA ANULADA';
+    const subTitle = isDelete ? 'NOTIFICACION DE ELIMINACION' : 'NOTIFICACION DE ANULACION';
+
+    t += CMD_CENTER;
+    t += CMD_BOLD_ON;
+    t += CMD_DOUBLE_SIZE;
+    t += `${titleText}\n`;
+    t += CMD_NORMAL_SIZE;
+    //t += `${subTitle}\n`;
+    t += CMD_BOLD_OFF;
+    t += CMD_LEFT;
+    t += "-".repeat(width) + "\n";
+
+    // 3. Información del Documento y Cliente (idéntico a pre-despacho)
+    const d = invoice.fecha_evento ? new Date(invoice.fecha_evento) : new Date();
+    const formattedDate = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+    const hours = d.getHours();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const displayHours = hours % 12 || 12;
+    const formattedTime = `${String(displayHours).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')} ${ampm}`;
+
+    const docNum = invoice.doc_num || invoice.invoice_num || '---';
+    const cliDes = cleanAscii(invoice.cli_des || 'CLIENTE GENERAL').toUpperCase();
+    t += `Cliente:   ${cliDes.substring(0, 31)}\n`;
+    t += `R.I.F.:    ${cleanAscii(invoice.rif || '---')}\n`;
+    t += `Fecha:     ${formattedDate}  ${formattedTime}\n`;
+    t += `Origen:    FACTURA Nro. ${cleanAscii(docNum)}\n`;
+    if (invoice.vendedor || invoice.ven_des) {
+        t += `Vendedor:  ${cleanAscii(invoice.ven_des || invoice.vendedor).toUpperCase()}\n`;
+    }
+    const cajeroNombre = cleanAscii(invoice.cashier_name || invoice.cajero || invoice.co_us_in || '').toUpperCase();
+    if (cajeroNombre) {
+        t += `Cajero:    ${cajeroNombre.substring(0, 31)}\n`;
+    }
+    //if (invoice.user_email || invoice.usuario) {
+    //   t += `Usuario:   ${cleanAscii(invoice.user_email || invoice.usuario).toUpperCase()}\n`;
+    //}
+    if (invoice.motivo) {
+        t += `Motivo:    ${cleanAscii(invoice.motivo)}\n`;
+    }
+    /*  t += "-".repeat(width) + "\n";
+ 
+     // 4. Bloque Compacto de Alerta para Almacén (sin artículos ni renglones)
+     t += CMD_CENTER;
+     t += CMD_BOLD_ON;
+     t += "\n";
+     //t += "******************************************\n";
+     //t += "       ATENCION ALMACEN / DESPACHO        \n";
+     t += `  DOCUMENTO ${isDelete ? 'ELIMINADO' : 'ANULADO'} DEL SISTEMA    \n`;
+     //t += "  NO DESPACHAR MERCANCIA DE ESTA FACTURA  \n";
+     //t += "******************************************\n\n";
+     t += CMD_BOLD_OFF;
+     t += CMD_LEFT;
+     t += "-".repeat(width) + "\n"; */
+
+    t += "-".repeat(width) + "\n";
+    // 5. Pie de Ticket: Código de factura en tamaño grande (idéntico a pre-despacho)
+    t += "\n";
+    t += CMD_CENTER;
+    t += CMD_BOLD_ON;
+    t += CMD_DOUBLE_SIZE;
+    t += `${cleanAscii(docNum)}\n`;
+    t += CMD_NORMAL_SIZE;
+    t += CMD_BOLD_OFF;
+    t += "\n\n";
+    t += CMD_CUT; // Cortar papel
+
+    return t;
+}
+
+// POST /api/v1/impresion/imprimir-notificacion — Enviar ticket compacto de notificación de anulación/eliminación
+router.post('/imprimir-notificacion', async (req, res) => {
+    const { ip, port, invoice, action_type } = req.body;
+    const printerPort = parseInt(port || '9100');
+
+    if (!ip || !invoice) {
+        return res.status(400).json({ success: false, message: 'Faltan parámetros requeridos (ip, invoice).' });
+    }
+
+    const docNum = invoice.doc_num || invoice.invoice_num || '---';
+    const action = String(action_type || invoice.action_type || 'ANULACION').toUpperCase();
+    console.log(`[IMPRESION] Imprimiendo ticket compacto de ${action} para factura ${docNum} en ${ip}:${printerPort}...`);
+
+    try {
+        const ticketContent = buildCancellationTicket(invoice, action);
+
+        // Enviar por Socket TCP a la impresora de red
+        const socket = new net.Socket();
+        socket.setTimeout(5000);
+
+        socket.connect(printerPort, ip, () => {
+            console.log(`[IMPRESION] Conectado a ${ip}:${printerPort}. Enviando ticket compacto de ${action}...`);
+            socket.write(ticketContent, 'latin1', () => {
+                socket.destroy();
+                res.status(200).json({
+                    success: true,
+                    message: `Ticket de notificación de ${action.toLowerCase()} enviado a la impresora exitosamente.`
+                });
+            });
+        });
+
+        socket.on('error', (err) => {
+            console.error(`[IMPRESION] Error enviando ticket a ${ip}:${printerPort}:`, err.message);
+            socket.destroy();
+            res.status(200).json({ success: false, message: `Error al conectar con la impresora: ${err.message}` });
+        });
+
+        socket.on('timeout', () => {
+            console.error(`[IMPRESION] Timeout enviando ticket a ${ip}:${printerPort}`);
+            socket.destroy();
+            res.status(200).json({ success: false, message: 'Tiempo de espera agotado al conectar a la impresora.' });
+        });
+
+    } catch (err) {
+        console.error('[IMPRESION EXCEPTION]:', err);
+        res.status(500).json({ success: false, message: 'Error interno en el módulo de impresión.', error: err.message });
+    }
+});
+
 // Helper para limpiar acentos, tildes y caracteres especiales para impresoras ESC/P matriciales y termicas
 function cleanAscii(str) {
     if (!str) return '';
@@ -383,7 +521,7 @@ function buildEscpNotaEntrega(doc) {
     const rif = 'R.I.F.: ' + cleanAscii(doc.branch_rif || 'J-40175035-4').toUpperCase();
     const pedidoNum = doc.pedido_num || doc.origin_doc || doc.num_doc || '---';
     const pedidoStr = 'PEDIDO: ' + cleanAscii(pedidoNum).toUpperCase();
-    
+
     // Distribuir en 3 columnas: [Empresa] [RIF] [PEDIDO]
     const leftPart = company.padEnd(30);
     const midPart = rif.padEnd(25);
@@ -438,11 +576,11 @@ function buildEscpNotaEntrega(doc) {
 
     // 4. Cabecera de Articulos: [Codigo (13)] [Descripcion (37)] [Cantidad (8)] [Precio (10)] [Neto (12)] = 80
     out += BOLD_ON;
-    out += 'Codigo'.padEnd(13) + 
-           'Descripcion'.padEnd(37) + 
-           'Cantidad'.padStart(8) + ' ' + 
-           'Precio'.padStart(9) + ' ' + 
-           'Neto'.padStart(11) + '\n';
+    out += 'Codigo'.padEnd(13) +
+        'Descripcion'.padEnd(37) +
+        'Cantidad'.padStart(8) + ' ' +
+        'Precio'.padStart(9) + ' ' +
+        'Neto'.padStart(11) + '\n';
     out += BOLD_OFF;
     out += '-'.repeat(W) + '\n';
 
