@@ -1609,29 +1609,31 @@ router.get('/resumen-cobros', async (req, res) => {
 
         const querySQL = `
             SELECT 
-                RTRIM(co_us_in) AS usuario, 
-                RTRIM(forma_pag) AS forma_pag, 
+                RTRIM(r.co_us_in) AS usuario, 
+                RTRIM(r.forma_pag) AS forma_pag, 
                 CASE 
-                    WHEN RTRIM(forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(cod_cta, ''))
-                    WHEN RTRIM(forma_pag) = 'EF' THEN RTRIM(ISNULL(cod_caja, ''))
-                    WHEN RTRIM(forma_pag) = 'TJ' THEN RTRIM(ISNULL(co_tar, ''))
+                    WHEN RTRIM(r.forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(r.cod_cta, ''))
+                    WHEN RTRIM(r.forma_pag) = 'EF' THEN RTRIM(ISNULL(r.cod_caja, ''))
+                    WHEN RTRIM(r.forma_pag) = 'TJ' THEN RTRIM(ISNULL(r.co_tar, ''))
                     ELSE ''
                 END AS detalle,
-                SUM(mont_doc) AS total_bs
-            FROM saCobroTPReng
-            WHERE CAST(fe_us_in AS DATE) = CAST(@fecha AS DATE)
+                SUM(r.mont_doc) AS total_bs
+            FROM saCobroTPReng r
+            INNER JOIN saCobro c ON r.cob_num = c.cob_num
+            WHERE ISNULL(c.anulado, 0) = 0
+              AND CAST(r.fe_us_in AS DATE) = CAST(@fecha AS DATE)
             GROUP BY 
-                RTRIM(co_us_in), 
-                RTRIM(forma_pag), 
+                RTRIM(r.co_us_in), 
+                RTRIM(r.forma_pag), 
                 CASE 
-                    WHEN RTRIM(forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(cod_cta, ''))
-                    WHEN RTRIM(forma_pag) = 'EF' THEN RTRIM(ISNULL(cod_caja, ''))
-                    WHEN RTRIM(forma_pag) = 'TJ' THEN RTRIM(ISNULL(co_tar, ''))
+                    WHEN RTRIM(r.forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(r.cod_cta, ''))
+                    WHEN RTRIM(r.forma_pag) = 'EF' THEN RTRIM(ISNULL(r.cod_caja, ''))
+                    WHEN RTRIM(r.forma_pag) = 'TJ' THEN RTRIM(ISNULL(r.co_tar, ''))
                     ELSE ''
                 END
             ORDER BY 
-                RTRIM(co_us_in), 
-                RTRIM(forma_pag), 
+                RTRIM(r.co_us_in), 
+                RTRIM(r.forma_pag), 
                 detalle
         `;
 
