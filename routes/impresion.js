@@ -624,21 +624,184 @@ function buildEscpNotaEntrega(doc) {
     return out;
 }
 
-// POST /api/v1/impresion/imprimir-nota-entrega — Enviar formato ESC/P a la impresora matricial
+// Helper para envolver texto largo en múltiples líneas respetando palabras
+function wrapTextLines(text, maxWidth) {
+    if (!text) return [];
+    const words = String(text).trim().split(/\s+/);
+    const lines = [];
+    let currentLine = '';
+
+    words.forEach(word => {
+        if (!currentLine) {
+            currentLine = word;
+        } else if ((currentLine + ' ' + word).length <= maxWidth) {
+            currentLine += ' ' + word;
+        } else {
+            lines.push(currentLine);
+            currentLine = word;
+        }
+    });
+    if (currentLine) lines.push(currentLine);
+    return lines;
+}
+
+// Helper para construir el flujo de bytes ESC/POS de 80mm para Notas de Entrega térmicas (Formato Profit Escritorio)
+function buildThermalNotaEntrega(doc) {
+    const W = 42; // Ancho estándar para impresoras térmicas de 80mm
+    let out = '';
+
+    out += CMD_INIT;
+
+    // 1. Encabezado Centrado: Razón Social + RIF + Dirección de la Sede
+    out += CMD_CENTER;
+    out += CMD_BOLD_ON;
+    out += `${cleanAscii(doc.branch_name || 'inversiones Galpe 2021 C.A.')}\n`;
+    out += CMD_BOLD_OFF;
+    out += `${cleanAscii(doc.branch_rif || 'J-401750354')}\n\n`;
+
+    // Dirección fiscal de la sede (envuelta limpiamente a W caracteres)
+    const sedeDir = cleanAscii(doc.branch_address || 'CTRA NACIONAL LOS GUAYOS-GUACARA CRUCE CON CALLE 940-A Y CALLE PARAPARAL LOCAL GALPON NRO 20-21 SECTOR LOS GUAYOS LOS GUAYOS CARABOBO;').toUpperCase();
+    const addrLines = wrapTextLines(sedeDir, W);
+    addrLines.forEach(l => {
+        out += l + '\n';
+    });
+    out += '\n';
+
+    // 2. Bloque de Datos del Cliente y Documento (Alineado a la izquierda)
+    out += CMD_LEFT;
+
+    // Cliente
+    const cliName = cleanAscii(doc.cli_des || doc.cliente_nombre || 'CLIENTE DE CONTADO').toUpperCase();
+    out += `Cliente :   ${cliName}\n`;
+
+    // Fila Dual 1: C.I./RIF a la izq | FECHA: a la der
+    const rifStr = `C.I./ RIF:  ${cleanAscii(doc.rif || doc.cli_rif || '---')}`;
+    const fechaVal = cleanAscii(doc.fecha_emision || doc.fecha || (typeof dayjs !== 'undefined' ? dayjs().format('DD/MM/YYYY') : new Date().toLocaleDateString('es-VE')));
+    out += rowText(rifStr, 'FECHA:', W) + '\n';
+
+    // Fila Dual 2: Espacio a la izq | Fecha valor a la der
+    out += rowText('', fechaVal, W) + '\n';
+
+    // Fila Dual 3: Teléfonos a la izq | NOTA DE ENTREGA a la der (en negrita)
+    const telfStr = `Telefonos:  ${cleanAscii(doc.telefonos || doc.cli_telefonos || '---')}`;
+    out += rowText(telfStr, 'NOTA DE ENTREGA', W) + '\n';
+
+    // Fila Dual 4: Espacio a la izq | Número de Nota a la der (en negrita)
+    const docNumStr = cleanAscii(doc.doc_num || doc.num_doc || '00000000').toUpperCase();
+    out += rowText('', docNumStr, W) + '\n';
+
+    // Dirección del Cliente (envuelta con indentación)
+    const clientDir = cleanAscii(doc.direc1 || doc.cli_direc || '---').toUpperCase();
+    const dirWords = clientDir.split(/\s+/);
+    let firstDirLine = '';
+    let remDirWords = [];
+    for (let i = 0; i < dirWords.length; i++) {
+        if ((firstDirLine + ' ' + dirWords[i]).trim().length <= W - 12) {
+            firstDirLine = (firstDirLine + ' ' + dirWords[i]).trim();
+        } else {
+            remDirWords = dirWords.slice(i);
+            break;
+        }
+    }
+    out += `Direccion:  ${firstDirLine}\n`;
+    if (remDirWords.length > 0) {
+        const otherDirLines = wrapTextLines(remDirWords.join(' '), W - 12);
+        otherDirLines.forEach(ol => {
+            out += ' '.repeat(12) + ol + '\n';
+        });
+    }
+
+    // Vendedor
+    const vendStr = cleanAscii(doc.vendedor || doc.vend_des || '---').toUpperCase();
+    out += `Vendedor:   ${vendStr}\n`;
+
+    // Cajero
+    const cajeroStr = cleanAscii(doc.cajero || doc.cashier_name || doc.co_us_in || '---').toUpperCase();
+    out += `Cajero:     ${cajeroStr}\n\n`;
+
+    // 3. Encabezado de la Tabla de Productos: Descripción | Cant. | Precio | Total
+    // Anchos: Desc (17) + Cant (6) + Prec (9) + Tot (10) = 42
+    out += '  Descripcion        Cant.    Precio     Total\n\n';
+
+    // 4. Detalle de Renglones
+    const items = doc.renglones || [];
+    items.forEach(it => {
+        const cod = cleanAscii(String(it.co_art || '')).trim();
+        const desc = cleanAscii(String(it.art_des || it.des_art || '')).trim().toUpperCase();
+        const cant = Number(it.cantidad || it.total_art || 0);
+        const precVal = Number(it.precio || it.prec_vta || it.cost_unit || 0);
+        const totVal = Number(it.total || it.reng_neto || (cant * precVal));
+
+        const cantStr = cant.toFixed(2).replace('.', ',').padStart(6);
+        const precStr = precVal.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).padStart(9);
+        const totStr = totVal.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).padStart(10);
+
+        // Línea 1: Código del artículo
+        if (cod) {
+            out += `  ${cod}\n`;
+        }
+
+        // Línea 2: Descripción (primer bloque de hasta 17 car) + Cant + Precio + Total
+        const descLines = wrapTextLines(desc, 17);
+        const firstDesc = (descLines[0] || '').padEnd(17);
+
+        out += `${firstDesc} ${cantStr} ${precStr} ${totStr}\n`;
+
+        // Líneas siguientes de la descripción (indentadas)
+        for (let j = 1; j < descLines.length; j++) {
+            out += `  ${descLines[j]}\n`;
+        }
+    });
+
+    out += '\n';
+
+    // 5. Total
+    const totalVal = Number(doc.total_neto || doc.total || doc.total_bruto || 0);
+    const totalFormatted = totalVal.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    
+    // Fila Total a la derecha
+    const totalLine = `Total       ${totalFormatted}`;
+    out += CMD_BOLD_ON;
+    out += totalLine.padStart(W) + '\n\n';
+    out += CMD_BOLD_OFF;
+
+    // 6. Pie Legal Centrado
+    out += CMD_CENTER;
+    out += CMD_BOLD_ON;
+    out += 'SIN DERECHO A CREDITO FISCAL\n\n\n\n';
+    out += CMD_BOLD_OFF;
+
+    // 7. Corte de papel
+    out += CMD_CUT;
+
+    return out;
+}
+
+// POST /api/v1/impresion/imprimir-nota-entrega — Enviar Nota de Entrega a impresora térmica (80mm) o matricial
 router.post('/imprimir-nota-entrega', async (req, res) => {
-    const { printer, doc } = req.body;
+    const { printer, doc, format } = req.body;
 
     if (!doc) {
         return res.status(400).json({ success: false, message: 'Datos del documento requeridos.' });
     }
 
-    console.log(`[IMPRESION ESC/P] Generando Nota de Entrega para N° ${doc.doc_num || 'PREVIEW'}...`);
+    const targetIp = (printer && printer.ip_address) ? printer.ip_address.trim() : '192.168.90.207';
+    const targetPort = (printer && printer.port) ? parseInt(printer.port) : 9100;
+    const printerType = (printer && printer.printer_type) ? String(printer.printer_type).toLowerCase() : '';
+    const isThermal = format === 'thermal' || printerType === 'thermal' || targetPort === 9100;
+
+    console.log(`[IMPRESION NOTA ENTREGA] Generando formato ${isThermal ? 'TÉRMICO (80mm)' : 'MATRICIAL (ESC/P)'} para N° ${doc.doc_num || 'PREVIEW'} hacia ${targetIp}:${targetPort}...`);
 
     try {
-        const escpData = buildEscpNotaEntrega(doc);
+        if (isThermal) {
+            // Generar formato térmico 80mm ESC/POS idéntico a Profit Escritorio
+            const thermalData = buildThermalNotaEntrega(doc);
+            sendViaSocket(targetIp, targetPort, thermalData, res);
+            return;
+        }
 
-        const targetIp = (printer && printer.ip_address) ? printer.ip_address.trim() : '192.168.90.207';
-        const targetPort = (printer && printer.port) ? parseInt(printer.port) : 445;
+        // Si es matricial (formato continuo 5.5" ESC/P)
+        const escpData = buildEscpNotaEntrega(doc);
         const targetShare = (printer && printer.share_name) ? printer.share_name.trim() : 'EPSON LX-350 ESCP-1';
 
         // Si es Windows SMB Share (puerto 445 o contiene share_name)
