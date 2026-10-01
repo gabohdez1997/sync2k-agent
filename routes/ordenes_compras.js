@@ -508,7 +508,7 @@ router.post('/', async (req, res) => {
                 rL.input('sCo_Art',            sql.Char(30),         padProfit(item.co_art, 30));
                 rL.input('sDes_Art',           sql.VarChar(120),     (item.art_des || '').substring(0, 120));
                 rL.input('sCo_Uni',            sql.Char(6),          padProfit(finalUni, 6));
-                rL.input('sSCo_Uni',           sql.Char(6),          padProfit(finalUni, 6));
+                rL.input('sSCo_Uni',           sql.Char(6),          item.sco_uni ? padProfit(item.sco_uni, 6) : null);
                 rL.input('sCo_Alma',           sql.Char(6),          padProfit(defAlma, 6));
                 // Profit Plus Compras: '1' = General (16%), '2' = Reducida (8%), '3' = Adicional (31%), '6' = Compra Exenta (0%)
                 let finalTipoImp = String(item.tipo_imp || (pImp > 0 ? '1' : '6')).trim();

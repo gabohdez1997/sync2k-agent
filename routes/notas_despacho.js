@@ -125,6 +125,7 @@ router.get('/', async (req, res) => {
                         c.status,
                         RTRIM(c.co_us_in) AS co_us_in,
                         RTRIM(c.co_sucu_in) AS co_sucu_in,
+                        RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                         RTRIM(c.comentario) AS comentario,
                         (
                             SELECT TOP 1 RTRIM(r.num_doc) 
@@ -240,6 +241,8 @@ router.get('/facturas-pendientes', async (req, res) => {
                         c.monto_imp,
                         c.total_neto,
                         c.status,
+                        RTRIM(c.co_sucu_in) AS co_sucu_in,
+                        RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                         (SELECT COUNT(*) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num) AS total_renglones,
                         (SELECT COUNT(*) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0) AS renglones_pendientes,
                         (SELECT ISNULL(SUM(r.total_art), 0) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num) AS cant_total,
@@ -311,6 +314,8 @@ router.get('/facturas-pendientes/:doc_num', async (req, res) => {
                             c.total_neto,
                             c.status,
                             c.anulado,
+                            RTRIM(c.co_sucu_in) AS co_sucu_in,
+                            RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                             RTRIM(c.comentario) AS comentario,
                             '${srv.name || srv.id}' AS sede_nombre,
                             '${srv.id}' AS sede_id
@@ -416,6 +421,7 @@ router.get('/:doc_num', async (req, res) => {
                             RTRIM(c.comentario) AS comentario,
                             RTRIM(c.co_us_in) AS co_us_in,
                             RTRIM(c.co_sucu_in) AS co_sucu_in,
+                            RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                             '${srv.name || srv.id}' AS sede_nombre,
                             '${srv.id}' AS sede_id
                         FROM saNotaDespachoVenta c
@@ -631,7 +637,77 @@ router.post('/', async (req, res) => {
 
         const outcome = await executeWrite(sedeParam, req.sqlAuth, async (pool, srv) => {
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
-            const coSucu = (payload.co_sucu || srv.co_sucu || '01').substring(0, 6);
+
+            // =========================================================================
+            // RESOLUCIÓN INTELIGENTE DE SUCURSAL (co_sucu_in / co_sucu_mo)
+            // =========================================================================
+            let resolvedSucu = (payload.co_sucu || payload.co_sucu_in || payload.sucu_code || '').trim();
+
+            // 1. Si no viene en el payload, intentar heredar la sucursal de la Factura de Origen
+            const originFact = String(payload.factura_origen || (validLines[0] && (validLines[0].doc_num_factura || validLines[0].num_doc)) || '').trim();
+            if (!resolvedSucu && originFact) {
+                try {
+                    const factRes = await pool.request()
+                        .input('nro_fact', sql.Char(20), padProfit(originFact, 20))
+                        .query("SELECT RTRIM(co_sucu_in) AS co_sucu FROM saFacturaVenta WHERE doc_num = @nro_fact");
+                    if (factRes.recordset.length > 0 && factRes.recordset[0].co_sucu) {
+                        resolvedSucu = factRes.recordset[0].co_sucu.trim();
+                        console.log(`🏢 [DESPACHO] Sucursal heredada de factura origen ${originFact}: '${resolvedSucu}'`);
+                    }
+                } catch (e) {
+                    console.warn(`⚠️ [DESPACHO] No se pudo consultar sucursal de factura ${originFact}:`, e.message);
+                }
+            }
+
+            // 2. Si aún no está resuelta, obtenerla de la configuración de la sede (profit_branch_codes en srv)
+            if (!resolvedSucu && srv.profit_branch_codes) {
+                let codes = srv.profit_branch_codes;
+                if (typeof codes === 'string') {
+                    try { codes = JSON.parse(codes); } catch(e) { codes = []; }
+                }
+                if (Array.isArray(codes) && codes.length > 0) {
+                    const defCodeObj = codes.find(c => c && (c.is_default || c.isDefault));
+                    const cand = (defCodeObj?.code || codes[0]?.code || '').trim();
+                    if (cand) {
+                        resolvedSucu = cand;
+                        console.log(`🏢 [DESPACHO] Sucursal resuelta desde profit_branch_codes de sede ${srv.name || srv.id}: '${resolvedSucu}'`);
+                    }
+                }
+            }
+
+            // 3. Si el servidor tiene srv.co_sucu
+            if (!resolvedSucu && srv.co_sucu) {
+                resolvedSucu = String(srv.co_sucu).trim();
+            }
+
+            // 4. Intentar derivar por almacén por defecto o del renglón (ej. Almacén '03' -> Sucursal '03')
+            if (!resolvedSucu) {
+                const targetAlmaCandidate = (payload.defaultWarehouse || payload.co_alma_defecto || (validLines[0] && validLines[0].co_alma) || '').trim();
+                if (targetAlmaCandidate) {
+                    try {
+                        const sucuCheck = await pool.request()
+                            .input('chk_alma', sql.Char(6), padProfit(targetAlmaCandidate, 6))
+                            .query("SELECT RTRIM(co_sucur) AS co_sucur FROM saSucursal WHERE co_sucur = @chk_alma");
+                        if (sucuCheck.recordset.length > 0 && sucuCheck.recordset[0].co_sucur) {
+                            resolvedSucu = sucuCheck.recordset[0].co_sucur.trim();
+                            console.log(`🏢 [DESPACHO] Sucursal coincidió con almacén: '${resolvedSucu}'`);
+                        }
+                    } catch (e) {}
+                }
+            }
+
+            // 5. Consultar saSucursal en la BD de SQL Server
+            if (!resolvedSucu) {
+                try {
+                    const sucuRes = await pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal");
+                    if (sucuRes.recordset?.length > 0 && sucuRes.recordset[0].co_sucur) {
+                        resolvedSucu = sucuRes.recordset[0].co_sucur.trim();
+                    }
+                } catch (e) {}
+            }
+
+            const coSucu = padProfit(resolvedSucu || '01', 6);
+            console.log(`🏢 [DESPACHO] Sucursal final asignada: '${coSucu.trim()}' para sede: ${srv.name || srv.id}`);
 
             let docNum = (payload.isEditing && payload.doc_num ? String(payload.doc_num).trim() : '');
 
@@ -785,21 +861,25 @@ router.post('/', async (req, res) => {
                 rengReq.input('sDoc_Num',           sql.Char(20), padProfit(docNum, 20));
                 rengReq.input('sCo_Art',            sql.Char(30), padProfit(line.co_art, 30));
                 rengReq.input('sDes_Art',           sql.VarChar(120), String(line.des_art || line.art_des || '').substring(0, 120));
+                const sTotalArt = (line.stotal_art !== undefined && line.stotal_art !== null && Number(line.stotal_art) > 0)
+                    ? Number(line.stotal_art)
+                    : 0;
+
                 rengReq.input('sCo_Uni',            sql.Char(6), padProfit(line.co_uni || 'UNID', 6));
-                rengReq.input('sSco_Uni',           sql.Char(6), padProfit(line.sco_uni || line.co_uni || 'UNID', 6));
+                rengReq.input('sSco_Uni',           sql.Char(6), line.sco_uni ? padProfit(line.sco_uni, 6) : null);
                 rengReq.input('sCo_Alma',           sql.Char(6), padProfit(targetAlma, 6));
                 rengReq.input('sCo_Precio',         sql.Char(6), padProfit(line.co_precio || '01', 6));
                 rengReq.input('sTipo_Imp',          sql.Char(1), line.tipo_imp || '1');
                 rengReq.input('sTipo_Imp2',         sql.Char(1), null);
                 rengReq.input('sTipo_Imp3',         sql.Char(1), null);
                 rengReq.input('deTotal_Art',        sql.Decimal(18, 5), cantDesp);
-                rengReq.input('deSTotal_Art',       sql.Decimal(18, 5), cantDesp);
+                rengReq.input('deSTotal_Art',       sql.Decimal(18, 5), sTotalArt);
                 rengReq.input('dePrec_Vta',         sql.Decimal(18, 5), Number(line.prec_vta) || 0);
                 rengReq.input('sPorc_Desc',         sql.VarChar(15), String(line.porc_desc || '0'));
                 rengReq.input('deMonto_Desc',       sql.Decimal(18, 5), Number(line.monto_desc) || 0);
                 rengReq.input('deReng_Neto',        sql.Decimal(18, 5), Number(line.reng_neto) || 0);
                 rengReq.input('dePendiente',        sql.Decimal(18, 5), cantDesp);
-                rengReq.input('dePendiente2',       sql.Decimal(18, 5), cantDesp);
+                rengReq.input('dePendiente2',       sql.Decimal(18, 5), sTotalArt);
                 rengReq.input('deMonto_Desc_Glob',  sql.Decimal(18, 5), 0);
                 rengReq.input('deMonto_reca_Glob',  sql.Decimal(18, 5), 0);
                 rengReq.input('deOtros1_glob',      sql.Decimal(18, 5), 0);
@@ -911,16 +991,28 @@ router.post('/:doc_num/anular', async (req, res) => {
 
             const renglones = rengRes.recordset || [];
 
-            // 2. Marcar como anulado en saNotaDespachoVenta
+            // 2. Marcar como anulado en saNotaDespachoVenta (manteniendo la sucursal del documento)
+            let sucuAnul = '01';
+            try {
+                const sRes = await pool.request()
+                    .input('doc_num_s', sql.Char(20), padProfit(doc_num, 20))
+                    .query("SELECT RTRIM(co_sucu_in) AS co_sucu_in FROM saNotaDespachoVenta WHERE doc_num = @doc_num_s");
+                if (sRes.recordset?.length > 0 && sRes.recordset[0].co_sucu_in) {
+                    sucuAnul = sRes.recordset[0].co_sucu_in.trim();
+                }
+            } catch (e) {}
+
             await pool.request()
                 .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
                 .input('auditUser', sql.Char(6), auditUser)
+                .input('coSucu', sql.Char(6), padProfit(sucuAnul, 6))
                 .query(`
                     UPDATE saNotaDespachoVenta 
                     SET anulado = 1,
-                        status = '3',
+                        status = '0',
                         fe_us_mo = GETDATE(),
-                        co_us_mo = @auditUser
+                        co_us_mo = @auditUser,
+                        co_sucu_mo = @coSucu
                     WHERE doc_num = @doc_num;
                 `);
 
@@ -976,18 +1068,20 @@ router.delete('/:doc_num', async (req, res) => {
         const { doc_num } = req.params;
         const sedeParam = req.query.sede || null;
 
-        const outcome = await executeWrite(sedeParam, req.sqlAuth, async (pool) => {
+        const outcome = await executeWrite(sedeParam, req.sqlAuth, async (pool, srv) => {
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 6).toUpperCase();
 
             const check = await pool.request()
                 .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
-                .query("SELECT validador FROM saNotaDespachoVenta WHERE doc_num = @doc_num");
+                .query("SELECT validador, RTRIM(co_sucu_in) AS co_sucu_in FROM saNotaDespachoVenta WHERE doc_num = @doc_num");
 
             if (!check.recordset.length) {
                 return { skipped: true, message: 'La nota de despacho no existe en esta sede' };
             }
 
-            // Anular primero para restaurar pendientes
+            const sucuDel = check.recordset[0].co_sucu_in || '01';
+
+            // 1. Revertir cantidades pendientes en la factura
             const rengRes = await pool.request()
                 .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
                 .query("SELECT RTRIM(num_doc) AS num_doc, co_art, total_art FROM saNotaDespachoVentaReng WHERE doc_num = @doc_num");
@@ -1002,12 +1096,37 @@ router.delete('/:doc_num', async (req, res) => {
                 }
             }
 
+            // 2. Recalcular estatus de las facturas afectadas
+            const facturas = [...new Set((rengRes.recordset || []).map(r => r.num_doc).filter(Boolean))];
+            for (const numFact of facturas) {
+                try {
+                    await pool.request()
+                        .input('num_doc', sql.Char(20), padProfit(numFact, 20))
+                        .query(`
+                            DECLARE @total_art DECIMAL(18,5), @pendiente DECIMAL(18,5);
+                            SELECT @total_art = ISNULL(SUM(total_art), 0), @pendiente = ISNULL(SUM(pendiente), 0)
+                            FROM saFacturaVentaReng WHERE doc_num = @doc_num;
+
+                            UPDATE saFacturaVenta 
+                            SET status = CASE 
+                                WHEN @pendiente <= 0 THEN '2'
+                                WHEN @pendiente < @total_art THEN '1'
+                                ELSE '0'
+                            END
+                            WHERE doc_num = @doc_num;
+                        `);
+                } catch (stErr) {
+                    console.warn(`[DESPACHO] Advertencia actualizando estatus de factura ${numFact}:`, stErr.message);
+                }
+            }
+
+            // 3. Eliminar nota de despacho vía stored procedure
             const delReq = new sql.Request(pool);
             delReq.input('sDoc_NumOri',   sql.Char(20), padProfit(doc_num, 20));
             delReq.input('tsValidador',   sql.VarBinary, check.recordset[0].validador);
             delReq.input('sMaquina',      sql.VarChar(60), 'SYNC2K');
             delReq.input('sCo_Us_Mo',     sql.Char(6), auditUser);
-            delReq.input('sCo_Sucu_Mo',   sql.Char(6), '01');
+            delReq.input('sCo_Sucu_Mo',   sql.Char(6), padProfit(sucuDel, 6));
             delReq.input('gRowguid',      sql.UniqueIdentifier, null);
 
             await delReq.execute('pEliminarNotaDespachoVenta');

@@ -402,7 +402,7 @@ router.post('/', async (req, res) => {
                 const finalUni = rawUni === '' ? 'UNI' : rawUni; // Fallback por si acaso
 
                 rL.input('sCo_Uni',            sql.Char(6),          padProfit(finalUni, 6));
-                rL.input('sSco_Uni',           sql.Char(6),          padProfit(finalUni, 6)); // La clave: nunca enviar NULL a la unidad secundaria
+                rL.input('sSco_Uni',           sql.Char(6),          item.sco_uni ? padProfit(item.sco_uni, 6) : null);
                 rL.input('sCo_Alma',           sql.Char(6),          padProfit(item.co_alma || defAlma, 6));
                 rL.input('sCo_Precio',         sql.Char(6),          padProfit(coPrecio || '01', 6));
                 rL.input('sTipo_Imp',          sql.Char(1),          item.tipo_imp || '1');
