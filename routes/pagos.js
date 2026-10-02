@@ -882,6 +882,9 @@ router.post('/', async (req, res) => {
                     if (docInfo.recordset.length > 0) {
                         docSaldo = Number(docInfo.recordset[0].saldo || 0);
                         docTasa = Number(docInfo.recordset[0].tasa || 1);
+                        if (docTasa <= 1.000001 && Number(data.tasa || 1) > 1) {
+                            docTasa = Number(data.tasa);
+                        }
                         docMone = docInfo.recordset[0].co_mone || 'BS';
                         docNroFact = docInfo.recordset[0].nro_fact || docNroFact;
                         docNControl = docInfo.recordset[0].n_control || '';
