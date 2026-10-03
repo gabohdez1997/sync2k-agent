@@ -57,8 +57,33 @@ async function initServers() {
         console.log(`✅ [Agente DB] Sincronización exitosa. ${cachedServers.length} sedes registradas.`);
         return cachedServers;
     } catch (err) {
-        console.error('❌ [Agente DB] Error fatal al sincronizar sedes desde PG:', err.message);
-        // Fallback a servidores manuales si fallase lo dinámico
+        console.warn(`⚠️ [Agente DB] PG Local no disponible (${err.message}). Consultando Supabase Cloud como fallback...`);
+        try {
+            const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?active=eq.true&select=id,name,sql_config,profit_branch_codes`, {
+                headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+            });
+            if (res.ok) {
+                let cloudRows = await res.json();
+                if (localBranchName) {
+                    cloudRows = cloudRows.filter(r => 
+                        (r.name && r.name.toLowerCase() === localBranchName.toLowerCase()) || 
+                        (r.id && r.id.toLowerCase() === localBranchName.toLowerCase())
+                    );
+                }
+                cachedServers = cloudRows.map(r => ({
+                    id: r.id,
+                    name: r.name,
+                    server: r.sql_config?.host || r.sql_config?.server,
+                    database: r.sql_config?.database,
+                    sql_config: r.sql_config,
+                    profit_branch_codes: r.profit_branch_codes
+                }));
+                console.log(`✅ [Agente DB] Sincronización exitosa desde Supabase Cloud. ${cachedServers.length} sedes registradas.`);
+                return cachedServers;
+            }
+        } catch (eCloud) {
+            console.error('❌ [Agente DB] Error fatal al sincronizar sedes desde Supabase Cloud:', eCloud.message);
+        }
         return [];
     }
 }
