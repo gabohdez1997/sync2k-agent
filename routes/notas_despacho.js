@@ -721,15 +721,32 @@ router.post('/', async (req, res) => {
                     if (check.recordset.length > 0) {
                         const prevReng = await pool.request()
                             .input('doc_num', sql.Char(20), padProfit(docNum, 20))
-                            .query("SELECT RTRIM(num_doc) AS num_doc, co_art, total_art FROM saNotaDespachoVentaReng WHERE doc_num = @doc_num");
+                            .query("SELECT RTRIM(num_doc) AS num_doc, co_art, co_alma, total_art FROM saNotaDespachoVentaReng WHERE doc_num = @doc_num");
 
                         for (const r of (prevReng.recordset || [])) {
                             if (r.num_doc) {
                                 await pool.request()
                                     .input('num_doc', sql.Char(20), padProfit(r.num_doc, 20))
                                     .input('co_art', sql.Char(30), padProfit(r.co_art, 30))
+                                    .input('co_alma', sql.Char(6), padProfit(r.co_alma || '01', 6))
                                     .input('cant', sql.Decimal(18, 5), Number(r.total_art) || 0)
-                                    .query("UPDATE saFacturaVentaReng SET pendiente = pendiente + @cant WHERE doc_num = @num_doc AND co_art = @co_art");
+                                    .query(`
+                                        DECLARE @almaFact CHAR(6);
+                                        SELECT TOP 1 @almaFact = co_alma FROM saFacturaVentaReng WHERE doc_num = @num_doc AND co_art = @co_art;
+                                        IF @almaFact IS NULL SET @almaFact = @co_alma;
+
+                                        UPDATE saFacturaVentaReng 
+                                        SET pendiente = pendiente + @cant 
+                                        WHERE doc_num = @num_doc AND co_art = @co_art;
+
+                                        IF EXISTS (SELECT 1 FROM saStockAlmacen WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES')
+                                            UPDATE saStockAlmacen 
+                                            SET stock = stock + @cant, revisado = '', trasnfe = '' 
+                                            WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES';
+                                        ELSE
+                                            INSERT INTO saStockAlmacen (co_alma, co_art, tipo, stock, revisado, trasnfe)
+                                            VALUES (@almaFact, @co_art, 'DES', @cant, '', '');
+                                    `);
                             }
                         }
 
@@ -910,18 +927,29 @@ router.post('/', async (req, res) => {
 
                 await rengReq.execute('pInsertarRenglonesNotaDespachoVenta');
 
-                // Descontar la cantidad despachada del pendiente en la factura de origen
+                // Descontar la cantidad despachada del pendiente en la factura de origen y de saStockAlmacen (DES)
                 const numFactLine = String(line.doc_num_factura || line.num_doc || payload.factura_origen || '').trim();
                 if (numFactLine) {
                     try {
                         await pool.request()
                             .input('num_doc', sql.Char(20), padProfit(numFactLine, 20))
                             .input('co_art', sql.Char(30), padProfit(line.co_art, 30))
+                            .input('co_alma', sql.Char(6), padProfit(targetAlma, 6))
                             .input('cant', sql.Decimal(18, 5), cantDesp)
                             .query(`
+                                DECLARE @almaFact CHAR(6);
+                                SELECT TOP 1 @almaFact = co_alma FROM saFacturaVentaReng WHERE doc_num = @num_doc AND co_art = @co_art;
+                                IF @almaFact IS NULL SET @almaFact = @co_alma;
+
                                 UPDATE saFacturaVentaReng
                                 SET pendiente = CASE WHEN pendiente >= @cant THEN pendiente - @cant ELSE 0 END
                                 WHERE doc_num = @num_doc AND co_art = @co_art;
+
+                                UPDATE saStockAlmacen
+                                SET stock = CASE WHEN stock >= @cant THEN stock - @cant ELSE 0 END,
+                                    revisado = '',
+                                    trasnfe = ''
+                                WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES';
                             `);
                     } catch (decErr) {
                         console.warn(`⚠️ [DESPACHO] Advertencia actualizando pendiente de ${line.co_art} en factura ${numFactLine}:`, decErr.message);
@@ -984,7 +1012,7 @@ router.post('/:doc_num/anular', async (req, res) => {
             const rengRes = await pool.request()
                 .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
                 .query(`
-                    SELECT RTRIM(num_doc) AS num_doc, co_art, total_art, rowguid_doc
+                    SELECT RTRIM(num_doc) AS num_doc, co_art, co_alma, total_art, rowguid_doc
                     FROM saNotaDespachoVentaReng 
                     WHERE doc_num = @doc_num AND tipo_doc = 'FACT'
                 `);
@@ -1016,17 +1044,30 @@ router.post('/:doc_num/anular', async (req, res) => {
                     WHERE doc_num = @doc_num;
                 `);
 
-            // 3. Restaurar pendientes en saFacturaVentaReng y recalcular status
+            // 3. Restaurar pendientes en saFacturaVentaReng y saStockAlmacen (DES)
             for (const r of renglones) {
                 if (r.num_doc) {
                     await pool.request()
                         .input('num_doc', sql.Char(20), padProfit(r.num_doc, 20))
                         .input('co_art', sql.Char(30), padProfit(r.co_art, 30))
+                        .input('co_alma', sql.Char(6), padProfit(r.co_alma || '01', 6))
                         .input('cant', sql.Decimal(18, 5), Number(r.total_art) || 0)
                         .query(`
+                            DECLARE @almaFact CHAR(6);
+                            SELECT TOP 1 @almaFact = co_alma FROM saFacturaVentaReng WHERE doc_num = @num_doc AND co_art = @co_art;
+                            IF @almaFact IS NULL SET @almaFact = @co_alma;
+
                             UPDATE saFacturaVentaReng
                             SET pendiente = pendiente + @cant
                             WHERE doc_num = @num_doc AND co_art = @co_art;
+
+                            IF EXISTS (SELECT 1 FROM saStockAlmacen WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES')
+                                UPDATE saStockAlmacen
+                                SET stock = stock + @cant, revisado = '', trasnfe = ''
+                                WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES';
+                            ELSE
+                                INSERT INTO saStockAlmacen (co_alma, co_art, tipo, stock, revisado, trasnfe)
+                                VALUES (@almaFact, @co_art, 'DES', @cant, '', '');
                         `);
                 }
             }
@@ -1081,18 +1122,35 @@ router.delete('/:doc_num', async (req, res) => {
 
             const sucuDel = check.recordset[0].co_sucu_in || '01';
 
-            // 1. Revertir cantidades pendientes en la factura
+            // 1. Revertir cantidades pendientes en la factura y saStockAlmacen (DES)
             const rengRes = await pool.request()
                 .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
-                .query("SELECT RTRIM(num_doc) AS num_doc, co_art, total_art FROM saNotaDespachoVentaReng WHERE doc_num = @doc_num");
+                .query("SELECT RTRIM(num_doc) AS num_doc, co_art, co_alma, total_art FROM saNotaDespachoVentaReng WHERE doc_num = @doc_num");
 
             for (const r of (rengRes.recordset || [])) {
                 if (r.num_doc) {
                     await pool.request()
                         .input('num_doc', sql.Char(20), padProfit(r.num_doc, 20))
                         .input('co_art', sql.Char(30), padProfit(r.co_art, 30))
+                        .input('co_alma', sql.Char(6), padProfit(r.co_alma || '01', 6))
                         .input('cant', sql.Decimal(18, 5), Number(r.total_art) || 0)
-                        .query("UPDATE saFacturaVentaReng SET pendiente = pendiente + @cant WHERE doc_num = @num_doc AND co_art = @co_art");
+                        .query(`
+                            DECLARE @almaFact CHAR(6);
+                            SELECT TOP 1 @almaFact = co_alma FROM saFacturaVentaReng WHERE doc_num = @num_doc AND co_art = @co_art;
+                            IF @almaFact IS NULL SET @almaFact = @co_alma;
+
+                            UPDATE saFacturaVentaReng 
+                            SET pendiente = pendiente + @cant 
+                            WHERE doc_num = @num_doc AND co_art = @co_art;
+
+                            IF EXISTS (SELECT 1 FROM saStockAlmacen WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES')
+                                UPDATE saStockAlmacen 
+                                SET stock = stock + @cant, revisado = '', trasnfe = '' 
+                                WHERE co_art = @co_art AND co_alma = @almaFact AND tipo = 'DES';
+                            ELSE
+                                INSERT INTO saStockAlmacen (co_alma, co_art, tipo, stock, revisado, trasnfe)
+                                VALUES (@almaFact, @co_art, 'DES', @cant, '', '');
+                        `);
                 }
             }
 
