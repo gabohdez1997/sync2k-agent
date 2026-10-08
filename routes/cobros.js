@@ -873,6 +873,62 @@ router.post('/', async (req, res) => {
                                 @rowguid_reng_ori, @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
                             )
                         `);
+
+                    // Insertar registro detallado en saCobroRetenIvaReng
+                    try {
+                        const today = new Date();
+                        const periodNum = Number(today.getFullYear() + String(today.getMonth() + 1).padStart(2, '0'));
+                        let clientRif = retIvaMatch?.rif_contribuyente || '';
+                        if (!clientRif) {
+                            const cliR = await transaction.request()
+                                .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                                .query('SELECT TOP 1 RTRIM(rif) AS rif FROM saCliente WHERE RTRIM(co_cli) = RTRIM(@co_cli)');
+                            clientRif = cliR.recordset[0]?.rif || '';
+                        }
+                        const cleanRif = clientRif.replace(/[^A-Za-z0-9]/g, '').substring(0, 10);
+                        const alicuota = Number(retIvaMatch?.alicuota || 16);
+                        const baseImp = Number(retIvaMatch?.base_imponible || (adjustedMontoRetencionIva / (alicuota / 100 * 0.75)));
+
+                        await transaction.request()
+                            .input('reng_num', sql.Int, 1)
+                            .input('rowguid_reng_cob', sql.UniqueIdentifier, lineGuid)
+                            .input('rif_contribuyente', sql.Char(10), padProfit(cleanRif, 10))
+                            .input('periodo_impositivo', sql.Decimal(6, 0), periodNum)
+                            .input('fecha_documento', sql.SmallDateTime, docFecEmisStr ? new Date(docFecEmisStr) : tsDate)
+                            .input('tipo_operacion', sql.Char(1), 'C')
+                            .input('tipo_documento', sql.Char(4), padProfit(line.co_tipo_doc.trim().substring(0, 4), 4))
+                            .input('rif_comprador', sql.Char(10), padProfit('J000000000', 10))
+                            .input('numero_documento', sql.Char(20), padProfit(line.nro_doc, 20))
+                            .input('numero_control_documento', sql.Char(20), padProfit(retIvaMatch?.numero_control_documento || line.nro_doc, 20))
+                            .input('monto_documento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_documento || docSaldo || adjustedMontoRetencionIva))
+                            .input('base_imponible', sql.Decimal(15, 2), baseImp)
+                            .input('monto_ret_imp', sql.Decimal(15, 2), adjustedMontoRetencionIva)
+                            .input('numero_documento_afectado', sql.Char(20), padProfit(line.nro_doc, 20))
+                            .input('num_comprobante', sql.Char(14), padProfit(numComprobante.substring(0, 14), 14))
+                            .input('monto_excento', sql.Decimal(15, 2), 0.00)
+                            .input('alicuota', sql.Decimal(5, 2), alicuota)
+                            .input('reten_tercero', sql.Bit, 0)
+                            .input('numero_expediente', sql.Char(15), '               ')
+                            .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                            .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                            .query(`
+                                INSERT INTO saCobroRetenIvaReng (
+                                    reng_num, rowguid_reng_cob, rif_contribuyente, periodo_impositivo, fecha_documento,
+                                    tipo_operacion, tipo_documento, rif_comprador, numero_documento, numero_control_documento,
+                                    monto_documento, base_imponible, monto_ret_imp, numero_documento_afectado, num_comprobante,
+                                    monto_excento, alicuota, reten_tercero, numero_expediente, co_us_in, co_sucu_in, fe_us_in,
+                                    co_us_mo, co_sucu_mo, fe_us_mo, rowguid
+                                ) VALUES (
+                                    @reng_num, @rowguid_reng_cob, @rif_contribuyente, @periodo_impositivo, @fecha_documento,
+                                    @tipo_operacion, @tipo_documento, @rif_comprador, @numero_documento, @numero_control_documento,
+                                    @monto_documento, @base_imponible, @monto_ret_imp, @numero_documento_afectado, @num_comprobante,
+                                    @monto_excento, @alicuota, @reten_tercero, @numero_expediente, @co_us_in, @co_sucu_in, GETDATE(),
+                                    @co_us_in, @co_sucu_in, GETDATE(), NEWID()
+                                )
+                            `);
+                    } catch (errIvaReng) {
+                        console.warn('[COBROS] Error insertando saCobroRetenIvaReng:', errIvaReng.message);
+                    }
                 }
 
                 if (adjustedMontoRetencion > 0) {
@@ -959,6 +1015,41 @@ router.post('/', async (req, res) => {
                                 @rowguid_reng_ori, @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
                             )
                         `);
+
+                    // Insertar registro detallado en saCobroRentenReng
+                    try {
+                        const retIslrMatch = data.retenciones_islr?.find(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
+                        const coIslr = retIslrMatch?.co_islr || '072';
+                        const montoObj = Number(retIslrMatch?.monto_obj || docSaldo || adjustedMontoRetencion);
+                        const porcRet = Number(retIslrMatch?.porc_retn || 3);
+                        const sustraendo = Number(retIslrMatch?.sustraendo || 0);
+
+                        await transaction.request()
+                            .input('reng_num', sql.Int, 1)
+                            .input('rowguid_reng_cob', sql.UniqueIdentifier, lineGuid)
+                            .input('co_islr', sql.Char(6), padProfit(coIslr, 6))
+                            .input('monto', sql.Decimal(18, 5), montoObj)
+                            .input('monto_reten', sql.Decimal(18, 5), adjustedMontoRetencion)
+                            .input('monto_obj', sql.Decimal(18, 5), montoObj)
+                            .input('sustraendo', sql.Decimal(18, 5), sustraendo)
+                            .input('porc_retn', sql.Decimal(18, 5), porcRet)
+                            .input('automatica', sql.Bit, 0)
+                            .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                            .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                            .query(`
+                                INSERT INTO saCobroRentenReng (
+                                    reng_num, rowguid_reng_cob, co_islr, monto, monto_reten,
+                                    monto_obj, sustraendo, porc_retn, automatica, co_us_in,
+                                    co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo, rowguid
+                                ) VALUES (
+                                    @reng_num, @rowguid_reng_cob, @co_islr, @monto, @monto_reten,
+                                    @monto_obj, @sustraendo, @porc_retn, @automatica, @co_us_in,
+                                    @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(), NEWID()
+                                )
+                            `);
+                    } catch (errIslrReng) {
+                        console.warn('[COBROS] Error insertando saCobroRentenReng:', errIslrReng.message);
+                    }
                 }
 
                 insertedRenglones.push({

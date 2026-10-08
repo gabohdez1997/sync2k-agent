@@ -151,6 +151,10 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(pr.prov_des) AS prov_des,
                            RTRIM(pr.rif) AS rif,
                            pr.contribu_e, pr.porc_esp,
+                           RTRIM(ISNULL(pr.co_tab, '7')) AS co_tab,
+                           RTRIM(ISNULL(t.tab_des, '')) AS tab_des,
+                           RTRIM(ISNULL(pr.tipo_per, '3')) AS tipo_per,
+                           ISNULL(pr.sujeto_obj_retenISLR_auto, 0) AS sujeto_obj_retenISLR_auto,
                            RTRIM(d.co_us_in) AS co_us_in,
                            ISNULL(d.otros1, 0) AS otros1,
                            ISNULL(CASE WHEN d.porc_imp > 0 THEN (d.total_neto - d.monto_imp) ELSE 0 END, 0) AS base_imponible,
@@ -182,6 +186,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                                      AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_islr
                     FROM saDocumentoCompra d
                     INNER JOIN saProveedor pr ON d.co_prov = pr.co_prov
+                    LEFT JOIN saTabuladorIslr t ON LTRIM(RTRIM(pr.co_tab)) = LTRIM(RTRIM(t.co_tab))
                     WHERE ${whereSQL}
                     ORDER BY d.fec_emis DESC
                 `);
@@ -213,10 +218,10 @@ router.get('/facturas/pendientes', async (req, res) => {
     }
 });
 
-// --- OBTENER CONCEPTOS DE RETENCIÓN DE ISLR ---
+// --- OBTENER CONCEPTOS DE RETENCIÓN DE ISLR (CON TABULADOR Y SUSTRAENDO) ---
 router.get('/conceptos-islr', async (req, res) => {
     try {
-        const { sede } = req.query;
+        const { sede, co_tab } = req.query;
         const servers = getServers();
         const target = (sede ? servers.find(s => s.id === sede) : null) || servers[0];
 
@@ -225,15 +230,50 @@ router.get('/conceptos-islr', async (req, res) => {
         }
 
         const pool = await getPool(target.id, req.sqlAuth);
-        const result = await pool.request().query(`
-            SELECT RTRIM(co_islr) AS co_islr, RTRIM(islr_des) AS islr_des
-            FROM saConISLR
-            ORDER BY co_islr
-        `);
+        const request = pool.request();
+        let query = '';
+
+        if (co_tab && String(co_tab).trim() !== '') {
+            request.input('co_tab', sql.Char(6), padProfit(String(co_tab).trim(), 6));
+            query = `
+                SELECT 
+                    RTRIM(co_tab) AS co_tab,
+                    RTRIM(co_islr) AS co_islr,
+                    RTRIM(islr_des) AS islr_des,
+                    RTRIM(ISNULL(islr_deslarga, islr_des)) AS islr_deslarga,
+                    ISNULL(porc_imp, 100.0) AS porc_imp,
+                    ISNULL(porc_ret, 0.0) AS porc_ret,
+                    ISNULL(sustraen, 0.0) AS sustraen
+                FROM v_saConISLR_saTabuladorISLR
+                WHERE LTRIM(RTRIM(co_tab)) = LTRIM(RTRIM(@co_tab))
+                ORDER BY co_islr
+            `;
+        } else {
+            query = `
+                SELECT 
+                    RTRIM(co_tab) AS co_tab,
+                    RTRIM(co_islr) AS co_islr,
+                    RTRIM(islr_des) AS islr_des,
+                    RTRIM(ISNULL(islr_deslarga, islr_des)) AS islr_deslarga,
+                    ISNULL(porc_imp, 100.0) AS porc_imp,
+                    ISNULL(porc_ret, 0.0) AS porc_ret,
+                    ISNULL(sustraen, 0.0) AS sustraen
+                FROM v_saConISLR_saTabuladorISLR
+                ORDER BY co_tab, co_islr
+            `;
+        }
+
+        const [result, utRes, tabRes] = await Promise.all([
+            request.query(query),
+            pool.request().query(`SELECT TOP 1 valor, CONVERT(VARCHAR(10), co_fec, 120) AS co_fec FROM saUnidadTributaria ORDER BY co_fec DESC`).catch(() => ({ recordset: [{ valor: 43 }] })),
+            pool.request().query(`SELECT RTRIM(co_tab) AS co_tab, RTRIM(tab_des) AS tab_des, RTRIM(tipo_per) AS tipo_per FROM saTabuladorIslr ORDER BY co_tab`).catch(() => ({ recordset: [] }))
+        ]);
 
         res.status(200).json({
             success: true,
-            data: result.recordset
+            data: result.recordset,
+            unidad_tributaria: Number(utRes.recordset[0]?.valor || 43),
+            tabuladores: tabRes.recordset
         });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al consultar conceptos de ISLR.', error: error.message });
