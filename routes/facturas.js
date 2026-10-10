@@ -16,8 +16,40 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, co_cli, co_ven, co_us_in, fec_d, fec_h, search } = req.query;
+        const { sede, doc_num, co_cli, co_ven, co_us_in, fec_d, fec_h, search, anulado, solo_activas, con_saldo, order_by, order_dir } = req.query;
         
+        const sortCol = (order_by || 'fec_emis').trim().toLowerCase();
+        const sortDir = (order_dir || 'DESC').trim().toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+        let orderSQL = 'f.fec_emis DESC, f.doc_num DESC';
+        switch (sortCol) {
+            case 'saldo':
+                orderSQL = `ISNULL(d.saldo, 0) ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'monto':
+                orderSQL = `f.total_neto ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'doc_num':
+                orderSQL = `f.doc_num ${sortDir}`;
+                break;
+            case 'cliente':
+                orderSQL = `cl.cli_des ${sortDir}, f.doc_num DESC`;
+                break;
+            case 'cajero':
+                orderSQL = `f.co_us_in ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'vendedor':
+                orderSQL = `v.ven_des ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'estatus':
+                orderSQL = `f.anulado ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'fec_emis':
+            default:
+                orderSQL = `f.fec_emis ${sortDir}, f.doc_num DESC`;
+                break;
+        }
+
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -26,6 +58,17 @@ router.get('/', async (req, res) => {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const request = pool.request();
                 let whereClauses = ["1=1"];
+
+                if (anulado !== undefined) {
+                    request.input('anulado_filter', sql.Bit, anulado === 'true' || anulado === '1' ? 1 : 0);
+                    whereClauses.push("f.anulado = @anulado_filter");
+                } else if (solo_activas === 'true' || solo_activas === '1') {
+                    whereClauses.push("f.anulado = 0");
+                }
+
+                if (con_saldo === 'true' || con_saldo === '1') {
+                    whereClauses.push("ISNULL(d.saldo, 0) > 0.001 AND f.anulado = 0");
+                }
 
                 if (doc_num) {
                     request.input('doc_num', sql.VarChar, `%${doc_num}%`);
@@ -70,7 +113,7 @@ router.get('/', async (req, res) => {
                     LEFT JOIN saCliente cl ON f.co_cli = cl.co_cli
                     LEFT JOIN saVendedor v ON f.co_ven = v.co_ven
                     WHERE ${whereSQL}
-                    ORDER BY f.fec_emis DESC, f.doc_num DESC
+                    ORDER BY ${orderSQL}
                 `);
 
                 return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
@@ -81,7 +124,41 @@ router.get('/', async (req, res) => {
         }));
 
         const combined = [].concat(...allData);
-        combined.sort((a, b) => new Date(b.fec_emis) - new Date(a.fec_emis));
+        const dir = sortDir === 'ASC' ? 1 : -1;
+        combined.sort((a, b) => {
+            let res = 0;
+            switch (sortCol) {
+                case 'saldo':
+                    res = (Number(a.saldo) || 0) - (Number(b.saldo) || 0);
+                    break;
+                case 'monto':
+                    res = (Number(a.total_neto) || 0) - (Number(b.total_neto) || 0);
+                    break;
+                case 'doc_num':
+                    res = String(a.doc_num || '').localeCompare(String(b.doc_num || ''), undefined, { numeric: true });
+                    break;
+                case 'cliente':
+                    res = String(a.cli_des || a.co_cli || '').localeCompare(String(b.cli_des || b.co_cli || ''));
+                    break;
+                case 'cajero':
+                    res = String(a.co_us_in || '').localeCompare(String(b.co_us_in || ''));
+                    break;
+                case 'vendedor':
+                    res = String(a.ven_des || a.co_ven || '').localeCompare(String(b.ven_des || b.co_ven || ''));
+                    break;
+                case 'estatus':
+                    res = (a.anulado ? 1 : 0) - (b.anulado ? 1 : 0);
+                    break;
+                case 'fec_emis':
+                default:
+                    res = new Date(a.fec_emis || 0) - new Date(b.fec_emis || 0);
+                    break;
+            }
+            if (res === 0) {
+                res = String(a.doc_num || '').localeCompare(String(b.doc_num || ''), undefined, { numeric: true });
+            }
+            return res * dir;
+        });
         return paginatedResponse(res, combined, page, limit);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al consultar Facturas.', error: error.message });
@@ -132,7 +209,8 @@ router.get('/:doc_num', async (req, res) => {
                                r.co_precio AS co_precio, r.prec_vta AS precio,
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
                                r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad,
-                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc
+                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc,
+                               ISNULL(r.total_dev, 0) AS total_dev, ISNULL(r.monto_dev, 0) AS monto_dev, r.rowguid
                         FROM saFacturaVentaReng r
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni

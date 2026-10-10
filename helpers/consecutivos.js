@@ -91,6 +91,18 @@ const DOC_TYPE_CONFIG = {
         co_consecutivos: ['DOC_COM_ISLR', 'ISLR_NUM'],
         table: 'saDocumentoCompra',
         col: 'nro_doc'
+    },
+    DEVOLUCION_CLIENTE: {
+        co_tipo_serie: 'V005',
+        co_consecutivos: ['DCLI_NUM', 'DEV_CLI', 'DEV_CLIENTE'],
+        table: 'saDevolucionCliente',
+        col: 'doc_num'
+    },
+    NOTA_CREDITO_VENTA: {
+        co_tipo_serie: 'V020',
+        co_consecutivos: ['DOC_VEN_N/CR', 'NCR_NUM', 'N_CR'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc'
     }
 };
 
