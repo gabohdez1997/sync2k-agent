@@ -71,7 +71,7 @@ router.get('/', async (req, res) => {
                                     LEFT JOIN saDocumentoVenta d ON r.co_tipo_doc = d.co_tipo_doc 
                                                                 AND r.nro_doc = d.nro_doc
                                     WHERE r.cob_num = c.cob_num 
-                                      AND r.co_tipo_doc IN ('FACT  ', 'NDEB  ', 'N/DB  ', 'GIRO  ', 'AJPA  ')
+                                      AND r.co_tipo_doc IN ('FACT  ', 'NDEB  ', 'N/DB  ', 'GIRO  ', 'AJPA  ', 'AJPM  ')
                                     ORDER BY r.reng_num
                                     FOR XML PATH('')), 
                                    3, 
@@ -117,7 +117,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                 let whereClauses = [
                     "d.saldo > 0",
                     "d.anulado = 0",
-                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR')"
+                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')"
                 ];
 
                 if (search) {
@@ -624,7 +624,7 @@ router.post('/', async (req, res) => {
 
             // 3. Insertar Renglones de Documentos (saCobroDocReng)
             // Primero insertamos los registros de débito (FACT, NDEB, etc.) para generar los rowguid Padres
-            const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA'];
+            const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM'];
             const parentLines = data.renglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = data.renglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const sortedRenglones = [...parentLines, ...childLines];
@@ -650,7 +650,7 @@ router.post('/', async (req, res) => {
 
                 let docFecEmisStr = '';
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR'];
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
@@ -679,11 +679,13 @@ router.post('/', async (req, res) => {
                 let diffBs = 0;
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                const isFactura = docTypeUpper === 'FACT';
                 const todayStr = new Date().toISOString().split('T')[0];
                 const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
                 const rateCobro = Number(data.tasa || 1);
 
-                if (isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
+                // Diferencial Cambiario SOLO para facturas de venta (FACT)
+                if (isFactura && isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     // Llevar saldo en Bs a USD según la tasa del documento
                     const saldoUsd = docSaldo / docTasa;
                     // Calcular equivalente en Bs a la tasa actual
@@ -699,7 +701,9 @@ router.post('/', async (req, res) => {
                     if (totalRebaje > docSaldo) {
                         const excess = totalRebaje - docSaldo;
                         finalMontCob = Math.max(0, finalMontCob - excess);
-                        diffBs = diffBs + excess;
+                        if (isFactura) {
+                            diffBs = diffBs + excess;
+                        }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
                         // Tolerancia de redondeo al saldar en divisa:
@@ -1060,8 +1064,8 @@ router.post('/', async (req, res) => {
                     rowguid: lineGuid
                 });
 
-                // 3.2 Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario
-                if (Math.abs(diffBs) > 0.01) {
+                // 3.2 Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario (SOLO facturas)
+                if (isFactura && Math.abs(diffBs) > 0.01) {
                     const isDebit = diffBs > 0;
                     const diffDocType = isDebit ? 'N/DB' : 'N/CR';
                     const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
@@ -1410,7 +1414,7 @@ router.put('/:cob_num', async (req, res) => {
                     LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc))
                                                 AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                     WHERE r.cob_num = @cob_num 
-                      AND LTRIM(RTRIM(r.co_tipo_doc)) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA')
+                      AND LTRIM(RTRIM(r.co_tipo_doc)) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')
                       AND NOT (d.doc_orig = 'COBRO' AND LTRIM(RTRIM(d.nro_orig)) = LTRIM(RTRIM(@cob_num)))
                 `);
 
@@ -1545,7 +1549,7 @@ router.put('/:cob_num', async (req, res) => {
                 const key = `${type}:${num}`;
                 return !['IVAN', 'ISLR'].includes(type) && !autoGeneratedKeys.has(key);
             });
-            const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA'];
+            const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM'];
             const parentLines = cleanRenglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = cleanRenglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const sortedRenglones = [...parentLines, ...childLines];
@@ -1569,7 +1573,7 @@ router.put('/:cob_num', async (req, res) => {
 
                 let docFecEmisStr = '';
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR'];
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
@@ -1597,10 +1601,12 @@ router.put('/:cob_num', async (req, res) => {
                 let diffBs = 0;
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                const isFactura = docTypeUpper === 'FACT';
                 const todayStr = new Date().toISOString().split('T')[0];
                 const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
 
-                if (isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
+                // Diferencial Cambiario SOLO para facturas de venta (FACT)
+                if (isFactura && isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     const saldoUsd = docSaldo / docTasa;
                     const montoBsActual = Math.round((saldoUsd * rateCobro) * 100) / 100;
                     diffBs = Math.max(0, Math.round((montoBsActual - docSaldo) * 100) / 100);
@@ -1612,7 +1618,9 @@ router.put('/:cob_num', async (req, res) => {
                     if (totalRebaje > docSaldo) {
                         const excess = totalRebaje - docSaldo;
                         finalMontCob = Math.max(0, finalMontCob - excess);
-                        diffBs = diffBs + excess;
+                        if (isFactura) {
+                            diffBs = diffBs + excess;
+                        }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     }
                 }
@@ -1861,8 +1869,8 @@ router.put('/:cob_num', async (req, res) => {
                     rowguid: lineGuid
                 });
 
-                // Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario en edición
-                if (Math.abs(diffBs) > 0.01) {
+                // Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario en edición (SOLO facturas)
+                if (isFactura && Math.abs(diffBs) > 0.01) {
                     const isDebit = diffBs > 0;
                     const diffDocType = isDebit ? 'N/DB' : 'N/CR';
                     const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
@@ -2355,12 +2363,19 @@ const eliminarCobroHandler = async (req, res) => {
                         WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'COB';
                     `);
 
-                // 5. Eliminar documentos de retención o diferenciales creados por el cobro
+                // 5. Eliminar renglones de retención de IVA e ISLR asociados al cobro (hijos de saCobroDocReng)
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
-                        DELETE FROM saDocumentoVenta
-                        WHERE DOC_ORIG = 'COBRO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num));
+                        DELETE ri
+                        FROM saCobroRetenIvaReng ri
+                        INNER JOIN saCobroDocReng cdr ON ri.rowguid_reng_cob = cdr.rowguid
+                        WHERE LTRIM(RTRIM(cdr.cob_num)) = LTRIM(RTRIM(@cob_num));
+
+                        DELETE rn
+                        FROM saCobroRentenReng rn
+                        INNER JOIN saCobroDocReng cdr ON rn.rowguid_reng_cob = cdr.rowguid
+                        WHERE LTRIM(RTRIM(cdr.cob_num)) = LTRIM(RTRIM(@cob_num));
                     `);
 
                 // 6. Eliminar formas de pago (saCobroTPReng) y giros (saGiroVenta)
@@ -2372,6 +2387,7 @@ const eliminarCobroHandler = async (req, res) => {
                     `);
 
                 // 7. Eliminar renglones de documentos (saCobroDocReng)
+                // DEBE eliminarse antes de saDocumentoVenta para evitar violación de FK_saCobroDocReng_saDocumentoVenta
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
@@ -2383,6 +2399,20 @@ const eliminarCobroHandler = async (req, res) => {
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
                         DELETE FROM saCobro WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num));
+                    `);
+
+                // 9. Ahora sí: Eliminar documentos de retención o diferenciales creados por el cobro en saDocumentoVenta
+                await transaction.request()
+                    .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                    .query(`
+                        DELETE FROM saDocumentoVentaInfoIGTF
+                        WHERE rowguid IN (
+                            SELECT rowguid FROM saDocumentoVenta
+                            WHERE LTRIM(RTRIM(DOC_ORIG)) IN ('COBRO', 'COB') AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
+                        );
+
+                        DELETE FROM saDocumentoVenta
+                        WHERE LTRIM(RTRIM(DOC_ORIG)) IN ('COBRO', 'COB') AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num));
                     `);
 
                 await transaction.commit();
