@@ -58,7 +58,12 @@ router.get('/', async (req, res) => {
                     SELECT RTRIM(c.cob_num) AS cob_num, RTRIM(c.recibo) AS recibo, RTRIM(c.descrip) AS descrip,
                            RTRIM(c.co_cli) AS co_cli, RTRIM(cl.cli_des) AS cli_des,
                            c.fe_us_in AS fecha, c.anulado,
-                           ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) AS monto,
+                           CASE 
+                               WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN c.monto
+                               WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND ISNULL(c.tasa, 1) > 1 THEN 
+                                   ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) / c.tasa, 2)
+                               ELSE ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto)
+                           END AS monto,
                            RTRIM(c.co_mone) AS co_mone, 
                            CASE WHEN c.tasa <= 1.000001 THEN 
                                 ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), c.fecha, 120) ORDER BY t.fecha DESC), 1.0)
@@ -71,7 +76,7 @@ router.get('/', async (req, res) => {
                                     LEFT JOIN saDocumentoVenta d ON r.co_tipo_doc = d.co_tipo_doc 
                                                                 AND r.nro_doc = d.nro_doc
                                     WHERE r.cob_num = c.cob_num 
-                                      AND r.co_tipo_doc IN ('FACT  ', 'NDEB  ', 'N/DB  ', 'GIRO  ', 'AJPA  ', 'AJPM  ')
+                                      AND LTRIM(RTRIM(r.co_tipo_doc)) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')
                                     ORDER BY r.reng_num
                                     FOR XML PATH('')), 
                                    3, 
@@ -117,7 +122,8 @@ router.get('/facturas/pendientes', async (req, res) => {
                 let whereClauses = [
                     "d.saldo > 0",
                     "d.anulado = 0",
-                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')"
+                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')",
+                    "NOT (RTRIM(d.co_tipo_doc) = 'FACT' AND ((d.saldo / CASE WHEN ISNULL(d.tasa, 0) <= 0 THEN 1 ELSE d.tasa END) < 0.01 OR d.saldo <= 5.00))"
                 ];
 
                 if (search) {
@@ -237,7 +243,12 @@ router.get('/:cob_num', async (req, res) => {
                                RTRIM(c.co_cli) AS co_cli, RTRIM(cl.cli_des) AS cli_des, RTRIM(cl.rif) AS rif,
                                ISNULL(cl.porc_esp, 0) AS porc_esp, cl.contribu_e,
                                c.fe_us_in AS fecha, c.anulado,
-                               ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) AS monto,
+                               CASE 
+                                   WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN c.monto
+                                   WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND ISNULL(c.tasa, 1) > 1 THEN 
+                                       ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) / c.tasa, 2)
+                                   ELSE ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto)
+                               END AS monto,
                                RTRIM(c.co_mone) AS co_mone, 
                                CASE WHEN c.tasa <= 1.000001 THEN 
                                     ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), c.fecha, 120) ORDER BY t.fecha DESC), 1.0)
@@ -434,7 +445,7 @@ router.post('/:cob_num/anular', async (req, res) => {
                 // 3. Revertir saldo de los documentos cobrados
                 for (const line of resReng.recordset) {
                     const totalRebaje = Number(line.mont_cob || 0);
-                    if (totalRebaje > 0) {
+                    if (Math.abs(totalRebaje) > 0.001) {
                         await transaction.request()
                             .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                             .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
@@ -706,12 +717,13 @@ router.post('/', async (req, res) => {
                         }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                     } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
-                        // Tolerancia de redondeo al saldar en divisa:
-                        // Si la diferencia restante es menor a 0.01 USD (o menor a 5 Bs),
-                        // amortizar automáticamente el 100% del saldo en Bs del documento
+                        // Tolerancia contable de redondeo al saldar en divisa o bolívares:
+                        // Si la diferencia restante es menor o igual a 0.02 USD (o menor o igual a 25 Bs o a 0.02 * tasa),
+                        // amortizar automáticamente el 100% del saldo en Bs del documento para saldar a Bs 0,00 exactos
                         const diffPendingBs = docSaldo - totalRebaje;
                         const diffPendingUsd = rateCobro > 0 ? (diffPendingBs / rateCobro) : 0;
-                        if (diffPendingUsd < 0.01 || diffPendingBs <= 5.0) {
+                        const maxBsTolerance = Math.max(25.0, (rateCobro > 0 ? rateCobro : docTasa) * 0.02);
+                        if (diffPendingUsd <= 0.02 || diffPendingBs <= maxBsTolerance) {
                             finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
                             totalRebaje = docSaldo;
                         }
@@ -765,7 +777,7 @@ router.post('/', async (req, res) => {
                     .input('user', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         UPDATE saDocumentoVenta
-                        SET saldo = saldo - @rebaje,
+                        SET saldo = CASE WHEN (saldo - @rebaje) <= 2.00 OR (saldo - @rebaje) <= (@rebaje * 0.001) THEN 0.00 ELSE saldo - @rebaje END,
                             fe_us_mo = GETDATE(),
                             co_us_mo = @user
                         WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
@@ -780,7 +792,7 @@ router.post('/', async (req, res) => {
                         .input('user', sql.Char(6), padProfit(auditUser, 6))
                         .query(`
                             UPDATE saFacturaVenta
-                            SET saldo = saldo - @rebaje,
+                            SET saldo = CASE WHEN (saldo - @rebaje) <= 2.00 OR (saldo - @rebaje) <= (@rebaje * 0.001) THEN 0.00 ELSE saldo - @rebaje END,
                                 fe_us_mo = GETDATE(),
                                 co_us_mo = @user
                             WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
@@ -1146,6 +1158,114 @@ router.post('/', async (req, res) => {
                                 @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
                             )
                         `);
+                }
+            }
+
+            // 3.3 Procesar Ajuste por Saldo a Favor / Diferencia del Cliente (AJNM o AJPM)
+            if (data.ajuste_diferencia && (data.ajuste_diferencia.tipo === 'AJNM' || data.ajuste_diferencia.tipo === 'AJPM')) {
+                const ajTipo = data.ajuste_diferencia.tipo;
+                const ajMontoBs = Math.abs(Number(data.ajuste_diferencia.monto_bs) || 0);
+
+                // Validaciones de integridad contable simétricas:
+                // 1. No generar AJNM si ya hay documentos de crédito seleccionados (N/CR, AJNM, AJNA, ADEL)
+                const hasExistingCreditDoc = (data.renglones || []).some(r => {
+                    const t = (r.co_tipo_doc || '').trim().toUpperCase();
+                    return ['N/CR', 'NCR', 'AJNM', 'AJNA', 'ADEL'].includes(t);
+                });
+                // 2. No generar AJPM si ya hay documentos de ajuste positivo seleccionados (AJPM, AJPA)
+                const hasExistingPosAdj = (data.renglones || []).some(r => {
+                    const t = (r.co_tipo_doc || '').trim().toUpperCase();
+                    return ['AJPM', 'AJPA'].includes(t);
+                });
+
+                if (ajTipo === 'AJNM' && hasExistingCreditDoc) {
+                    console.warn(`[COBROS] Omitiendo generación de AJNM: El cobro ya incluye documentos de crédito (N/CR / Anticipo).`);
+                } else if (ajTipo === 'AJPM' && hasExistingPosAdj) {
+                    console.warn(`[COBROS] Omitiendo generación de AJPM: El cobro ya incluye documentos de ajuste positivo (AJPM / AJPA).`);
+                } else if (ajMontoBs > 0.01) {
+                    const isNeg = ajTipo === 'AJNM';
+                    const tipoSerie = isNeg ? 'V012' : 'V014';
+                    const consecName = isNeg ? 'DOC_VEN_AJNM' : 'DOC_VEN_AJPM';
+
+                    const corrAj = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: tipoSerie,
+                        co_consecutivos: [consecName],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoVenta',
+                        col: 'nro_doc'
+                    });
+                    const ajDocNum = corrAj.docNum;
+                    const ajSaldo = isNeg ? ajMontoBs : 0.00;
+                    const ajObserva = (isNeg 
+                        ? `ANTICIPO POR SALDO A FAVOR EN COBRO N° ${cobNum}`
+                        : `REINTEGRO / VUELTO EN COBRO N° ${cobNum}`
+                    ).substring(0, 120);
+
+                    await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                        .input('co_ven', sql.Char(6), padProfit(data.co_ven || '01', 6))
+                        .input('co_mone', sql.Char(6), padProfit(data.co_mone || 'USD', 6))
+                        .input('tasa', sql.Decimal(21, 8), data.tasa || 1.00)
+                        .input('observa', sql.VarChar(120), ajObserva)
+                        .input('doc_orig', sql.Char(6), padProfit('COBRO', 6))
+                        .input('tipo_origen', sql.Int, 0)
+                        .input('nro_orig', sql.VarChar(20), cobNum)
+                        .input('total_bruto', sql.Decimal(18, 2), ajMontoBs)
+                        .input('total_neto', sql.Decimal(18, 2), ajMontoBs)
+                        .input('saldo', sql.Decimal(18, 2), ajSaldo)
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saDocumentoVenta (
+                                co_tipo_doc, nro_doc, co_cli, co_ven, co_mone, tasa, observa,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, contrib,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                comis1, comis2, comis3, comis4, comis5, comis6, adicional, ven_ter,
+                                otros1, otros2, otros3, n_control, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
+                            ) VALUES (
+                                @co_tipo_doc, @nro_doc, @co_cli, @co_ven, @co_mone, @tasa, @observa,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, @nro_doc, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0.00, 0.00
+                            )
+                        `);
+
+                    const ajRengNum = nextRengNum++;
+                    const ajRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
+                    const ajRengGuid = ajRengGuidResult.recordset[0].guid;
+
+                    await transaction.request()
+                        .input('reng_num', sql.Int, ajRengNum)
+                        .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('mont_cob', sql.Decimal(18, 2), isNeg ? -ajMontoBs : ajMontoBs)
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('rowguid', sql.UniqueIdentifier, ajRengGuid)
+                        .query(`
+                            INSERT INTO saCobroDocReng (
+                                reng_num, cob_num, co_tipo_doc, nro_doc, mont_cob,
+                                dpcobro_porc_desc, dpcobro_monto, monto_retencion_iva, monto_retencion,
+                                co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo, rowguid
+                            ) VALUES (
+                                @reng_num, @cob_num, @co_tipo_doc, @nro_doc, @mont_cob,
+                                0.00, 0.00, 0.00, 0.00,
+                                @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
+                            )
+                        `);
+
+                    console.log(`[COBROS] Ajuste ${ajTipo} ${ajDocNum} (${ajMontoBs} Bs) registrado exitosamente.`);
                 }
             }
 
@@ -1622,6 +1742,17 @@ router.put('/:cob_num', async (req, res) => {
                             diffBs = diffBs + excess;
                         }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                    } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
+                        // Tolerancia contable de redondeo al saldar en divisa o bolívares:
+                        // Si la diferencia restante es menor o igual a 0.02 USD (o menor o igual a 25 Bs o a 0.02 * tasa),
+                        // amortizar automáticamente el 100% del saldo en Bs del documento para saldar a Bs 0,00 exactos
+                        const diffPendingBs = docSaldo - totalRebaje;
+                        const diffPendingUsd = rateCobro > 0 ? (diffPendingBs / rateCobro) : 0;
+                        const maxBsTolerance = Math.max(25.0, (rateCobro > 0 ? rateCobro : docTasa) * 0.02);
+                        if (diffPendingUsd <= 0.02 || diffPendingBs <= maxBsTolerance) {
+                            finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
+                            totalRebaje = docSaldo;
+                        }
                     }
                 }
 
@@ -1666,7 +1797,9 @@ router.put('/:cob_num', async (req, res) => {
                     .input('user', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         UPDATE saDocumentoVenta
-                        SET saldo = saldo - @rebaje, fe_us_mo = GETDATE(), co_us_mo = @user
+                        SET saldo = CASE WHEN (saldo - @rebaje) <= 2.00 OR (saldo - @rebaje) <= (@rebaje * 0.001) THEN 0.00 ELSE saldo - @rebaje END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @user
                         WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
                           AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
                     `);
@@ -1678,7 +1811,9 @@ router.put('/:cob_num', async (req, res) => {
                         .input('user', sql.Char(6), padProfit(auditUser, 6))
                         .query(`
                             UPDATE saFacturaVenta
-                            SET saldo = saldo - @rebaje, fe_us_mo = GETDATE(), co_us_mo = @user
+                            SET saldo = CASE WHEN (saldo - @rebaje) <= 2.00 OR (saldo - @rebaje) <= (@rebaje * 0.001) THEN 0.00 ELSE saldo - @rebaje END,
+                                fe_us_mo = GETDATE(),
+                                co_us_mo = @user
                             WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
                         `);
                 }
@@ -2310,7 +2445,7 @@ const eliminarCobroHandler = async (req, res) => {
                 if (!cob.anulado) {
                     for (const line of resReng.recordset) {
                         const totalRebaje = Number(line.mont_cob || 0);
-                        if (totalRebaje > 0) {
+                        if (Math.abs(totalRebaje) > 0.001) {
                             await transaction.request()
                                 .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                                 .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))

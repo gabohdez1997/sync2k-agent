@@ -103,6 +103,18 @@ const DOC_TYPE_CONFIG = {
         co_consecutivos: ['DOC_VEN_N/CR', 'NCR_NUM', 'N_CR'],
         table: 'saDocumentoVenta',
         col: 'nro_doc'
+    },
+    AJUSTE_NEGATIVO_VENTA: {
+        co_tipo_serie: 'V012',
+        co_consecutivos: ['DOC_VEN_AJNM', 'AJNM_NUM', 'AJNM'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc'
+    },
+    AJUSTE_POSITIVO_VENTA: {
+        co_tipo_serie: 'V014',
+        co_consecutivos: ['DOC_VEN_AJPM', 'AJPM_NUM', 'AJPM'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc'
     }
 };
 

@@ -67,6 +67,7 @@ router.get('/', async (req, res) => {
                            RTRIM(d.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des, RTRIM(cl.rif) AS rif,
                            d.fec_emis, d.fec_venc, d.fec_reg, d.fe_us_in AS fec_us_in, d.fe_us_mo AS fec_us_mo, d.anulado,
                            RTRIM(d.co_mone) AS co_mone, d.tasa, d.total_neto, d.total_bruto, d.monto_imp,
+                           ISNULL(d.otros1, 0) AS otros1,
                            RTRIM(d.co_tipo_doc) AS co_tipo_doc, RTRIM(d.nro_doc) AS nro_doc, RTRIM(d.n_control) AS n_control,
                            RTRIM(d.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(d.co_us_in) AS co_us_in, RTRIM(d.co_sucu_in) AS co_sucu_in
                     FROM saDevolucionCliente d
@@ -115,6 +116,7 @@ router.get('/:doc_num', async (req, res) => {
                                d.fec_emis, d.fec_venc, d.fec_reg, d.fe_us_in AS fec_us_in, d.fe_us_mo AS fec_us_mo, d.anulado,
                                RTRIM(d.co_mone) AS co_mone, d.tasa,
                                d.total_bruto, d.monto_imp, d.total_neto, d.saldo,
+                               ISNULL(d.otros1, 0) AS otros1,
                                RTRIM(d.co_tipo_doc) AS co_tipo_doc, RTRIM(d.nro_doc) AS nro_doc, RTRIM(d.n_control) AS n_control,
                                RTRIM(d.comentario) AS comentario,
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
@@ -298,7 +300,8 @@ router.post('/', async (req, res) => {
 
             // Consultar factura original
             const facCheck = await pool.request().input('doc_num', sql.VarChar, facturaNum).query(`
-                SELECT doc_num, co_cli, anulado, tasa, co_mone, co_ven, co_cond, co_tran, co_sucu_in
+                SELECT doc_num, co_cli, anulado, tasa, co_mone, co_ven, co_cond, co_tran, co_sucu_in,
+                       total_bruto, monto_imp, ISNULL(otros1, 0) AS otros1, total_neto
                 FROM saFacturaVenta
                 WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
             `);
@@ -400,7 +403,22 @@ router.post('/', async (req, res) => {
                 totalImpBs   += impBs;
             });
 
-            const totalNetoBs = Math.round((totalBrutoBs + totalImpBs) * 100) / 100;
+            const facOtros1 = Number(facOrig.otros1 || 0);
+            const facBruto = Number(facOrig.total_bruto || 0);
+
+            // Calcular IGTF proporcional a los artículos devueltos
+            let igtfDevBs = 0;
+            if (facOtros1 > 0 && facBruto > 0) {
+                const ratio = Math.min(1, Math.max(0, totalBrutoBs / facBruto));
+                // Si la devolución es total (o con diferencia insignificante en bruto), devuelve el 100% exacto del IGTF original
+                if (ratio >= 0.9999 || Math.abs(totalBrutoBs - facBruto) <= 0.05) {
+                    igtfDevBs = facOtros1;
+                } else {
+                    igtfDevBs = Math.round((facOtros1 * ratio) * 100) / 100;
+                }
+            }
+
+            const totalNetoBs = Math.round((totalBrutoBs + totalImpBs + igtfDevBs) * 100) / 100;
 
             // Determinar sucursal
             const branchCodes = srv.profit_branch_codes || [];
@@ -456,7 +474,7 @@ router.post('/', async (req, res) => {
                 rH.input('deMonto_Imp',       sql.Decimal(18, 2),   totalImpBs);
                 rH.input('deMonto_Imp2',      sql.Decimal(18, 2),   0);
                 rH.input('deMonto_Imp3',      sql.Decimal(18, 2),   0);
-                rH.input('deOtros1',          sql.Decimal(18, 2),   0);
+                rH.input('deOtros1',          sql.Decimal(18, 2),   igtfDevBs);
                 rH.input('deOtros2',          sql.Decimal(18, 2),   0);
                 rH.input('deOtros3',          sql.Decimal(18, 2),   0);
                 rH.input('deTotal_Neto',      sql.Decimal(18, 2),   totalNetoBs);
@@ -643,7 +661,7 @@ router.post('/', async (req, res) => {
                 rDoc.input('sImpfis', sql.VarChar(20), null);
                 rDoc.input('sImpfisfac', sql.VarChar(15), null);
                 rDoc.input('sImp_nro_z', sql.Char(15), null);
-                rDoc.input('deOtros1', sql.Decimal(18, 2), 0);
+                rDoc.input('deOtros1', sql.Decimal(18, 2), igtfDevBs);
                 rDoc.input('deOtros2', sql.Decimal(18, 2), 0);
                 rDoc.input('deOtros3', sql.Decimal(18, 2), 0);
                 rDoc.input('sCampo1', sql.VarChar(60), null);
@@ -660,7 +678,29 @@ router.post('/', async (req, res) => {
                 rDoc.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
                 rDoc.input('sMaquina', sql.VarChar(60), 'SYNC2K');
 
-                await rDoc.execute('pInsertarDocumentoVenta');
+                const resDoc = await rDoc.execute('pInsertarDocumentoVenta');
+
+                // Registrar IGTF en saDocumentoVentaInfoIGTF para la Nota de Crédito si aplica
+                if (igtfDevBs > 0) {
+                    let docGuid = resDoc.recordset?.[0]?.rowguid;
+                    if (!docGuid) {
+                        const gRes = await transaction.request()
+                            .input('nro_doc', sql.VarChar, docNumNCR)
+                            .query(`SELECT rowguid FROM saDocumentoVenta WHERE LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc)) AND co_tipo_doc = 'N/CR'`);
+                        docGuid = gRes.recordset?.[0]?.rowguid;
+                    }
+                    if (docGuid) {
+                        const baseIgtfDev = Math.round((igtfDevBs / 0.03) * 100) / 100;
+                        await transaction.request()
+                            .input('rowguid', sql.UniqueIdentifier, docGuid)
+                            .input('base_imponible', sql.Decimal(18, 2), baseIgtfDev)
+                            .input('porc_aplic', sql.Decimal(18, 2), 3.00)
+                            .query(`
+                                INSERT INTO saDocumentoVentaInfoIGTF (rowguid, base_imponible, porc_aplic)
+                                VALUES (@rowguid, @base_imponible, @porc_aplic)
+                            `);
+                    }
+                }
 
                 await transaction.commit();
 
@@ -668,6 +708,9 @@ router.post('/', async (req, res) => {
                     doc_num: docNumDev,
                     nro_doc: docNumNCR,
                     factura_origen: facturaNum,
+                    total_bruto_bs: totalBrutoBs,
+                    monto_imp_bs: totalImpBs,
+                    otros1_bs: igtfDevBs,
                     total_neto_bs: totalNetoBs,
                     total_neto_usd: Math.round((totalNetoBs / tasaDoc) * 100) / 100,
                     tasa: tasaDoc
