@@ -62,6 +62,17 @@ router.get('/', async (req, res) => {
                                WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN c.monto
                                WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND ISNULL(c.tasa, 1) > 1 THEN 
                                    ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) / c.tasa, 2)
+                               ELSE ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto) / CASE WHEN ISNULL(c.tasa, 1) > 0 THEN c.tasa ELSE 1 END, 2)
+                           END AS monto_usd,
+                           CASE 
+                               WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN ROUND(c.monto * ISNULL(c.tasa, 1), 2)
+                               WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') THEN ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0)
+                               ELSE ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto)
+                           END AS monto_bs,
+                           CASE 
+                               WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN c.monto
+                               WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND ISNULL(c.tasa, 1) > 1 THEN 
+                                   ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) / c.tasa, 2)
                                ELSE ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto)
                            END AS monto,
                            RTRIM(c.co_mone) AS co_mone, 
@@ -247,6 +258,17 @@ router.get('/:cob_num', async (req, res) => {
                                    WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN c.monto
                                    WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND ISNULL(c.tasa, 1) > 1 THEN 
                                        ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) / c.tasa, 2)
+                                   ELSE ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto) / CASE WHEN ISNULL(c.tasa, 1) > 0 THEN c.tasa ELSE 1 END, 2)
+                               END AS monto_usd,
+                               CASE 
+                                   WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN ROUND(c.monto * ISNULL(c.tasa, 1), 2)
+                                   WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') THEN ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0)
+                                   ELSE ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto)
+                               END AS monto_bs,
+                               CASE 
+                                   WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND c.monto > 0 THEN c.monto
+                                   WHEN RTRIM(c.co_mone) IN ('USD', 'US$', 'US') AND ISNULL(c.tasa, 1) > 1 THEN 
+                                       ROUND(ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), 0) / c.tasa, 2)
                                    ELSE ISNULL((SELECT SUM(mont_doc) FROM saCobroTPReng WHERE cob_num = c.cob_num), c.monto)
                                END AS monto,
                                RTRIM(c.co_mone) AS co_mone, 
@@ -268,7 +290,9 @@ router.get('/:cob_num', async (req, res) => {
                                ISNULL(d.monto_imp, 0) AS monto_imp,
                                ISNULL(d.total_neto, 0) AS total_neto,
                                RTRIM(d.doc_orig) AS doc_orig,
-                               RTRIM(d.nro_orig) AS nro_orig
+                               RTRIM(d.nro_orig) AS nro_orig,
+                               ISNULL(RTRIM(d.co_sucu_in), RTRIM(r.co_sucu_in)) AS co_sucu_in,
+                               ISNULL(RTRIM(d.impfis), '') AS impfis
                         FROM saCobroDocReng r
                         LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                     AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
