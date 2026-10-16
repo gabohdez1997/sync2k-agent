@@ -653,6 +653,30 @@ router.get('/cuenta-detallada', async (req, res) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
                 const r = pool.request();
+
+                // Precargar tasas históricas en memoria para evitar costosos subqueries correlacionados
+                let historicalRates = [];
+                try {
+                    const tasasRes = await pool.request().query(`
+                        SELECT fecha, tasa_v 
+                        FROM saTasa 
+                        WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'US')
+                        ORDER BY fecha DESC
+                    `);
+                    historicalRates = tasasRes.recordset.map(t => ({
+                        time: new Date(t.fecha).getTime(),
+                        tasa: parseFloat(t.tasa_v) || 1.0
+                    }));
+                } catch (eTasa) {
+                    console.warn(`[REPORTES/CUENTA-DETALLADA] Error precargando saTasa en sede ${srv.id}:`, eTasa.message);
+                }
+
+                function getHistoricalRate(date) {
+                    if (!date || historicalRates.length === 0) return null;
+                    const targetTime = new Date(date).getTime();
+                    const found = historicalRates.find(r => r.time <= targetTime);
+                    return found ? found.tasa : null;
+                }
                 
                 let whereClauses = [];
 
@@ -668,9 +692,9 @@ router.get('/cuenta-detallada', async (req, res) => {
                 }
 
                 if (status === "vencidos") {
-                    whereClauses.push("CAST(d.fec_venc AS DATE) < CAST(GETDATE() AS DATE)");
+                    whereClauses.push("d.saldo > 0 AND d.anulado = 0 AND CAST(d.fec_venc AS DATE) < CAST(GETDATE() AS DATE)");
                 } else if (status === "por_vencer") {
-                    whereClauses.push("CAST(d.fec_venc AS DATE) >= CAST(GETDATE() AS DATE)");
+                    whereClauses.push("d.saldo > 0 AND d.anulado = 0 AND CAST(d.fec_venc AS DATE) >= CAST(GETDATE() AS DATE)");
                 }
 
                 const whereSQL = whereClauses.length > 0 ? "WHERE " + whereClauses.join(" AND ") : "";
@@ -695,7 +719,6 @@ router.get('/cuenta-detallada', async (req, res) => {
                         d.doc_tipo_pagado,
                         d.devol_tipo_doc,
                         d.devol_num_doc,
-                        d.tasa_bcv_fecha,
                         d.source_table
                     FROM (
                         SELECT 
@@ -712,53 +735,51 @@ router.get('/cuenta-detallada', async (req, res) => {
                             RTRIM(d.co_us_in) AS co_us_in,
                             RTRIM(d.co_mone) AS co_mone, 
                             d.tasa AS doc_tasa,
-                            COALESCE(
-                                (
-                                    SELECT TOP 1 orig.tasa 
-                                    FROM saDocumentoVenta orig 
-                                    WHERE orig.nro_doc = d.nro_orig 
-                                      AND orig.co_tipo_doc = d.doc_orig 
-                                      AND orig.co_cli = d.co_cli
-                                ),
-                                (
-                                    SELECT TOP 1 fact.tasa 
-                                    FROM saDocumentoVenta fact 
-                                    WHERE fact.co_tipo_doc = 'FACT' 
-                                      AND fact.co_cli = d.co_cli
-                                      AND fact.nro_doc = (
-                                          SELECT TOP 1 r.num_doc 
-                                          FROM saDevolucionClienteReng r 
-                                          WHERE r.doc_num = d.nro_orig
-                                      )
-                                )
-                            ) AS tasa_doc_orig,
+                            CASE 
+                                WHEN d.co_tipo_doc IN ('N/CR', 'NCR') THEN
+                                    COALESCE(
+                                        (
+                                            SELECT TOP 1 orig.tasa 
+                                            FROM saDocumentoVenta orig 
+                                            WHERE orig.nro_doc = d.nro_orig 
+                                              AND orig.co_tipo_doc = d.doc_orig 
+                                              AND orig.co_cli = d.co_cli
+                                        ),
+                                        (
+                                            SELECT TOP 1 fact.tasa 
+                                            FROM saDocumentoVenta fact 
+                                            WHERE fact.co_tipo_doc = 'FACT' 
+                                              AND fact.co_cli = d.co_cli
+                                              AND fact.nro_doc = (
+                                                  SELECT TOP 1 r.num_doc 
+                                                  FROM saDevolucionClienteReng r 
+                                                  WHERE r.doc_num = d.nro_orig
+                                              )
+                                        )
+                                    )
+                                ELSE NULL
+                            END AS tasa_doc_orig,
                             RTRIM(d.nro_orig) AS nro_orig,
                             RTRIM(d.doc_orig) AS doc_orig,
                             RTRIM(d.co_tipo_doc) AS doc_tipo_pagado,
-                            (
-                                SELECT TOP 1 RTRIM(r.tipo_doc)
-                                FROM saDevolucionClienteReng r
-                                WHERE r.doc_num = d.nro_orig
-                            ) AS devol_tipo_doc,
-                            (
-                                SELECT TOP 1 RTRIM(r.num_doc)
-                                FROM saDevolucionClienteReng r
-                                WHERE r.doc_num = d.nro_orig
-                            ) AS devol_num_doc,
-                            (
-                                SELECT TOP 1 t.tasa_v
-                                FROM saTasa t
-                                WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                                  AND t.fecha <= COALESCE(
-                                      (SELECT TOP 1 orig.fec_emis 
-                                       FROM saDocumentoVenta orig 
-                                       WHERE orig.nro_doc = d.nro_orig 
-                                         AND orig.co_tipo_doc = d.doc_orig 
-                                         AND orig.co_cli = d.co_cli),
-                                      d.fec_emis
-                                  )
-                                ORDER BY t.fecha DESC
-                            ) AS tasa_bcv_fecha,
+                            CASE 
+                                WHEN RTRIM(d.doc_orig) = 'DEVO' THEN
+                                    (
+                                        SELECT TOP 1 RTRIM(r.tipo_doc)
+                                        FROM saDevolucionClienteReng r
+                                        WHERE r.doc_num = d.nro_orig
+                                    )
+                                ELSE NULL
+                            END AS devol_tipo_doc,
+                            CASE 
+                                WHEN RTRIM(d.doc_orig) = 'DEVO' THEN
+                                    (
+                                        SELECT TOP 1 RTRIM(r.num_doc)
+                                        FROM saDevolucionClienteReng r
+                                        WHERE r.doc_num = d.nro_orig
+                                    )
+                                ELSE NULL
+                            END AS devol_num_doc,
                             'DOC' AS source_table
                         FROM saDocumentoVenta d
                         LEFT JOIN saCliente c ON d.co_cli = c.co_cli
@@ -776,6 +797,7 @@ router.get('/cuenta-detallada', async (req, res) => {
                             reng.mont_cob AS saldo, 
                             cob.anulado, 
                             RTRIM(cob.co_ven) AS co_ven, 
+                            RTRIM(cob.co_us_in) AS co_us_in,
                             RTRIM(cob.co_mone) AS co_mone, 
                             cob.tasa AS doc_tasa,
                             NULL AS tasa_doc_orig,
@@ -784,20 +806,6 @@ router.get('/cuenta-detallada', async (req, res) => {
                             RTRIM(reng.co_tipo_doc) AS doc_tipo_pagado,
                             NULL AS devol_tipo_doc,
                             NULL AS devol_num_doc,
-                            (
-                                SELECT TOP 1 t.tasa_v
-                                FROM saTasa t
-                                WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                                  AND t.fecha <= COALESCE(
-                                      (SELECT TOP 1 orig.fec_emis 
-                                       FROM saDocumentoVenta orig 
-                                       WHERE orig.nro_doc = reng.nro_doc 
-                                         AND orig.co_tipo_doc = reng.co_tipo_doc 
-                                         AND orig.co_cli = cob.co_cli),
-                                      cob.fecha
-                                  )
-                                ORDER BY t.fecha DESC
-                            ) AS tasa_bcv_fecha,
                             'COB' AS source_table
                         FROM saCobroDocReng reng
                         JOIN saCobro cob ON reng.cob_num = cob.cob_num
@@ -817,7 +825,8 @@ router.get('/cuenta-detallada', async (req, res) => {
                         docTasaVal = tasaDocOrig;
                     }
                     
-                    const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (parseFloat(row.tasa_bcv_fecha) || currentRate || 1.0);
+                    const tasaBcv = docTasaVal <= 1.0 ? getHistoricalRate(row.fec_emis) : null;
+                    const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (tasaBcv || currentRate || 1.0);
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
 
