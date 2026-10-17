@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers, getExchangeRate } = require('../db');
+const { sql, getPool, getMasterPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
@@ -58,6 +58,7 @@ router.get('/', async (req, res) => {
                         OR cl.rif LIKE @search_all
                         OR c.n_control LIKE @search_all
                         OR c.descrip LIKE @search_all
+                        OR u_in.Desc_Usuario LIKE @search_all
                         OR EXISTS (SELECT 1 FROM saNotaDespachoVentaReng r WHERE r.doc_num = c.doc_num AND r.num_doc LIKE @search_all)
                     )`);
                 }
@@ -124,6 +125,9 @@ router.get('/', async (req, res) => {
                         RTRIM(c.n_control) AS n_control,
                         c.status,
                         RTRIM(c.co_us_in) AS co_us_in,
+                        RTRIM(u_in.Desc_Usuario) AS despachador_name,
+                        RTRIM(c.co_us_mo) AS co_us_mo,
+                        RTRIM(u_mo.Desc_Usuario) AS editor_name,
                         RTRIM(c.co_sucu_in) AS co_sucu_in,
                         RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                         RTRIM(c.comentario) AS comentario,
@@ -170,6 +174,8 @@ router.get('/', async (req, res) => {
                         '${srv.id}' AS sede_id
                     FROM saNotaDespachoVenta c
                     LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
+                    LEFT JOIN MasterProfitPro.dbo.MpUsuario u_in ON LTRIM(RTRIM(c.co_us_in)) = RTRIM(u_in.Cod_Usuario)
+                    LEFT JOIN MasterProfitPro.dbo.MpUsuario u_mo ON LTRIM(RTRIM(c.co_us_mo)) = RTRIM(u_mo.Cod_Usuario)
                     WHERE ${whereSQL}
                     ORDER BY c.fec_emis DESC, c.doc_num DESC
                 `;
@@ -420,6 +426,9 @@ router.get('/:doc_num', async (req, res) => {
                             RTRIM(c.n_control) AS n_control,
                             RTRIM(c.comentario) AS comentario,
                             RTRIM(c.co_us_in) AS co_us_in,
+                            RTRIM(u_in.Desc_Usuario) AS despachador_name,
+                            RTRIM(c.co_us_mo) AS co_us_mo,
+                            RTRIM(u_mo.Desc_Usuario) AS editor_name,
                             RTRIM(c.co_sucu_in) AS co_sucu_in,
                             RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                             '${srv.name || srv.id}' AS sede_nombre,
@@ -428,11 +437,41 @@ router.get('/:doc_num', async (req, res) => {
                         LEFT JOIN saCliente cl ON c.co_cli = cl.co_cli
                         LEFT JOIN saCondicionPago cd ON c.co_cond = cd.co_cond
                         LEFT JOIN saTransporte t ON c.co_tran = t.co_tran
+                        LEFT JOIN MasterProfitPro.dbo.MpUsuario u_in ON LTRIM(RTRIM(c.co_us_in)) = RTRIM(u_in.Cod_Usuario)
+                        LEFT JOIN MasterProfitPro.dbo.MpUsuario u_mo ON LTRIM(RTRIM(c.co_us_mo)) = RTRIM(u_mo.Cod_Usuario)
                         WHERE c.doc_num = @doc_num
                     `);
 
                 if (!headRes.recordset || headRes.recordset.length === 0) continue;
                 const header = headRes.recordset[0];
+
+                // Fallback para nombres de usuario si el cross-database join no obtuvo resultado
+                if (!header.despachador_name && header.co_us_in) {
+                    try {
+                        const mPool = await getMasterPool(srv.id);
+                        const uRes = await mPool.request()
+                            .input('co_us', sql.Char(10), header.co_us_in.trim())
+                            .query("SELECT RTRIM(Desc_Usuario) AS nombre FROM MpUsuario WHERE RTRIM(Cod_Usuario) = RTRIM(@co_us)");
+                        if (uRes.recordset && uRes.recordset.length > 0) {
+                            header.despachador_name = uRes.recordset[0].nombre;
+                        }
+                    } catch (uErr) {
+                        // Silencioso
+                    }
+                }
+                if (!header.editor_name && header.co_us_mo) {
+                    try {
+                        const mPool = await getMasterPool(srv.id);
+                        const uRes = await mPool.request()
+                            .input('co_us_mo', sql.Char(10), header.co_us_mo.trim())
+                            .query("SELECT RTRIM(Desc_Usuario) AS nombre FROM MpUsuario WHERE RTRIM(Cod_Usuario) = RTRIM(@co_us_mo)");
+                        if (uRes.recordset && uRes.recordset.length > 0) {
+                            header.editor_name = uRes.recordset[0].nombre;
+                        }
+                    } catch (uErr) {
+                        // Silencioso
+                    }
+                }
 
                 const rengRes = await pool.request()
                     .input('doc_num', sql.Char(20), padProfit(doc_num, 20))
