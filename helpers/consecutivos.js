@@ -115,6 +115,30 @@ const DOC_TYPE_CONFIG = {
         co_consecutivos: ['DOC_VEN_AJPM', 'AJPM_NUM', 'AJPM'],
         table: 'saDocumentoVenta',
         col: 'nro_doc'
+    },
+    AJUSTE_NEGATIVO_COMPRA: {
+        co_tipo_serie: 'C008',
+        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
+    },
+    AJNA: {
+        co_tipo_serie: 'C008',
+        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
+    },
+    AJUSTE_POSITIVO_COMPRA: {
+        co_tipo_serie: 'C010',
+        co_consecutivos: ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
+    },
+    AJPA: {
+        co_tipo_serie: 'C010',
+        co_consecutivos: ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc'
     }
 };
 

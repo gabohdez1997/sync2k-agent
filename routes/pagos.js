@@ -114,7 +114,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                 let whereClauses = [
                     "d.saldo > 0",
                     "d.anulado = 0",
-                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR')"
+                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR', 'AJNA')"
                 ];
 
                 if (co_prov) {
@@ -903,9 +903,10 @@ router.post('/', async (req, res) => {
                 let docMone = 'BS';
                 let docNroFact = line.nro_fact || line.nro_doc;
                 let docNControl = '';
+                let docNroOrig = '';
 
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR'];
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR', 'AJNA'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
@@ -914,6 +915,7 @@ router.post('/', async (req, res) => {
                             SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, 
                                    RTRIM(ISNULL(nro_fact, nro_doc)) AS nro_fact,
                                    RTRIM(ISNULL(n_control, '')) AS n_control,
+                                   RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
                                    CONVERT(VARCHAR(10), fec_emis, 120) AS fec_emis_str
                             FROM saDocumentoCompra
                             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
@@ -928,6 +930,7 @@ router.post('/', async (req, res) => {
                         docMone = docInfo.recordset[0].co_mone || 'BS';
                         docNroFact = docInfo.recordset[0].nro_fact || docNroFact;
                         docNControl = docInfo.recordset[0].n_control || '';
+                        docNroOrig = docInfo.recordset[0].nro_orig || '';
                     }
                 }
 
@@ -1091,6 +1094,9 @@ router.post('/', async (req, res) => {
                     const baseImponible = Number(retIvaMatch?.base_imponible || 0);
                     const montoDoc = Number(retIvaMatch?.monto_documento || totalRebaje);
                     const alicuota = Number(retIvaMatch?.alicuota || 16);
+                    const isNcLine = ['N/CR', 'NCR'].includes(line.co_tipo_doc.trim().toUpperCase());
+                    const retDocType = isNcLine ? 'N/CR' : 'FACT';
+                    const retDocAfectado = retIvaMatch?.numero_documento_afectado || retIvaMatch?.nro_doc_afectado || docNroOrig || '0';
 
                     await transaction.request()
                         .input('reng_num', sql.Int, 1)
@@ -1098,14 +1104,14 @@ router.post('/', async (req, res) => {
                         .input('rif_contribuyente', sql.Char(10), (srv.rif || 'J401750354').substring(0, 10))
                         .input('periodo_impositivo', sql.Decimal(6), Number(periodStr))
                         .input('fecha_documento', sql.SmallDateTime, tsDate)
-                        .input('tipo_documento', sql.Char(4), 'FACT')
+                        .input('tipo_documento', sql.Char(4), padProfit(retDocType, 4))
                         .input('rif_comprador', sql.Char(10), rifComprador.substring(0, 10))
                         .input('numero_documento', sql.Char(20), padProfit(docNroFact, 20))
                         .input('numero_control_documento', sql.Char(20), padProfit(docNControl, 20))
                         .input('monto_documento', sql.Decimal(15, 2), montoDoc)
                         .input('base_imponible', sql.Decimal(15, 2), baseImponible)
                         .input('monto_ret_imp', sql.Decimal(15, 2), adjustedMontoRetencionIva)
-                        .input('numero_documento_afectado', sql.Char(20), '0                   ')
+                        .input('numero_documento_afectado', sql.Char(20), padProfit(retDocAfectado, 20))
                         .input('num_comprobante', sql.Char(14), comprobanteSeniat.substring(0, 14))
                         .input('monto_excento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_excento || 0))
                         .input('alicuota', sql.Decimal(5, 2), alicuota)
@@ -1235,6 +1241,84 @@ router.post('/', async (req, res) => {
                                 NULL, NULL, NEWID(), NULL
                             )
                         `);
+                }
+            }
+
+            // 3.3 Procesar Ajuste por Saldo a Favor / Diferencia de Compra (AJNA)
+            if (data.ajuste_diferencia && data.ajuste_diferencia.tipo === 'AJNA') {
+                const ajMontoBs = Math.abs(Number(data.ajuste_diferencia.monto_bs) || 0);
+                if (ajMontoBs > 0.01) {
+                    const corrAj = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: 'C008',
+                        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoCompra',
+                        col: 'nro_doc'
+                    });
+                    const ajDocNum = corrAj.docNum;
+                    const ajObserva = (`ANTICIPO / AJUSTE POR SALDO A FAVOR EN PAGO N° ${cobNum}`).substring(0, 120);
+
+                    await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNA', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
+                        .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
+                        .input('tasa', sql.Decimal(21, 8), Number(data.tasa || 1))
+                        .input('observa', sql.VarChar(120), ajObserva)
+                        .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
+                        .input('tipo_origen', sql.Int, 0)
+                        .input('nro_orig', sql.VarChar(20), cobNum)
+                        .input('total_bruto', sql.Decimal(18, 2), ajMontoBs)
+                        .input('total_neto', sql.Decimal(18, 2), ajMontoBs)
+                        .input('saldo', sql.Decimal(18, 2), ajMontoBs)
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saDocumentoCompra (
+                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                otros1, otros2, otros3, adicional, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
+                            ) VALUES (
+                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0, 0
+                            )
+                        `);
+
+                    const ajRengNum = nextRengNum++;
+                    const ajRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
+                    const ajRengGuid = ajRengGuidResult.recordset[0].guid;
+
+                    await transaction.request()
+                        .input('reng_num', sql.Int, ajRengNum)
+                        .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
+                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNA', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('mont_cob', sql.Decimal(18, 2), ajMontoBs)
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('rowguid', sql.UniqueIdentifier, ajRengGuid)
+                        .query(`
+                            INSERT INTO saPagoDocReng (
+                                reng_num, cob_num, co_tipo_doc, nro_doc, mont_cob,
+                                dppago_porc_desc, dppago_monto, monto_retencion_iva, monto_retencion,
+                                co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo, rowguid
+                            ) VALUES (
+                                @reng_num, @cob_num, @co_tipo_doc, @nro_doc, @mont_cob,
+                                0.00, 0.00, 0.00, 0.00,
+                                @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
+                            )
+                        `);
+                    console.log(`✨ [PAGOS] AJNA generado con éxito: ${ajDocNum} por ${ajMontoBs} Bs.`);
                 }
             }
 
