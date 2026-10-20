@@ -868,5 +868,54 @@ function sendViaSocket(ip, port, data, res) {
     });
 }
 
+// POST /api/v1/impresion/imprimir-fiscal — Enviar factura a la impresora fiscal vía micro-servicio
+router.post('/imprimir-fiscal', async (req, res) => {
+    const { ip, port, serial_port, invoice } = req.body;
+    const printerPort = parseInt(port || '8088');
+
+    if (!ip || !invoice) {
+        return res.status(400).json({ success: false, message: 'Faltan parámetros requeridos (ip, invoice).' });
+    }
+
+    let cleanHost = ip.trim();
+    if (cleanHost.includes('\\') || cleanHost.includes('/')) {
+        cleanHost = cleanHost.replace(/^[\\\/]+/, '').split(/[\\\/]/)[0];
+    }
+
+    const docNum = invoice.doc_num || invoice.invoice_num || 'N/A';
+    console.log(`[IMPRESION FISCAL] Enviando factura ${docNum} a micro-servicio fiscal http://${cleanHost}:${printerPort}/factura...`);
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+
+        const targetUrl = `http://${cleanHost}:${printerPort}/factura?port=${encodeURIComponent(serial_port || 'COM4')}`;
+        const httpRes = await fetch(targetUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ invoice }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (httpRes.ok) {
+            const data = await httpRes.json();
+            return res.status(200).json(data);
+        } else {
+            return res.status(httpRes.status).json({
+                success: false,
+                message: `El micro-servicio fiscal respondió con código ${httpRes.status}`
+            });
+        }
+    } catch (err) {
+        console.error('[IMPRESION FISCAL ERROR]:', err);
+        return res.status(500).json({
+            success: false,
+            message: `No se pudo conectar con el micro-servicio fiscal en ${cleanHost}:${printerPort}: ${err.message}`
+        });
+    }
+});
+
 module.exports = router;
+
 

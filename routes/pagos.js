@@ -1244,23 +1244,29 @@ router.post('/', async (req, res) => {
                 }
             }
 
-            // 3.3 Procesar Ajuste por Saldo a Favor / Diferencia de Compra (AJNA)
-            if (data.ajuste_diferencia && data.ajuste_diferencia.tipo === 'AJNA') {
+            // 3.3 Procesar Ajuste por Saldo a Favor / Diferencia de Compra (AJPA / Serie C010)
+            if (data.ajuste_diferencia && (data.ajuste_diferencia.tipo === 'AJPA' || data.ajuste_diferencia.tipo === 'AJNA')) {
+                const ajTipo = data.ajuste_diferencia.tipo === 'AJNA' ? 'AJNA' : 'AJPA';
+                const coTipoSerie = ajTipo === 'AJNA' ? 'C008' : 'C010';
+                const coConsecutivos = ajTipo === 'AJNA' 
+                    ? ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA']
+                    : ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'];
+
                 const ajMontoBs = Math.abs(Number(data.ajuste_diferencia.monto_bs) || 0);
                 if (ajMontoBs > 0.01) {
                     const corrAj = await getProximoConsecutivo({
                         runner: transaction,
-                        co_tipo_serie: 'C008',
-                        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+                        co_tipo_serie: coTipoSerie,
+                        co_consecutivos: coConsecutivos,
                         co_sucur: sucuCode,
                         table: 'saDocumentoCompra',
                         col: 'nro_doc'
                     });
                     const ajDocNum = corrAj.docNum;
-                    const ajObserva = (`ANTICIPO / AJUSTE POR SALDO A FAVOR EN PAGO N° ${cobNum}`).substring(0, 120);
+                    const ajObserva = (`PAGO N° ${cobNum} de proveedor ${data.co_prov}`).substring(0, 120);
 
                     await transaction.request()
-                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNA', 6))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
                         .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
                         .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
@@ -1301,7 +1307,7 @@ router.post('/', async (req, res) => {
                     await transaction.request()
                         .input('reng_num', sql.Int, ajRengNum)
                         .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
-                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNA', 6))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
                         .input('mont_cob', sql.Decimal(18, 2), ajMontoBs)
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
@@ -1318,7 +1324,7 @@ router.post('/', async (req, res) => {
                                 @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
                             )
                         `);
-                    console.log(`✨ [PAGOS] AJNA generado con éxito: ${ajDocNum} por ${ajMontoBs} Bs.`);
+                    console.log(`✨ [PAGOS] ${ajTipo} generado con éxito: ${ajDocNum} por ${ajMontoBs} Bs.`);
                 }
             }
 

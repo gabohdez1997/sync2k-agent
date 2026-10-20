@@ -161,6 +161,95 @@ while ($true) {
                 $respObj = @{ success = $false; message = "No se pudo abrir $targetCom." }
             }
         }
+        elseif ($pathOnly -in @("/factura", "/imprimir", "/imprimir-fiscal")) {
+            $printer = New-Object TfhkaNet.IF.VE.Tfhka
+            if ($printer.OpenFpctrl($targetCom)) {
+                try {
+                    $bodyText = ""
+                    $doubleCrlf = $requestText.IndexOf("`r`n`r`n")
+                    if ($doubleCrlf -ge 0) {
+                        $bodyText = $requestText.Substring($doubleCrlf + 4)
+                    } else {
+                        $doubleLf = $requestText.IndexOf("`n`n")
+                        if ($doubleLf -ge 0) { $bodyText = $requestText.Substring($doubleLf + 2) }
+                    }
+
+                    $bodyJson = if ($bodyText) { $bodyText | ConvertFrom-Json } else { $null }
+                    $inv = if ($bodyJson.invoice) { $bodyJson.invoice } else { $bodyJson }
+
+                    # 1. Datos del Cliente
+                    $cliDes = if ($inv.cli_des) { $inv.cli_des } else { "CLIENTE GENERAL" }
+                    $rif = if ($inv.rif) { $inv.rif } else { "---" }
+                    $direc = if ($inv.direc1) { $inv.direc1 } else { "VALENCIA" }
+                    $telef = if ($inv.telefonos) { $inv.telefonos } else { "" }
+
+                    $cliClean = [System.Text.RegularExpressions.Regex]::Replace($cliDes, "[^a-zA-Z0-9 .\/#\-]", "")
+                    $rifClean = [System.Text.RegularExpressions.Regex]::Replace($rif, "[^a-zA-Z0-9\-]", "")
+                    $dirClean = [System.Text.RegularExpressions.Regex]::Replace($direc, "[^a-zA-Z0-9 .\/#\-]", "")
+                    $telClean = [System.Text.RegularExpressions.Regex]::Replace($telef, "[^a-zA-Z0-9 .\/#\-]", "")
+
+                    $printer.SendCmd("i01Razon Social: " + $cliClean.Substring(0, [Math]::Min(35, $cliClean.Length))) | Out-Null
+                    $printer.SendCmd("i02RIF/CI: " + $rifClean.Substring(0, [Math]::Min(20, $rifClean.Length))) | Out-Null
+                    if ($dirClean) {
+                        $printer.SendCmd("i03Direccion: " + $dirClean.Substring(0, [Math]::Min(35, $dirClean.Length))) | Out-Null
+                    }
+                    if ($telClean) {
+                        $printer.SendCmd("i04Telefono: " + $telClean.Substring(0, [Math]::Min(20, $telClean.Length))) | Out-Null
+                    }
+
+                    # 2. Facturar Renglones
+                    $lines = if ($inv.renglones) { $inv.renglones } else { @() }
+                    $tasaCambio = if ($inv.tasa) { [double]$inv.tasa } else { 1.0 }
+                    if ($tasaCambio -le 0) { $tasaCambio = 1.0 }
+
+                    foreach ($item in $lines) {
+                        $porcImp = [double]($item.porc_imp)
+                        $tipoImp = if ($porcImp -gt 0 -and $item.tipo_imp -ne '0') { '"' } else { '!' }
+
+                        $precioUSD = [double]($item.precio)
+                        $precioBs = [Math]::Round($precioUSD * $tasaCambio, 2)
+                        $cant = [double]($item.cantidad)
+
+                        # Precio: 8 enteros + 2 decimales = 10 dígitos
+                        $precioCentavos = [long][Math]::Round($precioBs * 100)
+                        $precioStr = $precioCentavos.ToString().PadLeft(10, '0')
+
+                        # Cantidad: 5 enteros + 3 decimales = 8 dígitos
+                        $cantMili = [long][Math]::Round($cant * 1000)
+                        $cantStr = $cantMili.ToString().PadLeft(8, '0')
+
+                        # Descripción: hasta 35 chars
+                        $artDes = [System.Text.RegularExpressions.Regex]::Replace($item.art_des, "[^a-zA-Z0-9 .\/#\-]", "")
+                        $descStr = $artDes.Substring(0, [Math]::Min(35, $artDes.Length))
+
+                        $cmdItem = "$tipoImp$precioStr$cantStr$descStr"
+                        $printer.SendCmd($cmdItem) | Out-Null
+                    }
+
+                    # 3. Subtotal
+                    $printer.SendCmd("3") | Out-Null
+
+                    # 4. Totalizar y Cierre (101 = Pago Directo Efectivo / Cierre de Factura)
+                    $resCierre = $printer.SendCmd("101")
+
+                    # 5. Obtener datos del documento fiscal emitido
+                    $s1 = $printer.GetS1PrinterData()
+                    $printer.CloseFpctrl()
+
+                    $respObj = @{
+                        success = [bool]$resCierre
+                        message = "Factura fiscal emitida exitosamente en impresora fiscal."
+                        nroFacturaFiscal = $s1.NroUltimoDocFiscal
+                        serial = $s1.NroRegistro
+                    }
+                } catch {
+                    $printer.CloseFpctrl()
+                    $respObj = @{ success = $false; message = "Error durante la emisión fiscal: $($_.Exception.Message)" }
+                }
+            } else {
+                $respObj = @{ success = $false; message = "No se pudo abrir el puerto serial $targetCom de la impresora fiscal." }
+            }
+        }
 
         # Construir y enviar respuesta HTTP JSON
         $jsonStr = $respObj | ConvertTo-Json -Depth 5
