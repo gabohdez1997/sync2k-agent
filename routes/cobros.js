@@ -1273,7 +1273,7 @@ router.post('/', async (req, res) => {
                         .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
                         .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
-                        .input('mont_cob', sql.Decimal(18, 2), isNeg ? -ajMontoBs : ajMontoBs)
+                        .input('mont_cob', sql.Decimal(18, 2), ajMontoBs)
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                         .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                         .input('rowguid', sql.UniqueIdentifier, ajRengGuid)
