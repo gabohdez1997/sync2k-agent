@@ -37,7 +37,7 @@ async function initServers() {
     const localBranchName = process.env.LOCAL_BRANCH_NAME;
     console.log(`📡 [Agente DB] Sincronizando configuración de sedes desde PostgreSQL Local...${localBranchName ? ` (Filtrando por: ${localBranchName})` : ''}`);
     try {
-        let query = 'SELECT id, name, sql_config, profit_branch_codes FROM branches WHERE active = true';
+        let query = 'SELECT id, name, business_name, rif, address, phone, logo_url, sql_config, profit_branch_codes FROM branches WHERE active = true';
         const params = [];
 
         if (localBranchName) {
@@ -49,6 +49,11 @@ async function initServers() {
         cachedServers = rows.map(r => ({
             id: r.id,
             name: r.name,
+            business_name: r.business_name || r.name,
+            rif: r.rif,
+            address: r.address,
+            phone: r.phone,
+            logo_url: r.logo_url,
             server: r.sql_config?.host || r.sql_config?.server,
             database: r.sql_config?.database,
             sql_config: r.sql_config,
@@ -59,7 +64,7 @@ async function initServers() {
     } catch (err) {
         console.warn(`⚠️ [Agente DB] PG Local no disponible (${err.message}). Consultando Supabase Cloud como fallback...`);
         try {
-            const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?active=eq.true&select=id,name,sql_config,profit_branch_codes`, {
+            const res = await fetch(`${SUPABASE_URL}/rest/v1/branches?active=eq.true&select=id,name,business_name,rif,address,phone,logo_url,sql_config,profit_branch_codes`, {
                 headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
             });
             if (res.ok) {
@@ -73,6 +78,11 @@ async function initServers() {
                 cachedServers = cloudRows.map(r => ({
                     id: r.id,
                     name: r.name,
+                    business_name: r.business_name || r.name,
+                    rif: r.rif,
+                    address: r.address,
+                    phone: r.phone,
+                    logo_url: r.logo_url,
                     server: r.sql_config?.host || r.sql_config?.server,
                     database: r.sql_config?.database,
                     sql_config: r.sql_config,

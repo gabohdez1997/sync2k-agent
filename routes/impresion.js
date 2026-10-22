@@ -223,15 +223,18 @@ router.post('/imprimir', async (req, res) => {
 
         let t = "";
 
+        const compName = cleanAscii(invoice.branch_name || srv?.business_name || srv?.name || 'INVERSIONES GALPE').toUpperCase();
+        const compRif = cleanAscii(invoice.branch_rif || srv?.rif || 'J-00000000-0');
+
         // 1. Inicialización y Encabezado
         t += CMD_INIT;
         t += CMD_CENTER;
         t += CMD_BOLD_ON;
         t += CMD_DOUBLE_SIZE;
-        t += `${(invoice.branch_name || 'INVERSIONES GALPE').toUpperCase()}\n`;
+        t += `${compName}\n`;
         t += CMD_NORMAL_SIZE;
         t += CMD_BOLD_OFF;
-        t += `RIF: ${invoice.branch_rif || 'J-00000000-0'}\n`;
+        t += `RIF: ${compRif}\n`;
         t += "-".repeat(width) + "\n";
 
         // TÍTULO TICKET DE PRE-DESPACHO
@@ -354,15 +357,24 @@ function buildCancellationTicket(invoice, actionType = 'ANULACION') {
     const width = 42;
     let t = "";
 
+    const servers = getServers();
+    const docSede = invoice.branch_id || invoice.sede_id || invoice.sede;
+    const srv = (servers && servers.length > 0)
+        ? (servers.find(s => s.id === docSede || s.name?.toLowerCase() === String(docSede).toLowerCase()) || servers[0])
+        : null;
+
+    const compName = cleanAscii(invoice.branch_name || srv?.business_name || srv?.name || 'INVERSIONES GALPE').toUpperCase();
+    const compRif = cleanAscii(invoice.branch_rif || srv?.rif || 'J-00000000-0');
+
     // 1. Inicialización y Encabezado
     t += CMD_INIT;
     t += CMD_CENTER;
     t += CMD_BOLD_ON;
     t += CMD_DOUBLE_SIZE;
-    t += `${cleanAscii(invoice.branch_name || 'INVERSIONES GALPE').toUpperCase()}\n`;
+    t += `${compName}\n`;
     t += CMD_NORMAL_SIZE;
     t += CMD_BOLD_OFF;
-    t += `RIF: ${cleanAscii(invoice.branch_rif || 'J-00000000-0')}\n`;
+    t += `RIF: ${compRif}\n`;
     t += "-".repeat(width) + "\n";
 
     // 2. Título de Notificación Destacado
@@ -516,9 +528,15 @@ function buildEscpNotaEntrega(doc) {
     let out = '';
     out += INIT + DRAFT + PAGE_LEN_33 + CONDENSED_OFF;
 
+    const servers = getServers();
+    const docSede = doc.branch_id || doc.sede_id || doc.sede;
+    const srv = (servers && servers.length > 0)
+        ? (servers.find(s => s.id === docSede || s.name?.toLowerCase() === String(docSede).toLowerCase()) || servers[0])
+        : null;
+
     // Linea 1: Empresa + RIF + Nro de Pedido
-    const company = cleanAscii(doc.branch_name || 'Inversiones Galpe 2021 C.A.').toUpperCase();
-    const rif = 'R.I.F.: ' + cleanAscii(doc.branch_rif || 'J-40175035-4').toUpperCase();
+    const company = cleanAscii(doc.branch_name || srv?.business_name || srv?.name || 'Inversiones Galpe, C.A.').toUpperCase();
+    const rif = 'R.I.F.: ' + cleanAscii(doc.branch_rif || srv?.rif || 'J-40175035-4').toUpperCase();
     const pedidoNum = doc.pedido_num || doc.origin_doc || doc.num_doc || '---';
     const pedidoStr = 'PEDIDO: ' + cleanAscii(pedidoNum).toUpperCase();
 
@@ -529,7 +547,7 @@ function buildEscpNotaEntrega(doc) {
     out += BOLD_ON + leftPart + midPart + rightPart + BOLD_OFF + '\n';
 
     // Linea 2: Direccion Fiscal de la Empresa (Modo condensado para que quepa en 1 sola linea)
-    const fiscalDir = cleanAscii(doc.branch_address || 'CTRA NACIONAL LOS GUAYOS GUACARA CRUCE CON CLL LISBOA Y CALLE PAMPERO LOCAL GALPON NRO 13-01 SECTOR LOS GUAYOS LOS GUAYOS CARABOBO').toUpperCase();
+    const fiscalDir = cleanAscii(doc.branch_address || srv?.address || 'Av. 92 Pedro melean (via La Isabelica), Valencia, Carabobo').toUpperCase();
     out += CONDENSED_ON + fiscalDir.substring(0, 136) + CONDENSED_OFF + '\n';
     out += '-'.repeat(W) + '\n';
 
@@ -652,15 +670,21 @@ function buildThermalNotaEntrega(doc) {
 
     out += CMD_INIT;
 
+    const servers = getServers();
+    const docSede = doc.branch_id || doc.sede_id || doc.sede;
+    const srv = (servers && servers.length > 0)
+        ? (servers.find(s => s.id === docSede || s.name?.toLowerCase() === String(docSede).toLowerCase()) || servers[0])
+        : null;
+
     // 1. Encabezado Centrado: Razón Social + RIF + Dirección de la Sede
     out += CMD_CENTER;
     out += CMD_BOLD_ON;
-    out += `${cleanAscii(doc.branch_name || 'inversiones Galpe 2021 C.A.')}\n`;
+    out += `${cleanAscii(doc.branch_name || srv?.business_name || srv?.name || 'Inversiones Galpe, C.A.')}\n`;
     out += CMD_BOLD_OFF;
-    out += `${cleanAscii(doc.branch_rif || 'J-401750354')}\n\n`;
+    out += `${cleanAscii(doc.branch_rif || srv?.rif || 'J-40175035-4')}\n\n`;
 
     // Dirección fiscal de la sede (envuelta limpiamente a W caracteres)
-    const sedeDir = cleanAscii(doc.branch_address || 'CTRA NACIONAL LOS GUAYOS-GUACARA CRUCE CON CALLE 940-A Y CALLE PARAPARAL LOCAL GALPON NRO 20-21 SECTOR LOS GUAYOS LOS GUAYOS CARABOBO;').toUpperCase();
+    const sedeDir = cleanAscii(doc.branch_address || srv?.address || 'Av. 92 Pedro melean (via La Isabelica), Valencia, Carabobo').toUpperCase();
     const addrLines = wrapTextLines(sedeDir, W);
     addrLines.forEach(l => {
         out += l + '\n';
