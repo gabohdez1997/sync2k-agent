@@ -170,14 +170,14 @@ router.get('/cxc', async (req, res) => {
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
                             WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                              AND t.fecha <= COALESCE(
+                              AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), COALESCE(
                                   (SELECT TOP 1 orig.fec_emis 
                                    FROM saDocumentoVenta orig 
                                    WHERE orig.nro_doc = d.nro_orig 
                                      AND orig.co_tipo_doc = d.doc_orig 
                                      AND orig.co_cli = d.co_cli),
                                   d.fec_emis
-                              )
+                              ), 120)
                             ORDER BY t.fecha DESC
                         ) AS tasa_bcv_fecha
                     FROM saDocumentoVenta d
@@ -459,14 +459,14 @@ router.get('/cxp', async (req, res) => {
                             SELECT TOP 1 t.tasa_v
                             FROM saTasa t
                             WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US')
-                              AND t.fecha <= COALESCE(
+                              AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), COALESCE(
                                   (SELECT TOP 1 orig.fec_emis 
                                    FROM saDocumentoCompra orig 
                                    WHERE orig.nro_doc = d.nro_orig 
                                      AND orig.co_tipo_doc = d.doc_orig 
                                      AND orig.co_prov = d.co_prov),
                                   d.fec_emis
-                              )
+                              ), 120)
                             ORDER BY t.fecha DESC
                         ) AS tasa_bcv_fecha
                     FROM saDocumentoCompra d
@@ -658,23 +658,39 @@ router.get('/cuenta-detallada', async (req, res) => {
                 let historicalRates = [];
                 try {
                     const tasasRes = await pool.request().query(`
-                        SELECT fecha, tasa_v 
+                        SELECT 
+                            CONVERT(VARCHAR(10), fecha, 120) AS fecha_date,
+                            fecha, 
+                            tasa_v 
                         FROM saTasa 
                         WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$', 'US')
                         ORDER BY fecha DESC
                     `);
                     historicalRates = tasasRes.recordset.map(t => ({
-                        time: new Date(t.fecha).getTime(),
+                        dateStr: t.fecha_date || (t.fecha ? new Date(t.fecha).toISOString().substring(0, 10) : ''),
                         tasa: parseFloat(t.tasa_v) || 1.0
                     }));
                 } catch (eTasa) {
                     console.warn(`[REPORTES/CUENTA-DETALLADA] Error precargando saTasa en sede ${srv.id}:`, eTasa.message);
                 }
 
-                function getHistoricalRate(date) {
-                    if (!date || historicalRates.length === 0) return null;
-                    const targetTime = new Date(date).getTime();
-                    const found = historicalRates.find(r => r.time <= targetTime);
+                function getHistoricalRate(dateVal) {
+                    if (!dateVal || historicalRates.length === 0) return null;
+                    let targetDateStr = '';
+                    if (typeof dateVal === 'string') {
+                        targetDateStr = dateVal.substring(0, 10);
+                    } else if (dateVal instanceof Date) {
+                        const y = dateVal.getFullYear();
+                        const m = String(dateVal.getMonth() + 1).padStart(2, '0');
+                        const d = String(dateVal.getDate()).padStart(2, '0');
+                        targetDateStr = `${y}-${m}-${d}`;
+                    } else {
+                        targetDateStr = String(dateVal).substring(0, 10);
+                    }
+                    if (!targetDateStr) return null;
+                    // Al ordenar por fecha DESC, el primer registro donde dateStr <= targetDateStr
+                    // corresponde a la última tasa registrada en ese día o en el día previo más cercano.
+                    const found = historicalRates.find(r => r.dateStr <= targetDateStr);
                     return found ? found.tasa : null;
                 }
                 
@@ -705,6 +721,7 @@ router.get('/cuenta-detallada', async (req, res) => {
                         d.co_cli, 
                         d.cli_des,
                         d.fec_emis, 
+                        CONVERT(VARCHAR(10), d.fec_emis, 120) AS fec_emis_date,
                         d.fec_venc, 
                         d.total_neto, 
                         d.saldo, 
@@ -800,7 +817,14 @@ router.get('/cuenta-detallada', async (req, res) => {
                             RTRIM(cob.co_us_in) AS co_us_in,
                             RTRIM(cob.co_mone) AS co_mone, 
                             cob.tasa AS doc_tasa,
-                            NULL AS tasa_doc_orig,
+                            (
+                                SELECT TOP 1 orig.tasa 
+                                FROM saDocumentoVenta orig 
+                                WHERE orig.nro_doc = reng.nro_doc 
+                                  AND orig.co_tipo_doc = reng.co_tipo_doc 
+                                  AND orig.co_cli = cob.co_cli
+                                  AND CONVERT(VARCHAR(10), orig.fec_emis, 120) = CONVERT(VARCHAR(10), cob.fecha, 120)
+                            ) AS tasa_doc_orig,
                             RTRIM(reng.nro_doc) AS nro_orig,
                             RTRIM(reng.co_tipo_doc) AS doc_orig,
                             RTRIM(reng.co_tipo_doc) AS doc_tipo_pagado,
@@ -821,11 +845,11 @@ router.get('/cuenta-detallada', async (req, res) => {
                     let docTasaVal = parseFloat(row.doc_tasa) || 0.0;
                     const tasaDocOrig = parseFloat(row.tasa_doc_orig) || 0.0;
                     
-                    if (['N/CR', 'NCR'].includes(docType) && tasaDocOrig > 1.0) {
+                    if (['N/CR', 'NCR', 'COBR'].includes(docType) && tasaDocOrig > 1.0) {
                         docTasaVal = tasaDocOrig;
                     }
                     
-                    const tasaBcv = docTasaVal <= 1.0 ? getHistoricalRate(row.fec_emis) : null;
+                    const tasaBcv = docTasaVal <= 1.0 ? getHistoricalRate(row.fec_emis_date || row.fec_emis) : null;
                     const rowTasa = (docTasaVal > 1.0) ? docTasaVal : (tasaBcv || currentRate || 1.0);
                     const saldo = parseFloat(row.saldo) || 0.0;
                     const total = parseFloat(row.total_neto) || 0.0;
@@ -1255,7 +1279,7 @@ router.get('/articulos-precios', async (req, res) => {
             OUTER APPLY (
                 SELECT TOP 1 
                     CASE 
-                        WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND fecha <= n.fec_emis ORDER BY fecha DESC), 0)) 
+                        WHEN RTRIM(n.co_mone) = 'BS' THEN (r.cost_unit / NULLIF((SELECT TOP 1 tasa_v FROM saTasa WHERE (co_mone LIKE 'US%') AND CONVERT(VARCHAR(10), fecha, 120) <= CONVERT(VARCHAR(10), n.fec_emis, 120) ORDER BY fecha DESC), 0)) 
                         ELSE r.cost_unit_om 
                     END AS cost_unit_om
                 FROM saFacturaCompraReng r INNER JOIN saFacturaCompra n ON r.doc_num = n.doc_num
