@@ -33,7 +33,7 @@ router.get('/', async (req, res) => {
                 }
                 if (doc_num) {
                     request.input('doc_num', sql.VarChar, `%${doc_num}%`);
-                    whereClauses.push("(d.doc_num LIKE @doc_num OR d.nro_doc LIKE @doc_num)");
+                    whereClauses.push("(d.doc_num LIKE @doc_num OR d.nro_doc LIKE @doc_num OR EXISTS (SELECT 1 FROM saDocumentoVenta nc WHERE nc.co_tipo_doc = 'N/CR' AND nc.doc_orig = 'DEVO' AND LTRIM(RTRIM(nc.nro_orig)) = LTRIM(RTRIM(d.doc_num)) AND nc.nro_doc LIKE @doc_num))");
                 }
                 if (co_cli) {
                     request.input('co_cli_search', sql.VarChar, `%${co_cli}%`);
@@ -41,7 +41,7 @@ router.get('/', async (req, res) => {
                 }
                 if (search) {
                     request.input('search_all', sql.VarChar, `%${search}%`);
-                    whereClauses.push("(d.doc_num LIKE @search_all OR d.nro_doc LIKE @search_all OR d.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all OR cl.rif LIKE @search_all OR d.descrip LIKE @search_all)");
+                    whereClauses.push("(d.doc_num LIKE @search_all OR d.nro_doc LIKE @search_all OR d.co_cli LIKE @search_all OR cl.cli_des LIKE @search_all OR cl.rif LIKE @search_all OR d.descrip LIKE @search_all OR EXISTS (SELECT 1 FROM saDocumentoVenta nc WHERE nc.co_tipo_doc = 'N/CR' AND nc.doc_orig = 'DEVO' AND LTRIM(RTRIM(nc.nro_orig)) = LTRIM(RTRIM(d.doc_num)) AND nc.nro_doc LIKE @search_all))");
                 }
                 if (co_ven) {
                     request.input('co_ven_filter', sql.VarChar, co_ven.trim().toUpperCase());
@@ -68,7 +68,19 @@ router.get('/', async (req, res) => {
                            d.fec_emis, d.fec_venc, d.fec_reg, d.fe_us_in AS fec_us_in, d.fe_us_mo AS fec_us_mo, d.anulado,
                            RTRIM(d.co_mone) AS co_mone, d.tasa, d.total_neto, d.total_bruto, d.monto_imp,
                            ISNULL(d.otros1, 0) AS otros1,
-                           RTRIM(d.co_tipo_doc) AS co_tipo_doc, RTRIM(d.nro_doc) AS nro_doc, RTRIM(d.n_control) AS n_control,
+                           RTRIM(d.co_tipo_doc) AS co_tipo_doc,
+                           COALESCE(
+                               NULLIF(RTRIM(d.nro_doc), ''),
+                               (
+                                   SELECT TOP 1 RTRIM(nc.nro_doc)
+                                   FROM saDocumentoVenta nc
+                                   WHERE nc.co_tipo_doc = 'N/CR'
+                                     AND nc.doc_orig = 'DEVO'
+                                     AND LTRIM(RTRIM(nc.nro_orig)) = LTRIM(RTRIM(d.doc_num))
+                                   ORDER BY nc.fec_emis DESC
+                               )
+                           ) AS nro_doc,
+                           RTRIM(d.n_control) AS n_control,
                            RTRIM(d.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(d.co_us_in) AS co_us_in, RTRIM(d.co_sucu_in) AS co_sucu_in
                     FROM saDevolucionCliente d
                     LEFT JOIN saCliente cl ON d.co_cli = cl.co_cli
@@ -117,7 +129,19 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(d.co_mone) AS co_mone, d.tasa,
                                d.total_bruto, d.monto_imp, d.total_neto, d.saldo,
                                ISNULL(d.otros1, 0) AS otros1,
-                               RTRIM(d.co_tipo_doc) AS co_tipo_doc, RTRIM(d.nro_doc) AS nro_doc, RTRIM(d.n_control) AS n_control,
+                               RTRIM(d.co_tipo_doc) AS co_tipo_doc,
+                               COALESCE(
+                                   NULLIF(RTRIM(d.nro_doc), ''),
+                                   (
+                                       SELECT TOP 1 RTRIM(nc.nro_doc)
+                                       FROM saDocumentoVenta nc
+                                       WHERE nc.co_tipo_doc = 'N/CR'
+                                         AND nc.doc_orig = 'DEVO'
+                                         AND LTRIM(RTRIM(nc.nro_orig)) = LTRIM(RTRIM(d.doc_num))
+                                       ORDER BY nc.fec_emis DESC
+                                   )
+                               ) AS nro_doc,
+                               RTRIM(d.n_control) AS n_control,
                                RTRIM(d.comentario) AS comentario,
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
@@ -503,10 +527,16 @@ router.post('/', async (req, res) => {
 
                 await rH.execute('pInsertarDevolucionCliente');
 
-                // Actualizar co_tipo_doc = 'N/CR' en saDevolucionCliente
+                // Actualizar co_tipo_doc = 'N/CR' y nro_doc en saDevolucionCliente
                 await transaction.request()
                     .input('doc_num', sql.Char(20), padProfit(docNumDev, 20))
-                    .query(`UPDATE saDevolucionCliente SET co_tipo_doc = 'N/CR' WHERE doc_num = @doc_num`);
+                    .input('nro_doc', sql.Char(20), padProfit(docNumNCR, 20))
+                    .query(`
+                        UPDATE saDevolucionCliente 
+                        SET co_tipo_doc = 'N/CR',
+                            nro_doc = @nro_doc
+                        WHERE doc_num = @doc_num
+                    `);
 
                 // Insertar Renglones de la Devolución
                 for (let i = 0; i < data.renglones.length; i++) {
