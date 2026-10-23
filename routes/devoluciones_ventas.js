@@ -81,6 +81,32 @@ router.get('/', async (req, res) => {
                                )
                            ) AS nro_doc,
                            RTRIM(d.n_control) AS n_control,
+                           (
+                               SELECT TOP 1 RTRIM(r_orig.num_doc)
+                               FROM saDevolucionClienteReng r_orig
+                               WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                 AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                           ) AS num_doc_orig,
+                           (
+                               SELECT TOP 1 RTRIM(ISNULL(r_orig.tipo_doc, 'FACT'))
+                               FROM saDevolucionClienteReng r_orig
+                               WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                 AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                           ) AS tipo_doc_orig,
+                           (
+                               SELECT TOP 1 ISNULL(f.monto_imp, 0)
+                               FROM saDevolucionClienteReng r_orig
+                               LEFT JOIN saFacturaVenta f ON LTRIM(RTRIM(r_orig.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                               WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                 AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                           ) AS monto_imp_orig,
+                           (
+                               SELECT TOP 1 RTRIM(ISNULL(f.co_sucu_in, ''))
+                               FROM saDevolucionClienteReng r_orig
+                               LEFT JOIN saFacturaVenta f ON LTRIM(RTRIM(r_orig.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                               WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                 AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                           ) AS co_sucu_in_orig,
                            RTRIM(d.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(d.co_us_in) AS co_us_in, RTRIM(d.co_sucu_in) AS co_sucu_in
                     FROM saDevolucionCliente d
                     LEFT JOIN saCliente cl ON d.co_cli = cl.co_cli
@@ -142,6 +168,32 @@ router.get('/:doc_num', async (req, res) => {
                                    )
                                ) AS nro_doc,
                                RTRIM(d.n_control) AS n_control,
+                            (
+                                SELECT TOP 1 RTRIM(r_orig.num_doc)
+                                FROM saDevolucionClienteReng r_orig
+                                WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                  AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                            ) AS num_doc_orig,
+                            (
+                                SELECT TOP 1 RTRIM(ISNULL(r_orig.tipo_doc, 'FACT'))
+                                FROM saDevolucionClienteReng r_orig
+                                WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                  AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                            ) AS tipo_doc_orig,
+                            (
+                                SELECT TOP 1 ISNULL(f.monto_imp, 0)
+                                FROM saDevolucionClienteReng r_orig
+                                LEFT JOIN saFacturaVenta f ON LTRIM(RTRIM(r_orig.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                                WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                  AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                            ) AS monto_imp_orig,
+                            (
+                                SELECT TOP 1 RTRIM(ISNULL(f.co_sucu_in, ''))
+                                FROM saDevolucionClienteReng r_orig
+                                LEFT JOIN saFacturaVenta f ON LTRIM(RTRIM(r_orig.num_doc)) = LTRIM(RTRIM(f.doc_num))
+                                WHERE LTRIM(RTRIM(r_orig.doc_num)) = LTRIM(RTRIM(d.doc_num))
+                                  AND r_orig.num_doc IS NOT NULL AND LTRIM(RTRIM(r_orig.num_doc)) <> ''
+                            ) AS co_sucu_in_orig,
                                RTRIM(d.comentario) AS comentario,
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
