@@ -47,9 +47,20 @@ async function getSupabaseConsecutivo(tipo) {
 
 /**
  * Actualiza el próximo correlativo en Supabase Cloud (fuente de verdad multi-sede).
+ * @param {string} tipo - 'C016' (IVAN) o 'C015' (ISLR)
+ * @param {number} prox_n - Próximo correlativo
+ * @param {boolean} [force=false] - Forzar actualización incluso si es menor (usado en reversiones)
  */
-async function updateSupabaseConsecutivo(tipo, prox_n) {
+async function updateSupabaseConsecutivo(tipo, prox_n, force = false) {
     try {
+        if (!force) {
+            // Blindaje: asegurar que el puntero en Supabase Cloud NUNCA retroceda por peticiones desfasadas
+            const current = await getSupabaseConsecutivo(tipo);
+            if (current && current >= prox_n) {
+                console.log(`☁️ [RETENCIONES SUPABASE] ${tipo} ya está en ${current} (>= ${prox_n}), no se retrocede.`);
+                return;
+            }
+        }
         const res = await fetch(`${SUPABASE_URL}/rest/v1/global_consecutivos`, {
             method: 'POST',
             headers: {
@@ -266,23 +277,27 @@ async function getProximoConsecutivoRetencion(params) {
     }
 
     // ── 5. Calcular número fiscal asignable ──
-    // REGLA ESTRICTA SENIAT: El correlativo asignado es SIEMPRE el MAX(num_comprobante emitido en todas las sedes) + 1.
-    // Ningún puntero externo (Supabase/saSerie) debe inflar o crear saltos en la numeración real emitida.
+    // BLINDAJE MULTI-SEDE: Supabase Cloud (global_consecutivos) es el PUNTERO PRINCIPAL y fuente central de verdad.
+    // Esto garantiza que si una sede pierde conectividad directa con otra sede (timeout/VPN), NUNCA retrocederá
+    // ni generará comprobantes duplicados.
     const maxIssued = maxIssuedNumbers.length > 0 ? Math.max(...maxIssuedNumbers) : 0;
+    const physicalNext = maxIssued > 0 ? maxIssued + 1 : 0;
     const supabaseN = Number(supabaseProxN) || 0;
+    const serieN = Number(localMeta.prox_n) || 0;
     const maxPointer = nextPointers.length > 0 ? Math.max(...nextPointers) : 0;
 
     let assignedN = 1;
 
-    // Si hay comprobantes emitidos, el nuevo SIEMPRE es el siguiente inmediato (maxIssued + 1)
-    if (maxIssued > 0) {
-        assignedN = maxIssued + 1;
-    } else if (maxPointer > 0) {
-        // Solo como semilla inicial si nunca se ha emitido un comprobante
-        assignedN = maxPointer;
+    if (supabaseN > 0) {
+        // Supabase Cloud es el puntero principal:
+        // Si hay comprobantes físicos que superan a Supabase (ej. emitidos directamente en Profit Desktop),
+        // o si saSerie local / Postgres local ya avanzó más, se toma el mayor absoluto para blindar contra cualquier colisión.
+        assignedN = Math.max(supabaseN, physicalNext, serieN, maxPointer);
+    } else if (physicalNext > 0 || serieN > 0 || maxPointer > 0) {
+        // Fallback de emergencia si Supabase Cloud no estuvo accesible por corte de internet
+        assignedN = Math.max(physicalNext, serieN, maxPointer);
     } else {
-        // Último recurso: usar saSerie local
-        assignedN = Number(localMeta.prox_n) || 1;
+        assignedN = 1;
     }
 
     if (assignedN < 1) assignedN = 1;
@@ -290,7 +305,7 @@ async function getProximoConsecutivoRetencion(params) {
     // El siguiente correlativo que debe quedar guardado para el próximo documento
     const nextN = assignedN + 1;
 
-    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Sedes consultadas: [${sedesConsultadas.join(', ')}] | Sedes fallidas: [${sedesFallidas.join(', ') || 'ninguna'}] | Mayor físico emitido: ${maxIssued} | ► ASIGNADO: ${assignedN} | Siguiente: ${nextN}`);
+    console.log(`🎯 [RETENCIONES GLOBAL] Tipo: ${profitSerieCode} (${docTypeProfit}) | Sedes consultadas: [${sedesConsultadas.join(', ')}] | Sedes fallidas: [${sedesFallidas.join(', ') || 'ninguna'}] | Supabase (Puntero Principal): ${supabaseN} | Mayor físico emitido: ${maxIssued} | saSerie prox_n: ${serieN} | ► ASIGNADO: ${assignedN} | Siguiente: ${nextN}`);
 
     // ── 6. Actualizar saSerie en la sede actual al siguiente número ──
     await runner.request().query(`
@@ -299,7 +314,7 @@ async function getProximoConsecutivoRetencion(params) {
         WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
     `);
 
-    // ── 7. Actualizar Supabase Cloud de inmediato ──
+    // ── 7. Actualizar Supabase Cloud de inmediato como puntero principal ──
     await updateSupabaseConsecutivo(profitSerieCode, nextN);
 
     // ── 8. Actualizar PostgreSQL local si existe ──
@@ -338,36 +353,34 @@ async function getProximoConsecutivoRetencion(params) {
     const numStr = assignedN.toString().padStart(longitud, '0');
     let docNum = `${prefijo}${numStr}${sufijo}`;
 
-    // Si es IVAN, verificar que docNum no colisione físicamente en saDocumentoCompra de la sede local
-    if (docTypeProfit === 'IVAN') {
-        try {
-            const existsCheck = await runner.request().query(`
-                SELECT TOP 1 nro_doc 
-                FROM saDocumentoCompra 
-                WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN' 
-                  AND UPPER(RTRIM(nro_doc)) = '${docNum.trim().toUpperCase()}'
+    // Verificar que docNum no colisione físicamente en saDocumentoCompra de la sede local
+    try {
+        const existsCheck = await runner.request().query(`
+            SELECT TOP 1 nro_doc 
+            FROM saDocumentoCompra 
+            WHERE UPPER(RTRIM(co_tipo_doc)) = '${docTypeProfit}' 
+              AND UPPER(RTRIM(nro_doc)) = '${docNum.trim().toUpperCase()}'
+        `);
+        if (existsCheck.recordset.length > 0) {
+            const maxPhysRes = await runner.request().query(`
+                SELECT ISNULL(MAX(
+                    CASE 
+                        WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), ${longitud}) AS BIGINT) IS NOT NULL 
+                        THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), ${longitud}) AS BIGINT) 
+                        ELSE 0 
+                    END
+                ), 0) AS max_phys
+                FROM saDocumentoCompra
+                WHERE UPPER(RTRIM(co_tipo_doc)) = '${docTypeProfit}'
             `);
-            if (existsCheck.recordset.length > 0) {
-                const maxPhysRes = await runner.request().query(`
-                    SELECT ISNULL(MAX(
-                        CASE 
-                            WHEN TRY_CAST(RIGHT(LTRIM(RTRIM(nro_doc)), ${longitud}) AS BIGINT) IS NOT NULL 
-                            THEN CAST(RIGHT(LTRIM(RTRIM(nro_doc)), ${longitud}) AS BIGINT) 
-                            ELSE 0 
-                        END
-                    ), 0) AS max_phys
-                    FROM saDocumentoCompra
-                    WHERE UPPER(RTRIM(co_tipo_doc)) = 'IVAN'
-                `);
-                const maxPhysFromDocs = Number(maxPhysRes.recordset[0]?.max_phys || 0);
-                const maxFromSerie = Number(localMeta.prox_n || 0);
-                const nextPhysN = Math.max(maxPhysFromDocs, maxFromSerie) + 1;
-                docNum = `${prefijo}${nextPhysN.toString().padStart(longitud, '0')}${sufijo}`;
-                console.log(`⚠️ [RETENCIONES IVAN] nro_doc físico local ajustado a "${docNum}" para evitar duplicidad de PK en saDocumentoCompra (Comprobante fiscal SENIAT se mantiene en ${assignedN})`);
-            }
-        } catch (eCheck) {
-            console.warn(`[consecutivoRetenciones] Advertencia al verificar duplicidad física de nro_doc:`, eCheck.message);
+            const maxPhysFromDocs = Number(maxPhysRes.recordset[0]?.max_phys || 0);
+            const maxFromSerie = Number(localMeta.prox_n || 0);
+            const nextPhysN = Math.max(maxPhysFromDocs, maxFromSerie, assignedN) + 1;
+            docNum = `${prefijo}${nextPhysN.toString().padStart(longitud, '0')}${sufijo}`;
+            console.log(`⚠️ [RETENCIONES ${docTypeProfit}] nro_doc físico local ajustado a "${docNum}" para evitar duplicidad de PK en saDocumentoCompra (Comprobante fiscal SENIAT se mantiene en ${assignedN})`);
         }
+    } catch (eCheck) {
+        console.warn(`[consecutivoRetenciones] Advertencia al verificar duplicidad física de nro_doc:`, eCheck.message);
     }
 
     return {
@@ -541,7 +554,7 @@ async function revertirConsecutivoRetencionIfLast(params) {
         console.log(`🔄 [RETENCIONES REVERT] Comprobante ${delCorrelativo} era el último emitido para ${profitSerieCode}. Revertiendo próximo correlativo a ${newNextN} (máximo físico actual: ${currentMaxPhysical})`);
 
         // A) Actualizar Supabase Cloud
-        await updateSupabaseConsecutivo(profitSerieCode, newNextN);
+        await updateSupabaseConsecutivo(profitSerieCode, newNextN, true);
 
         // B) Actualizar PostgreSQL local si está disponible
         try {
