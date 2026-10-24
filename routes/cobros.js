@@ -724,8 +724,13 @@ router.post('/', async (req, res) => {
                 let finalMontCob = Math.abs(Number(line.mont_cob));
 
                 // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
-                if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0 && docSaldo > 0) {
-                    finalMontCob = docSaldo;
+                if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) {
+                    if (docSaldo > 0 && childLines.length === 1 && parentLines.length === 0) {
+                        finalMontCob = docSaldo;
+                    } else {
+                        // Si no se asignó monto en este cobro, omitir para no amortizar indebidamente
+                        continue;
+                    }
                 }
 
                 let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
@@ -1780,8 +1785,13 @@ router.put('/:cob_num', async (req, res) => {
                 let finalMontCob = Math.abs(Number(line.mont_cob));
 
                 // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
-                if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0 && docSaldo > 0) {
-                    finalMontCob = docSaldo;
+                if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) {
+                    if (docSaldo > 0 && childLines.length === 1 && parentLines.length === 0) {
+                        finalMontCob = docSaldo;
+                    } else {
+                        // Si no se asignó monto en este cobro, omitir para no amortizar indebidamente
+                        continue;
+                    }
                 }
 
                 let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
