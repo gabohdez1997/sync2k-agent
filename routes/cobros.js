@@ -639,9 +639,7 @@ router.post('/', async (req, res) => {
                     ? Math.round((totalFormasPagoBs / Number(data.tasa || 1)) * 100) / 100 
                     : totalFormasPagoBs;
             } else {
-                finalMontoHeader = Math.max(0, collectionMone === 'USD' 
-                    ? Math.round((totalAbonoBs / Number(data.tasa || 1)) * 100) / 100 
-                    : totalAbonoBs);
+                finalMontoHeader = 0.00;
             }
             rH.input('deMonto', sql.Decimal(18, 2), finalMontoHeader);
             rH.input('sDis_cen', sql.VarChar(sql.MAX), null);
@@ -660,9 +658,17 @@ router.post('/', async (req, res) => {
             // 3. Insertar Renglones de Documentos (saCobroDocReng)
             // Primero insertamos los registros de débito (FACT, NDEB, etc.) para generar los rowguid Padres
             const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM'];
+            const creditDocTypes = ['N/CR', 'AJNA', 'AJNM', 'ADEL'];
             const parentLines = data.renglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = data.renglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const sortedRenglones = [...parentLines, ...childLines];
+
+            // Calcular monto total de créditos aplicados presentes en los renglones child
+            const totalCreditInCobro = childLines.reduce((acc, c) => {
+                const cType = c.co_tipo_doc?.trim()?.toUpperCase();
+                return creditDocTypes.includes(cType) ? acc + Math.abs(Number(c.mont_cob) || 0) : acc;
+            }, 0);
+
             let nextRengNum = 1;
             for (let i = 0; i < sortedRenglones.length; i++) {
                 const line = sortedRenglones[i];
@@ -674,6 +680,14 @@ router.post('/', async (req, res) => {
                 if (!parentTypes.includes(line.co_tipo_doc.trim().toUpperCase())) {
                     const lookupKey = line.parent_doc ? line.parent_doc.trim() : line.nro_doc?.trim();
                     parentGuid = rengDocGuidMap.get(lookupKey);
+                    // Seguridad: si no se encontró por lookupKey pero existen documentos de débito padres registrados en este cobro,
+                    // enlazar automáticamente al primer documento padre registrado
+                    if (!parentGuid && parentLines.length > 0) {
+                        const firstParentKey = parentLines[0].nro_doc ? parentLines[0].nro_doc.trim() : null;
+                        if (firstParentKey && rengDocGuidMap.has(firstParentKey)) {
+                            parentGuid = rengDocGuidMap.get(firstParentKey);
+                        }
+                    }
                 }
 
                 // 3.0. Consultar saDocumentoVenta para obtener tasa, saldo y moneda original de la factura
@@ -709,6 +723,11 @@ router.post('/', async (req, res) => {
 
                 let finalMontCob = Math.abs(Number(line.mont_cob));
 
+                // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
+                if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0 && docSaldo > 0) {
+                    finalMontCob = docSaldo;
+                }
+
                 let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
@@ -743,11 +762,16 @@ router.post('/', async (req, res) => {
                     } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
                         // Tolerancia contable de redondeo al saldar en divisa o bolívares:
                         // Si la diferencia restante es menor o igual a 0.02 USD (o menor o igual a 25 Bs o a 0.02 * tasa),
+                        // o si la diferencia coincide con los créditos amortizados en este cobro,
                         // amortizar automáticamente el 100% del saldo en Bs del documento para saldar a Bs 0,00 exactos
                         const diffPendingBs = docSaldo - totalRebaje;
                         const diffPendingUsd = rateCobro > 0 ? (diffPendingBs / rateCobro) : 0;
                         const maxBsTolerance = Math.max(25.0, (rateCobro > 0 ? rateCobro : docTasa) * 0.02);
-                        if (diffPendingUsd <= 0.02 || diffPendingBs <= maxBsTolerance) {
+                        if (
+                            diffPendingUsd <= 0.02 ||
+                            diffPendingBs <= maxBsTolerance ||
+                            (parentLines.length === 1 && totalCreditInCobro > 0 && Math.abs(diffPendingBs - totalCreditInCobro) <= maxBsTolerance)
+                        ) {
                             finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
                             totalRebaje = docSaldo;
                         }
@@ -1661,9 +1685,7 @@ router.put('/:cob_num', async (req, res) => {
                     ? Math.round((totalFormasPagoBs / rateCobro) * 100) / 100 
                     : totalFormasPagoBs;
             } else {
-                finalMontoHeader = Math.max(0, collectionMone === 'USD' 
-                    ? Math.round((totalAbonoBs / rateCobro) * 100) / 100 
-                    : totalAbonoBs);
+                finalMontoHeader = 0.00;
             }
 
             await transaction.request()
@@ -1694,9 +1716,17 @@ router.put('/:cob_num', async (req, res) => {
                 return !['IVAN', 'ISLR'].includes(type) && !autoGeneratedKeys.has(key);
             });
             const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM'];
+            const creditDocTypes = ['N/CR', 'AJNA', 'AJNM', 'ADEL'];
             const parentLines = cleanRenglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = cleanRenglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const sortedRenglones = [...parentLines, ...childLines];
+
+            // Calcular monto total de créditos aplicados presentes en los renglones child
+            const totalCreditInCobro = childLines.reduce((acc, c) => {
+                const cType = c.co_tipo_doc?.trim()?.toUpperCase();
+                return creditDocTypes.includes(cType) ? acc + Math.abs(Number(c.mont_cob) || 0) : acc;
+            }, 0);
+
             let nextRengNum = 1;
 
             for (let i = 0; i < sortedRenglones.length; i++) {
@@ -1707,6 +1737,14 @@ router.put('/:cob_num', async (req, res) => {
                 if (!parentTypes.includes(line.co_tipo_doc.trim().toUpperCase())) {
                     const lookupKey = line.parent_doc ? line.parent_doc.trim() : line.nro_doc?.trim();
                     parentGuid = rengDocGuidMap.get(lookupKey);
+                    // Seguridad: si no se encontró por lookupKey pero existen documentos de débito padres registrados en este cobro,
+                    // enlazar automáticamente al primer documento padre registrado
+                    if (!parentGuid && parentLines.length > 0) {
+                        const firstParentKey = parentLines[0].nro_doc ? parentLines[0].nro_doc.trim() : null;
+                        if (firstParentKey && rengDocGuidMap.has(firstParentKey)) {
+                            parentGuid = rengDocGuidMap.get(firstParentKey);
+                        }
+                    }
                 }
 
                 let docSaldo = 0;
@@ -1740,6 +1778,12 @@ router.put('/:cob_num', async (req, res) => {
                 }
 
                 let finalMontCob = Math.abs(Number(line.mont_cob));
+
+                // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
+                if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0 && docSaldo > 0) {
+                    finalMontCob = docSaldo;
+                }
+
                 let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
@@ -1769,11 +1813,16 @@ router.put('/:cob_num', async (req, res) => {
                     } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
                         // Tolerancia contable de redondeo al saldar en divisa o bolívares:
                         // Si la diferencia restante es menor o igual a 0.02 USD (o menor o igual a 25 Bs o a 0.02 * tasa),
+                        // o si la diferencia coincide con los créditos amortizados en este cobro,
                         // amortizar automáticamente el 100% del saldo en Bs del documento para saldar a Bs 0,00 exactos
                         const diffPendingBs = docSaldo - totalRebaje;
                         const diffPendingUsd = rateCobro > 0 ? (diffPendingBs / rateCobro) : 0;
                         const maxBsTolerance = Math.max(25.0, (rateCobro > 0 ? rateCobro : docTasa) * 0.02);
-                        if (diffPendingUsd <= 0.02 || diffPendingBs <= maxBsTolerance) {
+                        if (
+                            diffPendingUsd <= 0.02 ||
+                            diffPendingBs <= maxBsTolerance ||
+                            (parentLines.length === 1 && totalCreditInCobro > 0 && Math.abs(diffPendingBs - totalCreditInCobro) <= maxBsTolerance)
+                        ) {
                             finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
                             totalRebaje = docSaldo;
                         }
