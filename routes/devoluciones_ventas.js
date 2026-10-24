@@ -346,7 +346,28 @@ router.post('/:doc_num/anular', async (req, res) => {
             }
         });
 
-        res.status(200).json({ success: true, message: outcome.message || 'Devolución anulada.', data: outcome });
+        if (outcome.notFound) {
+            return res.status(404).json({ success: false, message: 'Sede no encontrada.' });
+        }
+
+        const successResult = outcome.results.find(r => r.success);
+        if (!successResult) {
+            const firstError = outcome.results[0]?.error || 'Error al anular devolución.';
+            return res.status(400).json({
+                success: false,
+                message: firstError,
+                results: outcome.results
+            });
+        }
+
+        res.status(200).json({ 
+            success: true, 
+            message: successResult.message || `Devolución ${doc_num} anulada con éxito.`, 
+            data: {
+                ...successResult,
+                results: outcome.results
+            } 
+        });
     } catch (error) {
         console.error('[DEVOLUCION ANULAR ERROR]:', error);
         res.status(500).json({ success: false, message: 'Error al anular devolución.', error: error.message });
@@ -393,7 +414,9 @@ router.post('/', async (req, res) => {
 
             // Consultar renglones actuales de la factura origen
             const facRengCheck = await pool.request().input('doc_num', sql.VarChar, facturaNum).query(`
-                SELECT reng_num, co_art, total_art, ISNULL(total_dev, 0) AS total_dev, rowguid
+                SELECT reng_num, RTRIM(co_art) AS co_art, total_art, ISNULL(total_dev, 0) AS total_dev, rowguid,
+                       RTRIM(co_alma) AS co_alma, RTRIM(co_uni) AS co_uni, RTRIM(co_precio) AS co_precio,
+                       tipo_imp, porc_imp, prec_vta
                 FROM saFacturaVentaReng
                 WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
             `);
@@ -430,23 +453,24 @@ router.post('/', async (req, res) => {
             }
 
             // 2. Cargar catálogos auxiliares de Profit
-            const [resCli, resUSD, resTasa, resVen, resCond, resAlma, resSucu, resTran, resTax] = await Promise.all([
+            const [resCli, resUSD, resTasa, resVen, resCond, resAlmaList, resSucu, resTran, resTax] = await Promise.all([
                 pool.request().input('co_cli', sql.Char(16), data.co_cli).query(`SELECT RTRIM(co_mone) as co_mone, RTRIM(cond_pag) as cond_pag, RTRIM(co_ven) as co_ven, RTRIM(co_sucu_in) as co_sucu FROM saCliente WHERE co_cli = @co_cli`),
                 pool.request().query(`SELECT TOP 1 RTRIM(co_mone) AS co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US')`),
                 pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`),
                 pool.request().query(`SELECT TOP 1 RTRIM(co_ven)  AS co_ven  FROM saVendedor`),
                 pool.request().query(`SELECT TOP 1 RTRIM(co_cond) AS co_cond FROM saCondicionPago`),
-                pool.request().query(`SELECT TOP 1 RTRIM(co_alma) AS co_alma FROM saAlmacen`),
+                pool.request().query(`SELECT RTRIM(co_alma) AS co_alma FROM saAlmacen`),
                 pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
                 pool.request().query(`SELECT TOP 1 RTRIM(co_tran) AS co_tran FROM saTransporte`),
                 pool.request().query(`SELECT TOP 1 RTRIM(tax_id) AS tax_id FROM saTax`)
             ]);
 
+            const validAlmacenes = new Set(resAlmaList.recordset.map(r => r.co_alma.trim().toUpperCase()));
             const cli = resCli.recordset[0] || {};
             const usdCode = resUSD.recordset[0]?.co_mone || 'US$';
             const defVen   = facOrig.co_ven  || cli.co_ven   || resVen.recordset[0]?.co_ven   || '01';
             const defCond  = facOrig.co_cond || cli.cond_pag || resCond.recordset[0]?.co_cond || '01';
-            const defAlma  = resAlma.recordset[0]?.co_alma   || '01';
+            const defAlma  = resAlmaList.recordset[0]?.co_alma || '01';
             const defSucu  = facOrig.co_sucu_in || resSucu.recordset[0]?.co_sucur || '01';
             const defTran  = facOrig.co_tran || resTran.recordset[0]?.co_tran || '01';
             const rawTax   = resTax.recordset[0]?.tax_id;
@@ -579,17 +603,6 @@ router.post('/', async (req, res) => {
 
                 await rH.execute('pInsertarDevolucionCliente');
 
-                // Actualizar co_tipo_doc = 'N/CR' y nro_doc en saDevolucionCliente
-                await transaction.request()
-                    .input('doc_num', sql.Char(20), padProfit(docNumDev, 20))
-                    .input('nro_doc', sql.Char(20), padProfit(docNumNCR, 20))
-                    .query(`
-                        UPDATE saDevolucionCliente 
-                        SET co_tipo_doc = 'N/CR',
-                            nro_doc = @nro_doc
-                        WHERE doc_num = @doc_num
-                    `);
-
                 // Insertar Renglones de la Devolución
                 for (let i = 0; i < data.renglones.length; i++) {
                     const item = data.renglones[i];
@@ -605,6 +618,18 @@ router.post('/', async (req, res) => {
                     const finalUni = String(item.co_uni || '01').trim();
                     const rowguidDocVal = (item.rowguid_doc && String(item.rowguid_doc).trim()) ? String(item.rowguid_doc).trim() : null;
 
+                    let origReng = null;
+                    if (item.rowguid_doc && mapRengOrig.has(String(item.rowguid_doc).toLowerCase())) {
+                        origReng = mapRengOrig.get(String(item.rowguid_doc).toLowerCase());
+                    } else if (item.reng_num && mapRengOrig.has(String(item.reng_num))) {
+                        origReng = mapRengOrig.get(String(item.reng_num));
+                    }
+
+                    let targetAlma = (item.co_alma || '').trim();
+                    if (!targetAlma || !validAlmacenes.has(targetAlma.toUpperCase())) {
+                        targetAlma = (origReng?.co_alma || defAlma).trim();
+                    }
+
                     const rL = new sql.Request(transaction);
                     rL.input('iReng_Num',          sql.Int,              i + 1);
                     rL.input('sDoc_Num',           sql.Char(20),         padProfit(docNumDev, 20));
@@ -612,7 +637,7 @@ router.post('/', async (req, res) => {
                     rL.input('sDes_Art',           sql.VarChar(120),     (item.art_des || '').substring(0, 120));
                     rL.input('sCo_Uni',            sql.Char(6),          padProfit(finalUni, 6));
                     rL.input('sSco_Uni',           sql.Char(6),          null);
-                    rL.input('sCo_Alma',           sql.Char(6),          padProfit(item.co_alma || defAlma, 6));
+                    rL.input('sCo_Alma',           sql.Char(6),          padProfit(targetAlma, 6));
                     rL.input('sCo_Precio',         sql.Char(6),          padProfit(coPrecio || '01', 6));
                     rL.input('sTipo_Imp',          sql.Char(1),          item.tipo_imp || '1');
                     rL.input('sTipo_Imp2',         sql.Char(1),          null);
@@ -664,7 +689,7 @@ router.post('/', async (req, res) => {
 
                     // 3. Devolver mercancía al stock (Sumar stock tipo 'ACT')
                     const rStock = new sql.Request(transaction);
-                    rStock.input('sCo_Alma',              sql.Char(6),  padProfit(item.co_alma || defAlma, 6));
+                    rStock.input('sCo_Alma',              sql.Char(6),  padProfit(targetAlma, 6));
                     rStock.input('sCo_Art',               sql.Char(30), padProfit(item.co_art, 30));
                     rStock.input('sCo_Uni',               sql.Char(6),  padProfit(finalUni, 6));
                     rStock.input('deCantidad',            sql.Decimal(18, 5), qty);
@@ -784,6 +809,17 @@ router.post('/', async (req, res) => {
                     }
                 }
 
+                // 6. Vincular Nota de Crédito en saDevolucionCliente (satisface FK_saDevolucionCliente_saDocumentoVenta)
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(docNumDev, 20))
+                    .input('nro_doc', sql.Char(20), padProfit(docNumNCR, 20))
+                    .query(`
+                        UPDATE saDevolucionCliente 
+                        SET co_tipo_doc = 'N/CR',
+                            nro_doc = @nro_doc
+                        WHERE doc_num = @doc_num
+                    `);
+
                 await transaction.commit();
 
                 return {
@@ -803,10 +839,27 @@ router.post('/', async (req, res) => {
             }
         });
 
+        if (outcome.notFound) {
+            return res.status(404).json({ success: false, message: 'Sede no encontrada.' });
+        }
+
+        const successResult = outcome.results.find(r => r.success);
+        if (!successResult) {
+            const firstError = outcome.results[0]?.error || 'Error al registrar Devolución.';
+            return res.status(400).json({
+                success: false,
+                message: firstError,
+                results: outcome.results
+            });
+        }
+
         res.status(200).json({
             success: true,
-            message: `Devolución ${outcome.doc_num} procesada con éxito (Nota de Crédito: ${outcome.nro_doc}).`,
-            data: outcome
+            message: `Devolución ${successResult.doc_num} procesada con éxito (Nota de Crédito: ${successResult.nro_doc}).`,
+            data: {
+                ...successResult,
+                results: outcome.results
+            }
         });
 
     } catch (error) {

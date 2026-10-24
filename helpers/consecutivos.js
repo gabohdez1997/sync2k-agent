@@ -102,43 +102,129 @@ const DOC_TYPE_CONFIG = {
         co_tipo_serie: 'V020',
         co_consecutivos: ['DOC_VEN_N/CR', 'NCR_NUM', 'N_CR'],
         table: 'saDocumentoVenta',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'N/CR'
+    },
+    V020: {
+        co_tipo_serie: 'V020',
+        co_consecutivos: ['DOC_VEN_N/CR', 'NCR_NUM', 'N_CR'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'N/CR'
     },
     AJUSTE_NEGATIVO_VENTA: {
         co_tipo_serie: 'V012',
         co_consecutivos: ['DOC_VEN_AJNM', 'AJNM_NUM', 'AJNM'],
         table: 'saDocumentoVenta',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNM'
+    },
+    V012: {
+        co_tipo_serie: 'V012',
+        co_consecutivos: ['DOC_VEN_AJNM', 'AJNM_NUM', 'AJNM'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNM'
     },
     AJUSTE_POSITIVO_VENTA: {
         co_tipo_serie: 'V014',
         co_consecutivos: ['DOC_VEN_AJPM', 'AJPM_NUM', 'AJPM'],
         table: 'saDocumentoVenta',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPM'
+    },
+    V014: {
+        co_tipo_serie: 'V014',
+        co_consecutivos: ['DOC_VEN_AJPM', 'AJPM_NUM', 'AJPM'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPM'
     },
     AJUSTE_NEGATIVO_COMPRA: {
         co_tipo_serie: 'C008',
         co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
         table: 'saDocumentoCompra',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNA'
     },
     AJNA: {
         co_tipo_serie: 'C008',
         co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
         table: 'saDocumentoCompra',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNA'
+    },
+    C008: {
+        co_tipo_serie: 'C008',
+        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNA'
     },
     AJUSTE_POSITIVO_COMPRA: {
         co_tipo_serie: 'C010',
         co_consecutivos: ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'],
         table: 'saDocumentoCompra',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPA'
     },
     AJPA: {
         co_tipo_serie: 'C010',
         co_consecutivos: ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'],
         table: 'saDocumentoCompra',
-        col: 'nro_doc'
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPA'
+    },
+    C010: {
+        co_tipo_serie: 'C010',
+        co_consecutivos: ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPA'
+    },
+    IVAN_COMPRA: {
+        co_tipo_serie: 'C016',
+        co_consecutivos: ['DOC_COM_IVAN', 'IVAN_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'IVAN'
+    },
+    C016: {
+        co_tipo_serie: 'C016',
+        co_consecutivos: ['DOC_COM_IVAN', 'IVAN_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'IVAN'
+    },
+    ISLR_COMPRA: {
+        co_tipo_serie: 'C015',
+        co_consecutivos: ['DOC_COM_ISLR', 'ISLR_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'ISLR'
+    },
+    C015: {
+        co_tipo_serie: 'C015',
+        co_consecutivos: ['DOC_COM_ISLR', 'ISLR_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'ISLR'
     }
 };
 
@@ -160,18 +246,23 @@ async function getProximoConsecutivo(params) {
         throw new Error('getProximoConsecutivo: Se requiere un runner (pool o transaction de mssql).');
     }
 
-    // Resolver configuración si se pasó un alias conocido (ej. 'COTIZACION')
+    // Resolver configuración si se pasó un alias conocido (ej. 'COTIZACION', 'V020', etc.)
     let co_tipo_serie = params.co_tipo_serie || '';
     let co_consecutivos = params.co_consecutivos || [];
     let table = params.table || '';
     let col = params.col || 'doc_num';
+    let filter_col = params.filter_col || '';
+    let filter_val = params.filter_val || '';
 
-    if (DOC_TYPE_CONFIG[co_tipo_serie.toUpperCase()]) {
-        const conf = DOC_TYPE_CONFIG[co_tipo_serie.toUpperCase()];
+    const confKey = Object.keys(DOC_TYPE_CONFIG).find(k => k.toUpperCase() === co_tipo_serie.toUpperCase());
+    if (confKey) {
+        const conf = DOC_TYPE_CONFIG[confKey];
         co_tipo_serie = conf.co_tipo_serie;
         if (!co_consecutivos.length) co_consecutivos = conf.co_consecutivos;
         if (!table) table = conf.table;
         if (params.col === undefined) col = conf.col;
+        if (!filter_col && conf.filter_col) filter_col = conf.filter_col;
+        if (!filter_val && conf.filter_val) filter_val = conf.filter_val;
     }
 
     if (!co_consecutivos.length) {
@@ -253,6 +344,7 @@ async function getProximoConsecutivo(params) {
             const meta = metaRes.recordset[0] || { prefijo: '', sufijo: '', longitud: 10 };
 
             let maxN = 1;
+            const filterWhere = (filter_col && filter_val) ? `WHERE LTRIM(RTRIM(${filter_col})) = '${filter_val}'` : '';
             if (table && col) {
                 const maxRes = await runner.request().query(`
                     SELECT ISNULL(MAX(
@@ -263,6 +355,7 @@ async function getProximoConsecutivo(params) {
                         END
                     ), 0) + 1 AS prox_n
                     FROM ${table}
+                    ${filterWhere}
                 `);
                 maxN = Number(maxRes.recordset[0]?.prox_n || 1);
             }
@@ -287,6 +380,7 @@ async function getProximoConsecutivo(params) {
     // sincronizarlo automáticamente hacia adelante para evitar saltos o colisiones.
     if (table && col) {
         try {
+            const filterWhere = (filter_col && filter_val) ? `WHERE LTRIM(RTRIM(${filter_col})) = '${filter_val}'` : '';
             const maxRes = await runner.request().query(`
                 SELECT ISNULL(MAX(
                     CASE 
@@ -296,6 +390,7 @@ async function getProximoConsecutivo(params) {
                     END
                 ), 0) AS max_n
                 FROM ${table}
+                ${filterWhere}
             `);
             const maxN = Number(maxRes.recordset[0]?.max_n || 0);
             if (maxN >= Number(corrRow.prox_n)) {
