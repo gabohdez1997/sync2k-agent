@@ -67,7 +67,7 @@ router.get('/', async (req, res) => {
                 }
 
                 if (con_saldo === 'true' || con_saldo === '1') {
-                    whereClauses.push("ISNULL(d.saldo, 0) > 5.00 AND (d.saldo / CASE WHEN ISNULL(f.tasa, 0) <= 0 THEN 1 ELSE f.tasa END) >= 0.01 AND f.anulado = 0");
+                    whereClauses.push("ISNULL(d.saldo, 0) > 0 AND f.anulado = 0");
                 }
 
                 if (doc_num) {

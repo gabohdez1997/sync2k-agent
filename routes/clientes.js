@@ -852,7 +852,6 @@ router.get('/:co_cli/documentos', async (req, res) => {
                     WHERE LTRIM(RTRIM(d.co_cli)) = LTRIM(RTRIM(@co_cli))
                       AND d.saldo > 0 
                       AND d.anulado = 0
-                      AND NOT (RTRIM(d.co_tipo_doc) = 'FACT' AND ((d.saldo / CASE WHEN ISNULL(d.tasa, 0) <= 0 THEN 1 ELSE d.tasa END) < 0.01 OR d.saldo <= 5.00))
                 `);
             return r.recordset.map(d => ({ ...d, co_cli, sede_id: srv.id, sede_nombre: srv.name }));
         });

@@ -133,8 +133,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                 let whereClauses = [
                     "d.saldo > 0",
                     "d.anulado = 0",
-                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')",
-                    "NOT (RTRIM(d.co_tipo_doc) = 'FACT' AND ((d.saldo / CASE WHEN ISNULL(d.tasa, 0) <= 0 THEN 1 ELSE d.tasa END) < 0.01 OR d.saldo <= 5.00))"
+                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')"
                 ];
 
                 if (search) {
