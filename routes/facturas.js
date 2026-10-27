@@ -105,7 +105,14 @@ router.get('/', async (req, res) => {
                     SELECT RTRIM(f.doc_num) AS doc_num, RTRIM(f.descrip) AS descrip,
                            RTRIM(f.co_cli)  AS co_cli,  RTRIM(cl.cli_des) AS cli_des,
                            f.fec_emis, f.fec_venc, f.fec_reg, f.fe_us_in AS fec_us_in, f.fe_us_mo AS fec_us_mo, f.anulado,
-                           RTRIM(f.co_mone) AS co_mone, f.tasa, f.total_neto, f.monto_imp, f.total_bruto,
+                           RTRIM(f.co_mone) AS co_mone,
+                           f.tasa AS tasa_origen,
+                           CASE 
+                               WHEN ISNULL(f.tasa, 0) > 1 THEN f.tasa 
+                               ELSE ISNULL(t_hist.tasa_v, 1) 
+                           END AS tasa,
+                           ISNULL(t_hist.tasa_v, 1) AS tasa_fecha,
+                           f.total_neto, f.monto_imp, f.total_bruto,
                            ISNULL(f.otros1, 0) AS otros1,
                            ISNULL(d.saldo, 0) AS saldo,
                            RTRIM(f.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(f.co_us_in) AS co_us_in, RTRIM(f.co_sucu_in) AS co_sucu_in
@@ -113,6 +120,15 @@ router.get('/', async (req, res) => {
                     LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(d.nro_doc)) AND LTRIM(RTRIM(d.co_tipo_doc)) = 'FACT'
                     LEFT JOIN saCliente cl ON f.co_cli = cl.co_cli
                     LEFT JOIN saVendedor v ON f.co_ven = v.co_ven
+                    OUTER APPLY (
+                        SELECT TOP 1 t.tasa_v
+                        FROM saTasa t
+                        WHERE (LTRIM(RTRIM(t.co_mone)) IN ('US$','USD','DOL','$','US') OR LTRIM(RTRIM(t.co_mone)) NOT IN ('BS','VES','VEB','VEF'))
+                        ORDER BY 
+                            CASE WHEN t.fecha <= f.fec_emis THEN 0 ELSE 1 END,
+                            CASE WHEN t.fecha <= f.fec_emis THEN t.fecha END DESC,
+                            t.fecha ASC
+                    ) t_hist
                     WHERE ${whereSQL}
                     ORDER BY ${orderSQL}
                 `);
@@ -188,7 +204,13 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(f.co_ven)  AS co_ven,  RTRIM(v.ven_des)  AS ven_des,
                                RTRIM(f.co_cond) AS co_cond, RTRIM(cd.cond_des) AS cond_des,
                                f.fec_emis, f.fec_venc, f.fec_reg, f.fe_us_in AS fec_us_in, f.fe_us_mo AS fec_us_mo, f.anulado,
-                               RTRIM(f.co_mone) AS co_mone, f.tasa,
+                               RTRIM(f.co_mone) AS co_mone,
+                               f.tasa AS tasa_origen,
+                               CASE 
+                                   WHEN ISNULL(f.tasa, 0) > 1 THEN f.tasa 
+                                   ELSE ISNULL(t_hist.tasa_v, 1) 
+                               END AS tasa,
+                               ISNULL(t_hist.tasa_v, 1) AS tasa_fecha,
                                f.total_bruto, f.monto_imp, f.total_neto,
                                ISNULL(f.otros1, 0) AS otros1,
                                igtf.base_imponible AS igtf_base, igtf.porc_aplic AS igtf_porc,
@@ -205,6 +227,15 @@ router.get('/:doc_num', async (req, res) => {
                         LEFT JOIN saVendedor     v  ON f.co_ven  = v.co_ven
                         LEFT JOIN saCondicionPago cd ON f.co_cond = cd.co_cond
                         LEFT JOIN saZona         z  ON cl.co_zon = z.co_zon
+                        OUTER APPLY (
+                            SELECT TOP 1 t.tasa_v
+                            FROM saTasa t
+                            WHERE (LTRIM(RTRIM(t.co_mone)) IN ('US$','USD','DOL','$','US') OR LTRIM(RTRIM(t.co_mone)) NOT IN ('BS','VES','VEB','VEF'))
+                            ORDER BY 
+                                CASE WHEN t.fecha <= f.fec_emis THEN 0 ELSE 1 END,
+                                CASE WHEN t.fecha <= f.fec_emis THEN t.fecha END DESC,
+                                t.fecha ASC
+                        ) t_hist
                         WHERE LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(@doc_num))
                     `),
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`
