@@ -3,6 +3,79 @@ const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit, aggregateRead, resolveServer } = require('../helpers/multiSede');
 
+function normalizeTaxId(raw) {
+    return String(raw || '').trim().toUpperCase().replace(/[\s.-]/g, '');
+}
+
+function isPersonaNaturalCliente(cli) {
+    if (!cli) return false;
+    const cleanRif = normalizeTaxId(cli.rif);
+    if (/^[JGC]\d{5,12}$/.test(cleanRif)) return false;
+    if (/^[VEP]\d{5,12}$/.test(cleanRif)) return true;
+    if (/^\d{5,12}$/.test(cleanRif)) return true;
+
+    const cleanCoCli = normalizeTaxId(cli.co_cli);
+    if (/^[JGC]\d{5,12}$/.test(cleanCoCli)) return false;
+    if (/^[VEP]\d{5,12}$/.test(cleanCoCli)) return true;
+
+    const tp = String(cli.tipo_per || '').trim();
+    if (tp === '1' || tp === '2') return true;
+    if (tp === '3' || tp === '4' || tp === '6') return false;
+
+    if (/^\d{6,12}$/.test(cleanCoCli)) return true;
+    return false;
+}
+
+function inferTipoPerFromRif(rif, currentTipoPer = '1') {
+    const cleanRif = normalizeTaxId(rif);
+    const current = String(currentTipoPer || '1').trim() || '1';
+    if (/^[JGC]\d{5,12}$/.test(cleanRif)) {
+        return (current === '4' || current === '5' || current === '6') ? current : '3';
+    }
+    if (/^[VEP]\d{5,12}$/.test(cleanRif) || /^\d{5,12}$/.test(cleanRif)) {
+        return current === '2' ? '2' : '1';
+    }
+    return current;
+}
+
+function normalizeClienteRetentionFields(data, fallbackRow = null) {
+    const effectiveRif = data.rif ?? fallbackRow?.rif ?? '';
+    const effectiveCoCli = data.co_cli ?? fallbackRow?.co_cli ?? '';
+    const requestedTipoPer = String(data.tipo_per || fallbackRow?.tipo_per || '1').trim() || '1';
+    const effectiveTipoPer = inferTipoPerFromRif(effectiveRif || effectiveCoCli, requestedTipoPer);
+    const isPersonaNatural = isPersonaNaturalCliente({
+        rif: effectiveRif,
+        co_cli: effectiveCoCli,
+        tipo_per: effectiveTipoPer
+    });
+
+    const rawPorcEsp = data.porc_esp !== undefined
+        ? (Number(data.porc_esp) || 0)
+        : (Number(fallbackRow?.porc_esp) || 0);
+    const rawContribuE = data.contribu_e !== undefined
+        ? (data.contribu_e === true || data.contribu_e === 'true' || data.contribu_e === 1 || data.contribu_e === '1')
+        : Boolean(fallbackRow?.contribu_e);
+
+    const canBeEspecial = !isPersonaNatural && rawContribuE && rawPorcEsp > 0;
+    return {
+        tipo_per: effectiveTipoPer,
+        isPersonaNatural,
+        contribu_e: canBeEspecial ? 1 : 0,
+        porc_esp: canBeEspecial ? rawPorcEsp : 0
+    };
+}
+
+function sanitizeClienteRowForRead(c) {
+    const norm = normalizeClienteRetentionFields(c);
+    return {
+        ...c,
+        tipo_per: norm.tipo_per,
+        contribu_e: Boolean(norm.contribu_e),
+        porc_esp: norm.porc_esp,
+        es_persona_natural: norm.isPersonaNatural
+    };
+}
+
 // ── Helper: inputs del STORED PROCEDURE pInsertarCliente ───────────────────
 function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999') {
     const d = defaults;
@@ -66,18 +139,19 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sRevisado', sql.Char(1), '0');
     r.input('sTrasnfe', sql.Char(1), '0');
     r.input('sCo_Sucu_In', sql.Char(6), padProfit(d.co_sucu || '01', 6));
-    r.input('bJuridico', sql.Bit, 0);
+    const taxNorm = normalizeClienteRetentionFields(data);
+    r.input('bJuridico', sql.Bit, taxNorm.isPersonaNatural ? 0 : 1);
     r.input('iTipo_Adi', sql.Int, 1);
     r.input('sMatriz', sql.Char(16), null);
     r.input('sCo_Tab', sql.Char(6), null);
-    r.input('sTipo_Per', sql.Char(1), data.tipo_per || '1');
+    r.input('sTipo_Per', sql.Char(1), taxNorm.tipo_per);
     r.input('sCo_pais', sql.Char(6), 'VE');
     r.input('sCiudad', sql.VarChar(50), '');
     r.input('sZip', sql.VarChar(20), '');
     r.input('sWebSite', sql.VarChar(200), '');
-    r.input('bContribu_E', sql.Bit, data.contribu_e ? 1 : 0);
+    r.input('bContribu_E', sql.Bit, taxNorm.contribu_e);
     r.input('bRete_Regis_Doc', sql.Bit, 0);
-    r.input('dePorc_Esp', sql.Decimal(18, 5), Number(data.porc_esp) || 0);
+    r.input('dePorc_Esp', sql.Decimal(18, 5), taxNorm.porc_esp);
     r.input('sN_cr', sql.Char(6), null);
     r.input('sN_db', sql.Char(6), null);
     r.input('sTComp', sql.Char(6), null);
@@ -149,18 +223,19 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999', def
     r.input('sCampos', sql.VarChar(sql.MAX), null);
     r.input('sRevisado', sql.Char(1), '0');
     r.input('sTrasnfe', sql.Char(1), '0');
-    r.input('bJuridico', sql.Bit, 0);
+    const taxNorm = normalizeClienteRetentionFields(data, row);
+    r.input('bJuridico', sql.Bit, taxNorm.isPersonaNatural ? 0 : 1);
     r.input('iTipo_Adi', sql.Int, 1);
     r.input('sMatriz', sql.Char(16), null);
     r.input('sCo_Tab', sql.Char(6), null);
-    r.input('sTipo_Per', sql.Char(1), data.tipo_per || row.tipo_per || '1');
+    r.input('sTipo_Per', sql.Char(1), taxNorm.tipo_per);
     r.input('sCo_pais', sql.VarChar(6), 'VE');
     r.input('sCiudad', sql.VarChar(50), '');
     r.input('sZip', sql.VarChar(20), '');
     r.input('sWebSite', sql.VarChar(200), '');
-    r.input('bContribu_E', sql.Bit, data.contribu_e === true || data.contribu_e === 'true' ? 1 : 0);
+    r.input('bContribu_E', sql.Bit, taxNorm.contribu_e);
     r.input('bRete_Regis_Doc', sql.Bit, 0);
-    r.input('dePorc_Esp', sql.Decimal(18, 5), Number(data.porc_esp) || 0);
+    r.input('dePorc_Esp', sql.Decimal(18, 5), taxNorm.porc_esp);
     r.input('tsValidador', sql.VarBinary(8), row.validador);
     r.input('gRowguid', sql.UniqueIdentifier, null);
     r.input('sN_cr', sql.Char(6), null);
@@ -325,7 +400,7 @@ router.get('/', async (req, res) => {
                      ORDER BY cli.cli_des
                      OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`
                 );
-                return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
+                return result.recordset.map(c => ({ ...sanitizeClienteRowForRead(c), sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) {
                 console.error(`Error al listar clientes en sede ${srv.id}:`, e.message);
                 return [];
@@ -414,7 +489,7 @@ router.get('/search', async (req, res) => {
                      ORDER BY cli.cli_des
                      OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`
                 );
-                return result.recordset.map(c => ({ ...c, sede_id: srv.id, sede_nombre: srv.name }));
+                return result.recordset.map(c => ({ ...sanitizeClienteRowForRead(c), sede_id: srv.id, sede_nombre: srv.name }));
             } catch (e) { return []; }
         }));
 
@@ -603,7 +678,7 @@ router.get('/:co_cli', async (req, res) => {
                      WHERE LTRIM(RTRIM(cli.co_cli)) = LTRIM(RTRIM(@co_cli))`
                 );
                 if (!result.recordset.length) return null;
-                return { ...result.recordset[0], sede_id: srv.id, sede_nombre: srv.name };
+                return { ...sanitizeClienteRowForRead(result.recordset[0]), sede_id: srv.id, sede_nombre: srv.name };
             } catch (e) { return { sede_id: srv.id, sede_nombre: srv.name, error: e.message }; }
         }));
 

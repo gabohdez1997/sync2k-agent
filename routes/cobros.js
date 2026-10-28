@@ -133,6 +133,57 @@ async function resolveNcrOriginDoc(transaction, { nroDoc, docOrig, nroOrig, defa
     };
 }
 
+function normalizeTaxId(raw) {
+    return String(raw || '').trim().toUpperCase().replace(/[\s.-]/g, '');
+}
+
+function isPersonaNaturalCliente(cliRow) {
+    if (!cliRow) return false;
+    const cleanRif = normalizeTaxId(cliRow.rif);
+    if (/^[JGC]\d{5,12}$/.test(cleanRif)) return false;
+    if (/^[VEP]\d{5,12}$/.test(cleanRif)) return true;
+    if (/^\d{5,12}$/.test(cleanRif)) return true;
+
+    const cleanCoCli = normalizeTaxId(cliRow.co_cli);
+    if (/^[JGC]\d{5,12}$/.test(cleanCoCli)) return false;
+    if (/^[VEP]\d{5,12}$/.test(cleanCoCli)) return true;
+
+    const tp = String(cliRow.tipo_per || '').trim();
+    if (tp === '1' || tp === '2') return true;
+    if (tp === '3' || tp === '4' || tp === '6') return false;
+
+    if (/^\d{6,12}$/.test(cleanCoCli)) return true;
+    return false;
+}
+
+function evaluateClientRetentionEligibility(cliRow) {
+    const isPersonaNatural = isPersonaNaturalCliente(cliRow);
+    const rawPorcEsp = Number(cliRow?.porc_esp) || 0;
+    const rawContribuE = Boolean(
+        cliRow?.contribu_e === true ||
+        cliRow?.contribu_e === 1 ||
+        cliRow?.contribu_e === '1' ||
+        String(cliRow?.contribu_e || '').trim().toLowerCase() === 'true'
+    );
+    const canRetainIva = !isPersonaNatural && rawContribuE && rawPorcEsp > 0;
+    const canRetainIslr = !isPersonaNatural;
+    return {
+        isPersonaNatural,
+        canRetainIva,
+        canRetainIslr,
+        contribu_e: canRetainIva,
+        porc_esp: canRetainIva ? rawPorcEsp : 0
+    };
+}
+
+function isFiscalDebitDocRow({ coSucuIn, montoImp, impfisfac, defaultFiscalSucu }) {
+    if (Boolean(String(impfisfac || '').trim())) return true;
+    if (Number(montoImp || 0) > 0) return true;
+    const fiscalSucuUpper = String(defaultFiscalSucu || '').trim().toUpperCase();
+    const docSucuUpper = String(coSucuIn || '').trim().toUpperCase();
+    return Boolean(fiscalSucuUpper && docSucuUpper && fiscalSucuUpper === docSucuUpper);
+}
+
 /**
  * @swagger
  * tags:
@@ -301,7 +352,8 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(d.co_cli) AS co_cli,
                            RTRIM(c.cli_des) AS cli_des,
                            RTRIM(c.rif) AS rif,
-                           c.contribu_e, c.porc_esp, c.co_ven,
+                           RTRIM(ISNULL(c.tipo_per, '')) AS tipo_per,
+                           c.contrib, c.contribu_e, c.porc_esp, c.co_ven,
                            RTRIM(f.co_us_in) AS co_us_in,
                            ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1,
                            ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN (
@@ -422,11 +474,17 @@ router.get('/facturas/pendientes', async (req, res) => {
                     ORDER BY d.fec_emis DESC
                 `);;
 
-                return result.recordset.map(r => ({
-                    ...r,
-                    sede_id: srv.id,
-                    sede_nombre: srv.name
-                }));
+                return result.recordset.map(r => {
+                    const elig = evaluateClientRetentionEligibility(r);
+                    return {
+                        ...r,
+                        contribu_e: elig.contribu_e,
+                        porc_esp: elig.porc_esp,
+                        es_persona_natural: elig.isPersonaNatural,
+                        sede_id: srv.id,
+                        sede_nombre: srv.name
+                    };
+                });
             } catch (e) {
                 console.error(`[PENDIENTES] Error en sede ${srv.id}:`, e.message);
                 return [];
@@ -469,6 +527,7 @@ router.get('/:cob_num', async (req, res) => {
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT RTRIM(c.cob_num) AS cob_num, RTRIM(c.recibo) AS recibo, RTRIM(c.descrip) AS descrip,
                                RTRIM(c.co_cli) AS co_cli, RTRIM(cl.cli_des) AS cli_des, RTRIM(cl.rif) AS rif,
+                               RTRIM(ISNULL(cl.tipo_per, '')) AS tipo_per, cl.contrib,
                                ISNULL(cl.porc_esp, 0) AS porc_esp, cl.contribu_e,
                                c.fe_us_in AS fecha, c.anulado,
                                CASE 
@@ -676,8 +735,13 @@ router.get('/:cob_num', async (req, res) => {
                 ]);
 
                 if (!resEnc.recordset.length) return null;
+                const encRow = resEnc.recordset[0];
+                const encElig = evaluateClientRetentionEligibility(encRow);
                 return {
-                    ...resEnc.recordset[0],
+                    ...encRow,
+                    contribu_e: encElig.contribu_e,
+                    porc_esp: encElig.porc_esp,
+                    es_persona_natural: encElig.isPersonaNatural,
                     renglones: resReng.recordset,
                     formas_pago: resTP.recordset,
                     retenciones_iva: resIva.recordset,
@@ -967,6 +1031,18 @@ router.post('/', async (req, res) => {
                 return creditDocTypes.includes(cType) ? acc + Math.abs(Number(c.mont_cob) || 0) : acc;
             }, 0);
 
+            const cliEligRes = await transaction.request()
+                .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                .query(`
+                    SELECT TOP 1 RTRIM(co_cli) AS co_cli, RTRIM(ISNULL(rif, '')) AS rif,
+                           RTRIM(ISNULL(tipo_per, '')) AS tipo_per, contribu_e, ISNULL(porc_esp, 0) AS porc_esp
+                    FROM saCliente
+                    WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))
+                `);
+            const clientRetentionElig = evaluateClientRetentionEligibility(
+                cliEligRes.recordset[0] || { co_cli: data.co_cli }
+            );
+
             let nextRengNum = 1;
             for (let i = 0; i < sortedRenglones.length; i++) {
                 const line = sortedRenglones[i];
@@ -1000,6 +1076,9 @@ router.post('/', async (req, res) => {
                 let docOrig = '';
                 let docNroOrig = '';
                 let docTotalNeto = 0;
+                let docMontoImp = 0;
+                let docCoSucuIn = '';
+                let docImpfisfac = '';
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
                 const isNcLine = ['N/CR', 'NCR'].includes(docTypeUpper);
                 const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
@@ -1008,18 +1087,27 @@ router.post('/', async (req, res) => {
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                         .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                         .query(`
-                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, total_neto, co_cli, co_ven,
-                                   RTRIM(ISNULL(n_control, '')) AS n_control,
-                                   RTRIM(ISNULL(doc_orig, '')) AS doc_orig,
-                                   RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
-                                   CONVERT(VARCHAR(10), fec_emis, 120) AS fec_emis_str
-                            FROM saDocumentoVenta
-                            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-                              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                            SELECT RTRIM(dv.co_mone) AS co_mone, dv.tasa, dv.saldo, dv.total_neto, dv.co_cli, dv.co_ven,
+                                   ISNULL(dv.monto_imp, 0) AS monto_imp,
+                                   RTRIM(ISNULL(dv.co_sucu_in, '')) AS co_sucu_in,
+                                   COALESCE(NULLIF(RTRIM(fv.impfisfac), ''), NULLIF(RTRIM(fv.impfis), ''), NULLIF(RTRIM(dv.impfisfac), ''), RTRIM(ISNULL(dv.impfis, ''))) AS impfisfac,
+                                   RTRIM(ISNULL(dv.n_control, '')) AS n_control,
+                                   RTRIM(ISNULL(dv.doc_orig, '')) AS doc_orig,
+                                   RTRIM(ISNULL(dv.nro_orig, '')) AS nro_orig,
+                                   CONVERT(VARCHAR(10), dv.fec_emis, 120) AS fec_emis_str
+                            FROM saDocumentoVenta dv
+                            LEFT JOIN saFacturaVenta fv
+                                ON LTRIM(RTRIM(dv.co_tipo_doc)) = 'FACT'
+                               AND fv.doc_num = dv.nro_doc
+                            WHERE LTRIM(RTRIM(dv.co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                              AND LTRIM(RTRIM(dv.nro_doc)) = LTRIM(RTRIM(@nro_doc))
                         `);
                     if (docInfo.recordset.length > 0) {
                         docSaldo = Number(docInfo.recordset[0].saldo || 0);
                         docTotalNeto = Number(docInfo.recordset[0].total_neto || docSaldo);
+                        docMontoImp = Number(docInfo.recordset[0].monto_imp || 0);
+                        docCoSucuIn = docInfo.recordset[0].co_sucu_in || '';
+                        docImpfisfac = docInfo.recordset[0].impfisfac || '';
                         docTasa = Number(docInfo.recordset[0].tasa || 1);
                         docMone = docInfo.recordset[0].co_mone || 'BS';
                         docCoCli = docInfo.recordset[0].co_cli || docCoCli;
@@ -1035,6 +1123,51 @@ router.post('/', async (req, res) => {
                 let adjustedMontoRetencionIva = Math.abs(Number(line.monto_retencion_iva || 0));
                 let adjustedMontoRetencion = Math.abs(Number(line.monto_retencion || 0));
                 const hasLineRetention = adjustedMontoRetencionIva > 0.005 || adjustedMontoRetencion > 0.005;
+
+                // Validación estricta de elegibilidad fiscal del cliente y del documento antes de aplicar retenciones
+                if (adjustedMontoRetencionIva > 0.005) {
+                    if (clientRetentionElig.isPersonaNatural) {
+                        throw new Error('El cliente es Persona Natural; no aplican retenciones de IVA.');
+                    }
+                    if (!clientRetentionElig.canRetainIva) {
+                        throw new Error('El cliente no es Contribuyente Especial con porcentaje de retención activo; no aplica retención de IVA.');
+                    }
+                    if (!['FACT', 'N/DB', 'NDEB', 'N/CR', 'NCR'].includes(docTypeUpper)) {
+                        throw new Error(`El tipo de documento ${docTypeUpper} no admite retención de IVA.`);
+                    }
+                    if (!isNcLine) {
+                        const isDebitFiscal = isFiscalDebitDocRow({
+                            coSucuIn: docCoSucuIn,
+                            montoImp: docMontoImp,
+                            impfisfac: docImpfisfac,
+                            defaultFiscalSucu: sucuCode
+                        });
+                        if (!isDebitFiscal) {
+                            throw new Error(`No se puede registrar retención de IVA en el documento ${line.nro_doc.trim()} porque no es un documento fiscal.`);
+                        }
+                    }
+                    if (!(docMontoImp > 0)) {
+                        throw new Error(`No se puede registrar retención de IVA en el documento ${line.nro_doc.trim()} porque no posee IVA gravado.`);
+                    }
+                }
+
+                if (adjustedMontoRetencion > 0.005) {
+                    if (clientRetentionElig.isPersonaNatural) {
+                        throw new Error('El cliente es Persona Natural; no aplica retención de ISLR.');
+                    }
+                    if (!['FACT', 'N/DB', 'NDEB'].includes(docTypeUpper)) {
+                        throw new Error(`El tipo de documento ${docTypeUpper} no admite retención de ISLR.`);
+                    }
+                    const isDebitFiscal = isFiscalDebitDocRow({
+                        coSucuIn: docCoSucuIn,
+                        montoImp: docMontoImp,
+                        impfisfac: docImpfisfac,
+                        defaultFiscalSucu: sucuCode
+                    });
+                    if (!isDebitFiscal) {
+                        throw new Error(`No se puede registrar retención de ISLR en el documento ${line.nro_doc.trim()} porque no es un documento fiscal.`);
+                    }
+                }
 
                 // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
                 if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) {
@@ -2071,6 +2204,18 @@ router.put('/:cob_num', async (req, res) => {
                 return creditDocTypes.includes(cType) ? acc + Math.abs(Number(c.mont_cob) || 0) : acc;
             }, 0);
 
+            const cliEligRes = await transaction.request()
+                .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                .query(`
+                    SELECT TOP 1 RTRIM(co_cli) AS co_cli, RTRIM(ISNULL(rif, '')) AS rif,
+                           RTRIM(ISNULL(tipo_per, '')) AS tipo_per, contribu_e, ISNULL(porc_esp, 0) AS porc_esp
+                    FROM saCliente
+                    WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@co_cli))
+                `);
+            const clientRetentionElig = evaluateClientRetentionEligibility(
+                cliEligRes.recordset[0] || { co_cli: data.co_cli }
+            );
+
             let nextRengNum = 1;
 
             for (let i = 0; i < sortedRenglones.length; i++) {
@@ -2102,6 +2247,9 @@ router.put('/:cob_num', async (req, res) => {
                 let docOrig = '';
                 let docNroOrig = '';
                 let docTotalNeto = 0;
+                let docMontoImp = 0;
+                let docCoSucuIn = '';
+                let docImpfisfac = '';
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
                 const isNcLine = ['N/CR', 'NCR'].includes(docTypeUpper);
                 const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
@@ -2110,18 +2258,27 @@ router.put('/:cob_num', async (req, res) => {
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                         .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                         .query(`
-                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, total_neto, co_cli, co_ven,
-                                   RTRIM(ISNULL(n_control, '')) AS n_control,
-                                   RTRIM(ISNULL(doc_orig, '')) AS doc_orig,
-                                   RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
-                                   CONVERT(VARCHAR(10), fec_emis, 120) AS fec_emis_str
-                            FROM saDocumentoVenta
-                            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-                              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                            SELECT RTRIM(dv.co_mone) AS co_mone, dv.tasa, dv.saldo, dv.total_neto, dv.co_cli, dv.co_ven,
+                                   ISNULL(dv.monto_imp, 0) AS monto_imp,
+                                   RTRIM(ISNULL(dv.co_sucu_in, '')) AS co_sucu_in,
+                                   COALESCE(NULLIF(RTRIM(fv.impfisfac), ''), NULLIF(RTRIM(fv.impfis), ''), NULLIF(RTRIM(dv.impfisfac), ''), RTRIM(ISNULL(dv.impfis, ''))) AS impfisfac,
+                                   RTRIM(ISNULL(dv.n_control, '')) AS n_control,
+                                   RTRIM(ISNULL(dv.doc_orig, '')) AS doc_orig,
+                                   RTRIM(ISNULL(dv.nro_orig, '')) AS nro_orig,
+                                   CONVERT(VARCHAR(10), dv.fec_emis, 120) AS fec_emis_str
+                            FROM saDocumentoVenta dv
+                            LEFT JOIN saFacturaVenta fv
+                                ON LTRIM(RTRIM(dv.co_tipo_doc)) = 'FACT'
+                               AND fv.doc_num = dv.nro_doc
+                            WHERE LTRIM(RTRIM(dv.co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                              AND LTRIM(RTRIM(dv.nro_doc)) = LTRIM(RTRIM(@nro_doc))
                         `);
                     if (docInfo.recordset.length > 0) {
                         docSaldo = Number(docInfo.recordset[0].saldo || 0);
                         docTotalNeto = Number(docInfo.recordset[0].total_neto || docSaldo);
+                        docMontoImp = Number(docInfo.recordset[0].monto_imp || 0);
+                        docCoSucuIn = docInfo.recordset[0].co_sucu_in || '';
+                        docImpfisfac = docInfo.recordset[0].impfisfac || '';
                         docTasa = Number(docInfo.recordset[0].tasa || 1);
                         docMone = docInfo.recordset[0].co_mone || 'BS';
                         docCoCli = docInfo.recordset[0].co_cli || docCoCli;
@@ -2137,6 +2294,51 @@ router.put('/:cob_num', async (req, res) => {
                 let adjustedMontoRetencionIva = Math.abs(Number(line.monto_retencion_iva || 0));
                 let adjustedMontoRetencion = Math.abs(Number(line.monto_retencion || 0));
                 const hasLineRetention = adjustedMontoRetencionIva > 0.005 || adjustedMontoRetencion > 0.005;
+
+                // Validación estricta de elegibilidad fiscal del cliente y del documento en edición
+                if (adjustedMontoRetencionIva > 0.005) {
+                    if (clientRetentionElig.isPersonaNatural) {
+                        throw new Error('El cliente es Persona Natural; no aplican retenciones de IVA.');
+                    }
+                    if (!clientRetentionElig.canRetainIva) {
+                        throw new Error('El cliente no es Contribuyente Especial con porcentaje de retención activo; no aplica retención de IVA.');
+                    }
+                    if (!['FACT', 'N/DB', 'NDEB', 'N/CR', 'NCR'].includes(docTypeUpper)) {
+                        throw new Error(`El tipo de documento ${docTypeUpper} no admite retención de IVA.`);
+                    }
+                    if (!isNcLine) {
+                        const isDebitFiscal = isFiscalDebitDocRow({
+                            coSucuIn: docCoSucuIn,
+                            montoImp: docMontoImp,
+                            impfisfac: docImpfisfac,
+                            defaultFiscalSucu: sucuCode
+                        });
+                        if (!isDebitFiscal) {
+                            throw new Error(`No se puede registrar retención de IVA en el documento ${line.nro_doc.trim()} porque no es un documento fiscal.`);
+                        }
+                    }
+                    if (!(docMontoImp > 0)) {
+                        throw new Error(`No se puede registrar retención de IVA en el documento ${line.nro_doc.trim()} porque no posee IVA gravado.`);
+                    }
+                }
+
+                if (adjustedMontoRetencion > 0.005) {
+                    if (clientRetentionElig.isPersonaNatural) {
+                        throw new Error('El cliente es Persona Natural; no aplica retención de ISLR.');
+                    }
+                    if (!['FACT', 'N/DB', 'NDEB'].includes(docTypeUpper)) {
+                        throw new Error(`El tipo de documento ${docTypeUpper} no admite retención de ISLR.`);
+                    }
+                    const isDebitFiscal = isFiscalDebitDocRow({
+                        coSucuIn: docCoSucuIn,
+                        montoImp: docMontoImp,
+                        impfisfac: docImpfisfac,
+                        defaultFiscalSucu: sucuCode
+                    });
+                    if (!isDebitFiscal) {
+                        throw new Error(`No se puede registrar retención de ISLR en el documento ${line.nro_doc.trim()} porque no es un documento fiscal.`);
+                    }
+                }
 
                 // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
                 if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) {
