@@ -806,12 +806,22 @@ router.get('/:co_cli/documentos', async (req, res) => {
                     SELECT RTRIM(d.co_tipo_doc) AS co_tipo_doc, 
                            RTRIM(d.nro_doc) AS nro_doc, 
                            d.fec_emis, d.fec_venc, 
-                           d.total_neto, d.saldo, d.monto_imp,
+                           d.total_neto, d.total_bruto, d.saldo, d.monto_imp, d.porc_imp,
                            RTRIM(d.co_mone) AS co_mone,
                            CASE WHEN d.tasa <= 1.000001 THEN 
                                 ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), d.fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
                            ELSE d.tasa END AS tasa,
                            RTRIM(d.n_control) AS n_control,
+                           RTRIM(ISNULL(d.co_sucu_in, '')) AS co_sucu_in,
+                           RTRIM(ISNULL(d.doc_orig, '')) AS doc_orig,
+                           RTRIM(ISNULL(d.nro_orig, '')) AS nro_orig,
+                           COALESCE(NULLIF(RTRIM(f.impfisfac), ''), NULLIF(RTRIM(f.impfis), ''), NULLIF(RTRIM(d.impfisfac), ''), RTRIM(ISNULL(d.impfis, ''))) AS impfisfac,
+                           orig_info.num_doc_orig,
+                           orig_info.tipo_doc_orig,
+                           orig_info.n_control_orig,
+                           orig_info.monto_imp_orig,
+                           orig_info.co_sucu_in_orig,
+                           orig_info.impfisfac_orig,
                            d.rowguid,
                            ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN f.otros1 ELSE d.otros1 END, 0) AS otros1,
                            ISNULL(CASE WHEN RTRIM(d.co_tipo_doc) = 'FACT' THEN (
@@ -821,7 +831,10 @@ router.get('/:co_cli/documentos', async (req, res) => {
                                  AND LTRIM(RTRIM(r.co_art)) LIKE '09%'
                             ) ELSE 0 END, 0) AS base_islr_default,
                              ISNULL(RTRIM(f.co_ven), RTRIM(d.co_ven)) AS co_ven,
-                            ISNULL((SELECT SUM(cdr.monto_retencion_iva) 
+                            ISNULL((SELECT SUM(
+                                        CASE WHEN cdr.monto_retencion_iva > 0 THEN cdr.monto_retencion_iva
+                                             ELSE ISNULL((SELECT SUM(r2.mont_cob) FROM saCobroDocReng r2 WHERE r2.cob_num = c.cob_num AND r2.rowguid_reng_ori = cdr.rowguid AND UPPER(RTRIM(r2.co_tipo_doc)) IN ('IVAN', 'IVAP')), 0)
+                                        END)
                                     FROM saCobroDocReng cdr 
                                     INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
                                     WHERE c.anulado = 0 
@@ -833,13 +846,29 @@ router.get('/:co_cli/documentos', async (req, res) => {
                                     WHERE c.anulado = 0 
                                       AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                       AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_islr_bs,
-                            ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
-                                    FROM saCobroDocReng cdr 
-                                    INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
-                                    INNER JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO' AND LTRIM(RTRIM(dv.nro_orig)) = LTRIM(RTRIM(c.cob_num)) AND UPPER(RTRIM(dv.co_tipo_doc)) = 'IVAN' 
-                                    WHERE c.anulado = 0 
-                                      AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
-                                      AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_iva,
+                            COALESCE(
+                                (SELECT TOP 1 NULLIF(RTRIM(ri.num_comprobante), '')
+                                 FROM saCobroDocReng cdr
+                                 INNER JOIN saCobro c ON cdr.cob_num = c.cob_num
+                                 LEFT JOIN saCobroDocReng cdr_ret ON cdr_ret.cob_num = c.cob_num AND cdr_ret.rowguid_reng_ori = cdr.rowguid AND UPPER(RTRIM(cdr_ret.co_tipo_doc)) IN ('IVAN', 'IVAP')
+                                 INNER JOIN saCobroRetenIvaReng ri ON (ri.rowguid_reng_cob = cdr.rowguid OR (cdr_ret.rowguid IS NOT NULL AND ri.rowguid_reng_cob = cdr_ret.rowguid))
+                                 WHERE c.anulado = 0
+                                   AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc))
+                                   AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                                   AND NULLIF(RTRIM(ri.num_comprobante), '') IS NOT NULL),
+                                (SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
+                                 FROM saCobroDocReng cdr 
+                                 INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
+                                 LEFT JOIN saCobroDocReng cdr_ret ON cdr_ret.cob_num = c.cob_num AND cdr_ret.rowguid_reng_ori = cdr.rowguid AND UPPER(RTRIM(cdr_ret.co_tipo_doc)) IN ('IVAN', 'IVAP')
+                                 INNER JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO'
+                                    AND LTRIM(RTRIM(dv.nro_orig)) = LTRIM(RTRIM(c.cob_num))
+                                    AND UPPER(RTRIM(dv.co_tipo_doc)) IN ('IVAN', 'IVAP')
+                                    AND (cdr_ret.nro_doc IS NULL OR LTRIM(RTRIM(dv.nro_doc)) = LTRIM(RTRIM(cdr_ret.nro_doc)))
+                                 WHERE c.anulado = 0 
+                                   AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                   AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))),
+                                ''
+                            ) AS nro_comp_iva,
                             ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
                                     FROM saCobroDocReng cdr 
                                     INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
@@ -849,6 +878,48 @@ router.get('/:co_cli/documentos', async (req, res) => {
                                       AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_islr
                     FROM saDocumentoVenta d
                     LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            orig_src.num_doc_orig,
+                            orig_src.tipo_doc_orig,
+                            COALESCE(NULLIF(RTRIM(dv_orig.n_control), ''), RTRIM(ISNULL(fv_orig.n_control, ''))) AS n_control_orig,
+                            COALESCE(fv_orig.monto_imp, dv_orig.monto_imp, 0) AS monto_imp_orig,
+                            COALESCE(NULLIF(RTRIM(fv_orig.co_sucu_in), ''), RTRIM(ISNULL(dv_orig.co_sucu_in, ''))) AS co_sucu_in_orig,
+                            COALESCE(
+                                NULLIF(RTRIM(fv_orig.impfisfac), ''),
+                                NULLIF(RTRIM(fv_orig.impfis), ''),
+                                NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                                RTRIM(ISNULL(dv_orig.impfis, ''))
+                            ) AS impfisfac_orig
+                        FROM (
+                            SELECT TOP 1
+                                LTRIM(RTRIM(r_orig.num_doc)) AS num_doc_orig,
+                                ISNULL(NULLIF(LTRIM(RTRIM(r_orig.tipo_doc)), ''), 'FACT') AS tipo_doc_orig
+                            FROM saDevolucionCliente dc
+                            INNER JOIN saDevolucionClienteReng r_orig ON dc.doc_num = r_orig.doc_num
+                            WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                              AND dc.anulado = 0
+                              AND (
+                                  (UPPER(LTRIM(RTRIM(d.doc_orig))) = 'DEVO' AND LTRIM(RTRIM(dc.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                  OR LTRIM(RTRIM(dc.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                              )
+                              AND NULLIF(LTRIM(RTRIM(r_orig.num_doc)), '') IS NOT NULL
+                            UNION ALL
+                            SELECT
+                                LTRIM(RTRIM(d.nro_orig)) AS num_doc_orig,
+                                LTRIM(RTRIM(d.doc_orig)) AS tipo_doc_orig
+                            FROM (SELECT 1 AS _) AS direct_orig
+                            WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                              AND UPPER(LTRIM(RTRIM(d.doc_orig))) IN ('FACT', 'N/DB', 'NDEB')
+                              AND NULLIF(LTRIM(RTRIM(d.nro_orig)), '') IS NOT NULL
+                        ) orig_src
+                        LEFT JOIN saDocumentoVenta dv_orig
+                            ON LTRIM(RTRIM(dv_orig.co_tipo_doc)) = orig_src.tipo_doc_orig
+                           AND LTRIM(RTRIM(dv_orig.nro_doc)) = orig_src.num_doc_orig
+                        LEFT JOIN saFacturaVenta fv_orig
+                            ON orig_src.tipo_doc_orig = 'FACT'
+                           AND LTRIM(RTRIM(fv_orig.doc_num)) = orig_src.num_doc_orig
+                    ) orig_info
                     WHERE LTRIM(RTRIM(d.co_cli)) = LTRIM(RTRIM(@co_cli))
                       AND d.saldo > 0 
                       AND d.anulado = 0

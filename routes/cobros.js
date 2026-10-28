@@ -5,6 +5,121 @@ const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('.
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
 /**
+ * Obtiene el tipo de documento Profit ('IVAN' para débito, 'IVAP' para N/CR) y su próximo consecutivo.
+ */
+async function resolveIvaRetentionDocInfo(transaction, { isNcLine, sucuCode }) {
+    let retDocType = 'IVAN';
+    if (isNcLine) {
+        const resTipo = await transaction.request()
+            .query("SELECT TOP 1 RTRIM(co_tipo_doc) AS co_tipo_doc FROM saTipoDocumento WHERE UPPER(LTRIM(RTRIM(co_tipo_doc))) = 'IVAP'");
+        if (resTipo.recordset.length > 0) {
+            retDocType = 'IVAP';
+        }
+    }
+
+    const consecutivoCandidates = retDocType === 'IVAP'
+        ? ['DOC_VEN_IVAP', 'DOC_VEN_IVAN']
+        : ['DOC_VEN_IVAN'];
+
+    let nextNum = null;
+    for (const consecCode of consecutivoCandidates) {
+        try {
+            const rSuc = await transaction.request()
+                .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
+                .input('sCo_Consecutivo', sql.Char(16), padProfit(consecCode, 16))
+                .execute('pConsecutivoProximo');
+            nextNum = rSuc.recordset?.[0]?.ProximoConsecutivo?.trim();
+            if (nextNum) break;
+        } catch (_) {
+            // Intentar consecutivo global sin sucursal
+        }
+        try {
+            const rGlob = await transaction.request()
+                .input('sCo_Sucur', sql.Char(6), '')
+                .input('sCo_Consecutivo', sql.Char(16), padProfit(consecCode, 16))
+                .execute('pConsecutivoProximo');
+            nextNum = rGlob.recordset?.[0]?.ProximoConsecutivo?.trim();
+            if (nextNum) break;
+        } catch (_) {
+            // Intentar siguiente candidato
+        }
+    }
+
+    if (!nextNum) {
+        throw new Error(`No se pudo obtener el próximo consecutivo para el documento ${retDocType}.`);
+    }
+
+    return { retDocType, retDocNum: nextNum };
+}
+
+/**
+ * Resuelve el documento de origen (factura afectada) y su condición fiscal para una Nota de Crédito (N/CR).
+ */
+async function resolveNcrOriginDoc(transaction, { nroDoc, docOrig, nroOrig, defaultFiscalSucu }) {
+    const r = await transaction.request()
+        .input('nro_doc', sql.VarChar(20), (nroDoc || '').trim())
+        .input('doc_orig', sql.VarChar(10), (docOrig || '').trim())
+        .input('nro_orig', sql.VarChar(20), (nroOrig || '').trim())
+        .query(`
+            SELECT TOP 1
+                orig_src.num_doc_orig,
+                orig_src.tipo_doc_orig,
+                COALESCE(NULLIF(RTRIM(dv_orig.n_control), ''), RTRIM(ISNULL(fv_orig.n_control, ''))) AS n_control_orig,
+                COALESCE(fv_orig.monto_imp, dv_orig.monto_imp, 0) AS monto_imp_orig,
+                COALESCE(NULLIF(RTRIM(fv_orig.co_sucu_in), ''), RTRIM(ISNULL(dv_orig.co_sucu_in, ''))) AS co_sucu_in_orig,
+                COALESCE(
+                    NULLIF(RTRIM(fv_orig.impfisfac), ''),
+                    NULLIF(RTRIM(fv_orig.impfis), ''),
+                    NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                    RTRIM(ISNULL(dv_orig.impfis, ''))
+                ) AS impfisfac_orig
+            FROM (
+                SELECT TOP 1
+                    LTRIM(RTRIM(r_orig.num_doc)) AS num_doc_orig,
+                    ISNULL(NULLIF(LTRIM(RTRIM(r_orig.tipo_doc)), ''), 'FACT') AS tipo_doc_orig
+                FROM saDevolucionCliente dc
+                INNER JOIN saDevolucionClienteReng r_orig ON dc.doc_num = r_orig.doc_num
+                WHERE dc.anulado = 0
+                  AND (
+                      (UPPER(@doc_orig) = 'DEVO' AND LTRIM(RTRIM(dc.doc_num)) = @nro_orig)
+                      OR LTRIM(RTRIM(dc.nro_doc)) = @nro_doc
+                  )
+                  AND NULLIF(LTRIM(RTRIM(r_orig.num_doc)), '') IS NOT NULL
+                UNION ALL
+                SELECT
+                    @nro_orig AS num_doc_orig,
+                    @doc_orig AS tipo_doc_orig
+                FROM (SELECT 1 AS _) AS direct_orig
+                WHERE UPPER(@doc_orig) IN ('FACT', 'N/DB', 'NDEB')
+                  AND NULLIF(@nro_orig, '') IS NOT NULL
+            ) orig_src
+            LEFT JOIN saDocumentoVenta dv_orig
+                ON LTRIM(RTRIM(dv_orig.co_tipo_doc)) = orig_src.tipo_doc_orig
+               AND LTRIM(RTRIM(dv_orig.nro_doc)) = orig_src.num_doc_orig
+            LEFT JOIN saFacturaVenta fv_orig
+                ON orig_src.tipo_doc_orig = 'FACT'
+               AND LTRIM(RTRIM(fv_orig.doc_num)) = orig_src.num_doc_orig
+        `);
+
+    const row = r.recordset[0] || null;
+    if (!row || !row.num_doc_orig) {
+        return { numDocOrig: null, isFiscal: false, row: null };
+    }
+
+    const fiscalSucuUpper = String(defaultFiscalSucu || '').trim().toUpperCase();
+    const origSucuUpper = String(row.co_sucu_in_orig || '').trim().toUpperCase();
+    const hasImpfis = Boolean(String(row.impfisfac_orig || '').trim());
+    const hasMontoImp = Number(row.monto_imp_orig || 0) > 0;
+    const matchesFiscalSucu = Boolean(fiscalSucuUpper && origSucuUpper && fiscalSucuUpper === origSucuUpper);
+
+    return {
+        numDocOrig: row.num_doc_orig.trim(),
+        isFiscal: hasImpfis || hasMontoImp || matchesFiscalSucu,
+        row
+    };
+}
+
+/**
  * @swagger
  * tags:
  *   name: Cobros
@@ -152,12 +267,22 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(d.co_tipo_doc) AS co_tipo_doc, 
                            RTRIM(d.nro_doc) AS nro_doc, 
                            d.fec_emis, d.fec_venc, 
-                           d.total_neto, d.saldo, d.monto_imp,
+                           d.total_neto, d.total_bruto, d.saldo, d.monto_imp, d.porc_imp,
                            RTRIM(d.co_mone) AS co_mone,
                            CASE WHEN d.tasa <= 1.000001 THEN 
                                  ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), d.fec_emis, 120) ORDER BY t.fecha DESC), 1.0)
                            ELSE d.tasa END AS tasa,
                            RTRIM(d.n_control) AS n_control,
+                           RTRIM(ISNULL(d.co_sucu_in, '')) AS co_sucu_in,
+                           RTRIM(ISNULL(d.doc_orig, '')) AS doc_orig,
+                           RTRIM(ISNULL(d.nro_orig, '')) AS nro_orig,
+                           COALESCE(NULLIF(RTRIM(f.impfisfac), ''), NULLIF(RTRIM(f.impfis), ''), NULLIF(RTRIM(d.impfisfac), ''), RTRIM(ISNULL(d.impfis, ''))) AS impfisfac,
+                           orig_info.num_doc_orig,
+                           orig_info.tipo_doc_orig,
+                           orig_info.n_control_orig,
+                           orig_info.monto_imp_orig,
+                           orig_info.co_sucu_in_orig,
+                           orig_info.impfisfac_orig,
                            d.rowguid,
                            RTRIM(d.co_cli) AS co_cli,
                            RTRIM(c.cli_des) AS cli_des,
@@ -171,7 +296,10 @@ router.get('/facturas/pendientes', async (req, res) => {
                                WHERE LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
                                  AND LTRIM(RTRIM(r.co_art)) LIKE '09%'
                            ) ELSE 0 END, 0) AS base_islr_default,
-                           ISNULL((SELECT SUM(cdr.monto_retencion_iva) 
+                           ISNULL((SELECT SUM(
+                                       CASE WHEN cdr.monto_retencion_iva > 0 THEN cdr.monto_retencion_iva
+                                            ELSE ISNULL((SELECT SUM(r2.mont_cob) FROM saCobroDocReng r2 WHERE r2.cob_num = c.cob_num AND r2.rowguid_reng_ori = cdr.rowguid AND UPPER(RTRIM(r2.co_tipo_doc)) IN ('IVAN', 'IVAP')), 0)
+                                       END)
                                    FROM saCobroDocReng cdr 
                                    INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
                                    WHERE c.anulado = 0 
@@ -183,13 +311,29 @@ router.get('/facturas/pendientes', async (req, res) => {
                                    WHERE c.anulado = 0 
                                      AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                      AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_islr_bs,
-                           ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
-                                   FROM saCobroDocReng cdr 
-                                   INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
-                                   INNER JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO' AND LTRIM(RTRIM(dv.nro_orig)) = LTRIM(RTRIM(c.cob_num)) AND UPPER(RTRIM(dv.co_tipo_doc)) = 'IVAN' 
-                                   WHERE c.anulado = 0 
-                                     AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
-                                     AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_iva,
+                           COALESCE(
+                               (SELECT TOP 1 NULLIF(RTRIM(ri.num_comprobante), '')
+                                FROM saCobroDocReng cdr
+                                INNER JOIN saCobro c ON cdr.cob_num = c.cob_num
+                                LEFT JOIN saCobroDocReng cdr_ret ON cdr_ret.cob_num = c.cob_num AND cdr_ret.rowguid_reng_ori = cdr.rowguid AND UPPER(RTRIM(cdr_ret.co_tipo_doc)) IN ('IVAN', 'IVAP')
+                                INNER JOIN saCobroRetenIvaReng ri ON (ri.rowguid_reng_cob = cdr.rowguid OR (cdr_ret.rowguid IS NOT NULL AND ri.rowguid_reng_cob = cdr_ret.rowguid))
+                                WHERE c.anulado = 0
+                                  AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc))
+                                  AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                                  AND NULLIF(RTRIM(ri.num_comprobante), '') IS NOT NULL),
+                               (SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
+                                FROM saCobroDocReng cdr 
+                                INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
+                                LEFT JOIN saCobroDocReng cdr_ret ON cdr_ret.cob_num = c.cob_num AND cdr_ret.rowguid_reng_ori = cdr.rowguid AND UPPER(RTRIM(cdr_ret.co_tipo_doc)) IN ('IVAN', 'IVAP')
+                                INNER JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO'
+                                   AND LTRIM(RTRIM(dv.nro_orig)) = LTRIM(RTRIM(c.cob_num))
+                                   AND UPPER(RTRIM(dv.co_tipo_doc)) IN ('IVAN', 'IVAP')
+                                   AND (cdr_ret.nro_doc IS NULL OR LTRIM(RTRIM(dv.nro_doc)) = LTRIM(RTRIM(cdr_ret.nro_doc)))
+                                WHERE c.anulado = 0 
+                                  AND LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                  AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))),
+                               ''
+                           ) AS nro_comp_iva,
                            ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), '') 
                                    FROM saCobroDocReng cdr 
                                    INNER JOIN saCobro c ON cdr.cob_num = c.cob_num 
@@ -200,6 +344,48 @@ router.get('/facturas/pendientes', async (req, res) => {
                     FROM saDocumentoVenta d
                     INNER JOIN saCliente c ON d.co_cli = c.co_cli
                     LEFT JOIN saFacturaVenta f ON RTRIM(d.co_tipo_doc) = 'FACT' AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(f.doc_num))
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            orig_src.num_doc_orig,
+                            orig_src.tipo_doc_orig,
+                            COALESCE(NULLIF(RTRIM(dv_orig.n_control), ''), RTRIM(ISNULL(fv_orig.n_control, ''))) AS n_control_orig,
+                            COALESCE(fv_orig.monto_imp, dv_orig.monto_imp, 0) AS monto_imp_orig,
+                            COALESCE(NULLIF(RTRIM(fv_orig.co_sucu_in), ''), RTRIM(ISNULL(dv_orig.co_sucu_in, ''))) AS co_sucu_in_orig,
+                            COALESCE(
+                                NULLIF(RTRIM(fv_orig.impfisfac), ''),
+                                NULLIF(RTRIM(fv_orig.impfis), ''),
+                                NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                                RTRIM(ISNULL(dv_orig.impfis, ''))
+                            ) AS impfisfac_orig
+                        FROM (
+                            SELECT TOP 1
+                                LTRIM(RTRIM(r_orig.num_doc)) AS num_doc_orig,
+                                ISNULL(NULLIF(LTRIM(RTRIM(r_orig.tipo_doc)), ''), 'FACT') AS tipo_doc_orig
+                            FROM saDevolucionCliente dc
+                            INNER JOIN saDevolucionClienteReng r_orig ON dc.doc_num = r_orig.doc_num
+                            WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                              AND dc.anulado = 0
+                              AND (
+                                  (UPPER(LTRIM(RTRIM(d.doc_orig))) = 'DEVO' AND LTRIM(RTRIM(dc.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                  OR LTRIM(RTRIM(dc.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                              )
+                              AND NULLIF(LTRIM(RTRIM(r_orig.num_doc)), '') IS NOT NULL
+                            UNION ALL
+                            SELECT
+                                LTRIM(RTRIM(d.nro_orig)) AS num_doc_orig,
+                                LTRIM(RTRIM(d.doc_orig)) AS tipo_doc_orig
+                            FROM (SELECT 1 AS _) AS direct_orig
+                            WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                              AND UPPER(LTRIM(RTRIM(d.doc_orig))) IN ('FACT', 'N/DB', 'NDEB')
+                              AND NULLIF(LTRIM(RTRIM(d.nro_orig)), '') IS NOT NULL
+                        ) orig_src
+                        LEFT JOIN saDocumentoVenta dv_orig
+                            ON LTRIM(RTRIM(dv_orig.co_tipo_doc)) = orig_src.tipo_doc_orig
+                           AND LTRIM(RTRIM(dv_orig.nro_doc)) = orig_src.num_doc_orig
+                        LEFT JOIN saFacturaVenta fv_orig
+                            ON orig_src.tipo_doc_orig = 'FACT'
+                           AND LTRIM(RTRIM(fv_orig.doc_num)) = orig_src.num_doc_orig
+                    ) orig_info
                     WHERE ${whereSQL}
                     ORDER BY d.fec_emis DESC
                 `);;
@@ -288,13 +474,62 @@ router.get('/:cob_num', async (req, res) => {
                                ISNULL(d.otros1, 0) AS otros1,
                                ISNULL(d.monto_imp, 0) AS monto_imp,
                                ISNULL(d.total_neto, 0) AS total_neto,
+                               RTRIM(ISNULL(d.n_control, '')) AS n_control,
                                RTRIM(d.doc_orig) AS doc_orig,
                                RTRIM(d.nro_orig) AS nro_orig,
                                ISNULL(RTRIM(d.co_sucu_in), RTRIM(r.co_sucu_in)) AS co_sucu_in,
-                               ISNULL(RTRIM(d.impfis), '') AS impfis
+                               COALESCE(NULLIF(RTRIM(d.impfisfac), ''), RTRIM(ISNULL(d.impfis, ''))) AS impfis,
+                               orig_info.num_doc_orig,
+                               orig_info.tipo_doc_orig,
+                               orig_info.n_control_orig,
+                               orig_info.monto_imp_orig,
+                               orig_info.co_sucu_in_orig,
+                               orig_info.impfisfac_orig
                         FROM saCobroDocReng r
                         LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                     AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                        OUTER APPLY (
+                            SELECT TOP 1
+                                orig_src.num_doc_orig,
+                                orig_src.tipo_doc_orig,
+                                COALESCE(NULLIF(RTRIM(dv_orig.n_control), ''), RTRIM(ISNULL(fv_orig.n_control, ''))) AS n_control_orig,
+                                COALESCE(fv_orig.monto_imp, dv_orig.monto_imp, 0) AS monto_imp_orig,
+                                COALESCE(NULLIF(RTRIM(fv_orig.co_sucu_in), ''), RTRIM(ISNULL(dv_orig.co_sucu_in, ''))) AS co_sucu_in_orig,
+                                COALESCE(
+                                    NULLIF(RTRIM(fv_orig.impfisfac), ''),
+                                    NULLIF(RTRIM(fv_orig.impfis), ''),
+                                    NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                                    RTRIM(ISNULL(dv_orig.impfis, ''))
+                                ) AS impfisfac_orig
+                            FROM (
+                                SELECT TOP 1
+                                    LTRIM(RTRIM(r_orig.num_doc)) AS num_doc_orig,
+                                    ISNULL(NULLIF(LTRIM(RTRIM(r_orig.tipo_doc)), ''), 'FACT') AS tipo_doc_orig
+                                FROM saDevolucionCliente dc
+                                INNER JOIN saDevolucionClienteReng r_orig ON dc.doc_num = r_orig.doc_num
+                                WHERE UPPER(LTRIM(RTRIM(r.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                  AND dc.anulado = 0
+                                  AND (
+                                      (UPPER(LTRIM(RTRIM(d.doc_orig))) = 'DEVO' AND LTRIM(RTRIM(dc.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                      OR LTRIM(RTRIM(dc.nro_doc)) = LTRIM(RTRIM(r.nro_doc))
+                                  )
+                                  AND NULLIF(LTRIM(RTRIM(r_orig.num_doc)), '') IS NOT NULL
+                                UNION ALL
+                                SELECT
+                                    LTRIM(RTRIM(d.nro_orig)) AS num_doc_orig,
+                                    LTRIM(RTRIM(d.doc_orig)) AS tipo_doc_orig
+                                FROM (SELECT 1 AS _) AS direct_orig
+                                WHERE UPPER(LTRIM(RTRIM(r.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                  AND UPPER(LTRIM(RTRIM(d.doc_orig))) IN ('FACT', 'N/DB', 'NDEB')
+                                  AND NULLIF(LTRIM(RTRIM(d.nro_orig)), '') IS NOT NULL
+                            ) orig_src
+                            LEFT JOIN saDocumentoVenta dv_orig
+                                ON LTRIM(RTRIM(dv_orig.co_tipo_doc)) = orig_src.tipo_doc_orig
+                               AND LTRIM(RTRIM(dv_orig.nro_doc)) = orig_src.num_doc_orig
+                            LEFT JOIN saFacturaVenta fv_orig
+                                ON orig_src.tipo_doc_orig = 'FACT'
+                               AND LTRIM(RTRIM(fv_orig.doc_num)) = orig_src.num_doc_orig
+                        ) orig_info
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                         ORDER BY r.reng_num
                     `),
@@ -315,16 +550,32 @@ router.get('/:cob_num', async (req, res) => {
                         ORDER BY tp.reng_num
                     `),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
-                        SELECT ri.reng_num, ri.rowguid_reng_cob, RTRIM(ri.num_comprobante) AS num_comprobante,
+                        SELECT ri.reng_num,
+                               CASE 
+                                   WHEN UPPER(LTRIM(RTRIM(cdr.co_tipo_doc))) IN ('IVAN', 'IVAP') AND cdr_ori.rowguid IS NOT NULL
+                                   THEN cdr_ori.rowguid
+                                   ELSE cdr.rowguid
+                               END AS rowguid_reng_cob,
+                               RTRIM(ri.num_comprobante) AS num_comprobante,
                                ri.monto_documento, ri.base_imponible, ri.monto_ret_imp, ri.alicuota,
+                               RTRIM(ri.tipo_documento) AS tipo_documento,
+                               RTRIM(ri.numero_documento) AS numero_documento,
+                               RTRIM(ri.numero_control_documento) AS numero_control_documento,
                                CASE 
                                    WHEN NULLIF(RTRIM(ri.numero_documento_afectado), '0') IS NOT NULL AND RTRIM(ri.numero_documento_afectado) <> '' 
                                    THEN RTRIM(ri.numero_documento_afectado)
+                                   WHEN UPPER(LTRIM(RTRIM(cdr.co_tipo_doc))) IN ('IVAN', 'IVAP') AND cdr_ori.nro_doc IS NOT NULL
+                                   THEN RTRIM(cdr_ori.nro_doc)
                                    ELSE RTRIM(cdr.nro_doc)
                                END AS numero_documento_afectado,
-                               RTRIM(cdr.nro_doc) AS nro_doc
+                               CASE 
+                                   WHEN UPPER(LTRIM(RTRIM(cdr.co_tipo_doc))) IN ('IVAN', 'IVAP') AND cdr_ori.nro_doc IS NOT NULL
+                                   THEN RTRIM(cdr_ori.nro_doc)
+                                   ELSE RTRIM(cdr.nro_doc)
+                               END AS nro_doc
                         FROM saCobroRetenIvaReng ri
                         INNER JOIN saCobroDocReng cdr ON ri.rowguid_reng_cob = cdr.rowguid
+                        LEFT JOIN saCobroDocReng cdr_ori ON cdr.rowguid_reng_ori = cdr_ori.rowguid
                         WHERE LTRIM(RTRIM(cdr.cob_num)) = LTRIM(RTRIM(@cob_num))
                         UNION ALL
                         SELECT r.reng_num, r.rowguid_reng_ori AS rowguid_reng_cob, RTRIM(d.num_comprobante) AS num_comprobante,
@@ -332,6 +583,9 @@ router.get('/:cob_num', async (req, res) => {
                                orig.total_bruto - orig.otros1 AS base_imponible, 
                                d.total_neto AS monto_ret_imp, 
                                orig.porc_imp AS alicuota,
+                               RTRIM(SUBSTRING(ISNULL(cdr.co_tipo_doc, 'FACT'), 1, 4)) AS tipo_documento,
+                               RTRIM(cdr.nro_doc) AS numero_documento,
+                               RTRIM(ISNULL(orig.n_control, cdr.nro_doc)) AS numero_control_documento,
                                RTRIM(cdr.nro_doc) AS numero_documento_afectado,
                                RTRIM(cdr.nro_doc) AS nro_doc
                         FROM saCobroDocReng r
@@ -341,7 +595,7 @@ router.get('/:cob_num', async (req, res) => {
                         LEFT JOIN saDocumentoVenta orig ON LTRIM(RTRIM(cdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                        AND LTRIM(RTRIM(cdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
-                          AND LTRIM(RTRIM(r.co_tipo_doc)) = 'IVAN'
+                          AND UPPER(LTRIM(RTRIM(r.co_tipo_doc))) IN ('IVAN', 'IVAP')
                           AND NOT EXISTS (
                               SELECT 1 FROM saCobroRetenIvaReng ri2
                               INNER JOIN saCobroDocReng cdr2 ON ri2.rowguid_reng_cob = cdr2.rowguid
@@ -465,8 +719,10 @@ router.post('/:cob_num/anular', async (req, res) => {
                         WHERE DOC_ORIG = 'COBRO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
                     `);
 
-                // 3. Revertir saldo de los documentos cobrados
+                // 3. Revertir saldo de los documentos cobrados (excluyendo retenciones auto-generadas IVAN/IVAP/ISLR)
                 for (const line of resReng.recordset) {
+                    const lineTypeUpper = (line.co_tipo_doc || '').trim().toUpperCase();
+                    if (['IVAN', 'IVAP', 'ISLR'].includes(lineTypeUpper)) continue;
                     const totalRebaje = Number(line.mont_cob || 0);
                     if (Math.abs(totalRebaje) > 0.001) {
                         await transaction.request()
@@ -697,14 +953,22 @@ router.post('/', async (req, res) => {
                 let docCoVen = data.co_ven || defVen;
 
                 let docFecEmisStr = '';
+                let docNControl = '';
+                let docOrig = '';
+                let docNroOrig = '';
+                let docTotalNeto = 0;
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL'];
+                const isNcLine = ['N/CR', 'NCR'].includes(docTypeUpper);
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                         .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                         .query(`
-                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, co_cli, co_ven,
+                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, total_neto, co_cli, co_ven,
+                                   RTRIM(ISNULL(n_control, '')) AS n_control,
+                                   RTRIM(ISNULL(doc_orig, '')) AS doc_orig,
+                                   RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
                                    CONVERT(VARCHAR(10), fec_emis, 120) AS fec_emis_str
                             FROM saDocumentoVenta
                             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
@@ -712,28 +976,36 @@ router.post('/', async (req, res) => {
                         `);
                     if (docInfo.recordset.length > 0) {
                         docSaldo = Number(docInfo.recordset[0].saldo || 0);
+                        docTotalNeto = Number(docInfo.recordset[0].total_neto || docSaldo);
                         docTasa = Number(docInfo.recordset[0].tasa || 1);
                         docMone = docInfo.recordset[0].co_mone || 'BS';
                         docCoCli = docInfo.recordset[0].co_cli || docCoCli;
                         docCoVen = docInfo.recordset[0].co_ven || docCoVen;
+                        docNControl = docInfo.recordset[0].n_control || '';
+                        docOrig = docInfo.recordset[0].doc_orig || '';
+                        docNroOrig = docInfo.recordset[0].nro_orig || '';
                         docFecEmisStr = docInfo.recordset[0].fec_emis_str || '';
                     }
                 }
 
-                let finalMontCob = Math.abs(Number(line.mont_cob));
+                let finalMontCob = Math.abs(Number(line.mont_cob || 0));
+                let adjustedMontoRetencionIva = Math.abs(Number(line.monto_retencion_iva || 0));
+                let adjustedMontoRetencion = Math.abs(Number(line.monto_retencion || 0));
+                const hasLineRetention = adjustedMontoRetencionIva > 0.005 || adjustedMontoRetencion > 0.005;
 
                 // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
                 if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) {
-                    if (docSaldo > 0 && childLines.length === 1 && parentLines.length === 0) {
+                    if (hasLineRetention) {
+                        // Registro exclusivo de retención sobre N/CR conservando intacto el crédito remanente
+                        finalMontCob = 0;
+                    } else if (docSaldo > 0 && childLines.length === 1 && parentLines.length === 0) {
                         finalMontCob = docSaldo;
                     } else {
-                        // Si no se asignó monto en este cobro, omitir para no amortizar indebidamente
+                        // Si no se asignó monto ni retención en este cobro, omitir para no amortizar indebidamente
                         continue;
                     }
                 }
 
-                let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
-                let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
@@ -763,8 +1035,8 @@ router.post('/', async (req, res) => {
                             diffBs = diffBs + excess;
                         }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
-                    } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
-                        // Tolerancia contable de redondeo al saldar en divisa o bolívares:
+                    } else if (!creditDocTypes.includes(docTypeUpper) && docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
+                        // Tolerancia contable de redondeo al saldar documentos de débito en divisa o bolívares:
                         // Si la diferencia restante es menor o igual a 0.02 USD (o menor o igual a 25 Bs o a 0.02 * tasa),
                         // o si la diferencia coincide con los créditos amortizados en este cobro,
                         // amortizar automáticamente el 100% del saldo en Bs del documento para saldar a Bs 0,00 exactos
@@ -779,6 +1051,10 @@ router.post('/', async (req, res) => {
                             finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
                             totalRebaje = docSaldo;
                         }
+                    } else if (creditDocTypes.includes(docTypeUpper) && finalMontCob > 0.005 && docSaldo > 0 && (docSaldo - totalRebaje) > 0 && (docSaldo - totalRebaje) <= 0.05) {
+                        // En documentos de crédito aplicados contra facturas, solo absorber diferencias residuales de centavos (<= 0.05 Bs)
+                        finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
+                        totalRebaje = docSaldo;
                     }
                 }
 
@@ -822,14 +1098,16 @@ router.post('/', async (req, res) => {
 
                 // 3.1 Rebajar el saldo del documento en saDocumentoVenta usando el monto original ajustado
                 totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                const saldoZeroThreshold = (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) ? 0.05 : 2.00;
                 await transaction.request()
                     .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                     .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                     .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                    .input('zero_thresh', sql.Decimal(18, 2), saldoZeroThreshold)
                     .input('user', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         UPDATE saDocumentoVenta
-                        SET saldo = CASE WHEN (saldo - @rebaje) <= 2.00 OR (saldo - @rebaje) <= (@rebaje * 0.001) THEN 0.00 ELSE saldo - @rebaje END,
+                        SET saldo = CASE WHEN (saldo - @rebaje) <= @zero_thresh OR (@zero_thresh >= 2.00 AND (saldo - @rebaje) <= (@rebaje * 0.001)) THEN 0.00 ELSE saldo - @rebaje END,
                             fe_us_mo = GETDATE(),
                             co_us_mo = @user
                         WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
@@ -852,32 +1130,46 @@ router.post('/', async (req, res) => {
                 }
 
 
-                // 3.2 Generar documentos de retención de IVA e ISLR en saDocumentoVenta para evitar inconsistencias y permitir la anulación
+                // 3.2 Generar documentos de retención de IVA (IVAN en débito / IVAP en N/CR con origen fiscal) e ISLR en saDocumentoVenta
                 if (adjustedMontoRetencionIva > 0) {
-                    let ivanNum = null;
-                    try {
-                        const ivanRes = await transaction.request()
-                            .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
-                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
-                            .execute('pConsecutivoProximo');
-                        ivanNum = ivanRes.recordset[0]?.ProximoConsecutivo?.trim();
-                    } catch (err) {
-                        const ivanResGlobal = await transaction.request()
-                            .input('sCo_Sucur', sql.Char(6), '')
-                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
-                            .execute('pConsecutivoProximo');
-                        ivanNum = ivanResGlobal.recordset[0]?.ProximoConsecutivo?.trim();
-                    }
-
-                    if (!ivanNum) {
-                        throw new Error('No se pudo obtener el próximo consecutivo para el documento IVAN.');
-                    }
-
                     const retIvaMatch = data.retenciones_iva?.find(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
-                    const numComprobante = retIvaMatch?.num_comprobante || '';
+                    const numComprobante = (retIvaMatch?.num_comprobante || '').trim();
+
+                    if (!numComprobante) {
+                        throw new Error(`Debe especificar el número de comprobante de retención de IVA para el documento ${line.nro_doc.trim()}.`);
+                    }
+
+                    let ncrOriginDocNum = '';
+                    if (isNcLine) {
+                        const origCheck = await resolveNcrOriginDoc(transaction, {
+                            nroDoc: line.nro_doc,
+                            docOrig,
+                            nroOrig: docNroOrig,
+                            defaultFiscalSucu: sucuCode
+                        });
+
+                        const providedAffected = (retIvaMatch?.numero_documento_afectado || '').trim();
+                        const validProvidedAffected = (providedAffected && providedAffected !== '0' && providedAffected !== line.nro_doc.trim())
+                            ? providedAffected
+                            : '';
+
+                        ncrOriginDocNum = origCheck.numDocOrig || validProvidedAffected;
+
+                        if (!ncrOriginDocNum) {
+                            throw new Error(`No se puede guardar retención de IVA en la Nota de Crédito ${line.nro_doc.trim()} porque no posee un documento de origen fiscal asociado.`);
+                        }
+                        if (origCheck.row && !origCheck.isFiscal) {
+                            throw new Error(`No se puede guardar retención de IVA en la Nota de Crédito ${line.nro_doc.trim()} porque su documento de origen (${ncrOriginDocNum}) no es fiscal.`);
+                        }
+                    }
+
+                    const { retDocType, retDocNum: ivanNum } = await resolveIvaRetentionDocInfo(transaction, {
+                        isNcLine,
+                        sucuCode
+                    });
 
                     await transaction.request()
-                        .input('co_tipo_doc', sql.Char(6), padProfit('IVAN', 6))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(retDocType, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ivanNum, 20))
                         .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
                         .input('co_ven', sql.Char(6), padProfit(data.co_ven || defVen, 6))
@@ -915,7 +1207,7 @@ router.post('/', async (req, res) => {
                             )
                         `);
 
-                    // Insertar renglón de IVAN en saCobroDocReng para registrar la retención
+                    // Insertar renglón de IVAN / IVAP en saCobroDocReng enlazado al documento afectado mediante rowguid_reng_ori
                     const ivanRengNum = nextRengNum++;
                     const ivanRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
                     const ivanRengGuid = ivanRengGuidResult.recordset[0].guid;
@@ -923,7 +1215,7 @@ router.post('/', async (req, res) => {
                     await transaction.request()
                         .input('reng_num', sql.Int, ivanRengNum)
                         .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
-                        .input('co_tipo_doc', sql.Char(6), padProfit('IVAN', 6))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(retDocType, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ivanNum, 20))
                         .input('mont_cob', sql.Decimal(18, 2), adjustedMontoRetencionIva)
                         .input('rowguid_reng_ori', sql.UniqueIdentifier, lineGuid)
@@ -942,63 +1234,66 @@ router.post('/', async (req, res) => {
                             )
                         `);
 
-                    // Insertar registro detallado en saCobroRetenIvaReng
-                    try {
-                        const today = new Date();
-                        const defaultPeriod = Number(today.getFullYear() + String(today.getMonth() + 1).padStart(2, '0'));
-                        const periodNum = retIvaMatch?.periodo_impositivo ? Number(retIvaMatch.periodo_impositivo) : defaultPeriod;
-                        let clientRif = retIvaMatch?.rif_contribuyente || '';
-                        if (!clientRif) {
-                            const cliR = await transaction.request()
-                                .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
-                                .query('SELECT TOP 1 RTRIM(rif) AS rif FROM saCliente WHERE RTRIM(co_cli) = RTRIM(@co_cli)');
-                            clientRif = cliR.recordset[0]?.rif || '';
-                        }
-                        const cleanRif = clientRif.replace(/[^A-Za-z0-9]/g, '').substring(0, 10);
-                        const alicuota = Number(retIvaMatch?.alicuota || 16);
-                        const baseImp = Number(retIvaMatch?.base_imponible || (adjustedMontoRetencionIva / (alicuota / 100 * 0.75)));
-                        const docDate = retIvaMatch?.fecha_documento ? new Date(retIvaMatch.fecha_documento) : (docFecEmisStr ? new Date(docFecEmisStr) : tsDate);
-
-                        await transaction.request()
-                            .input('reng_num', sql.Int, 1)
-                            .input('rowguid_reng_cob', sql.UniqueIdentifier, lineGuid)
-                            .input('rif_contribuyente', sql.Char(10), padProfit(cleanRif, 10))
-                            .input('periodo_impositivo', sql.Decimal(6, 0), periodNum)
-                            .input('fecha_documento', sql.SmallDateTime, docDate)
-                            .input('tipo_operacion', sql.Char(1), 'C')
-                            .input('tipo_documento', sql.Char(4), padProfit(line.co_tipo_doc.trim().substring(0, 4), 4))
-                            .input('rif_comprador', sql.Char(10), padProfit('J000000000', 10))
-                            .input('numero_documento', sql.Char(20), padProfit(line.nro_doc, 20))
-                            .input('numero_control_documento', sql.Char(20), padProfit(retIvaMatch?.numero_control_documento || line.nro_doc, 20))
-                            .input('monto_documento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_documento || docSaldo || adjustedMontoRetencionIva))
-                            .input('base_imponible', sql.Decimal(15, 2), baseImp)
-                            .input('monto_ret_imp', sql.Decimal(15, 2), adjustedMontoRetencionIva)
-                            .input('numero_documento_afectado', sql.Char(20), padProfit(line.nro_doc, 20))
-                            .input('num_comprobante', sql.Char(14), padProfit(numComprobante.substring(0, 14), 14))
-                            .input('monto_excento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_excento || 0))
-                            .input('alicuota', sql.Decimal(5, 2), alicuota)
-                            .input('reten_tercero', sql.Bit, 0)
-                            .input('numero_expediente', sql.Char(15), '               ')
-                            .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
-                            .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
-                            .query(`
-                                INSERT INTO saCobroRetenIvaReng (
-                                    reng_num, rowguid_reng_cob, rif_contribuyente, periodo_impositivo, fecha_documento,
-                                    tipo_operacion, tipo_documento, rif_comprador, numero_documento, numero_control_documento,
-                                    monto_documento, base_imponible, monto_ret_imp, numero_documento_afectado, num_comprobante,
-                                    monto_excento, alicuota, reten_tercero, numero_expediente, co_us_in, co_sucu_in, fe_us_in,
-                                    co_us_mo, co_sucu_mo, fe_us_mo, rowguid
-                                ) VALUES (
-                                    @reng_num, @rowguid_reng_cob, @rif_contribuyente, @periodo_impositivo, @fecha_documento,
-                                    @tipo_operacion, @tipo_documento, @rif_comprador, @numero_documento, @numero_control_documento,
-                                    @monto_documento, @base_imponible, @monto_ret_imp, @numero_documento_afectado, @num_comprobante,
-                                    @monto_excento, @alicuota, @reten_tercero, @numero_expediente, @co_us_in, @co_sucu_in, GETDATE(),
-                                    @co_us_in, @co_sucu_in, GETDATE(), NEWID()
-                                )
-                            `);
-                    } catch (errIvaReng) {
-                        console.warn('[COBROS] Error insertando saCobroRetenIvaReng:', errIvaReng.message);
+                    // Insertar registro detallado en saCobroRetenIvaReng apuntando a ivanRengGuid (estándar nativo Profit Plus 2K12)
+                    const today = new Date();
+                    const defaultPeriod = Number(today.getFullYear() + String(today.getMonth() + 1).padStart(2, '0'));
+                    const periodNum = retIvaMatch?.periodo_impositivo ? Number(retIvaMatch.periodo_impositivo) : defaultPeriod;
+                    let clientRif = retIvaMatch?.rif_contribuyente || '';
+                    if (!clientRif) {
+                        const cliR = await transaction.request()
+                            .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                            .query('SELECT TOP 1 RTRIM(rif) AS rif FROM saCliente WHERE RTRIM(co_cli) = RTRIM(@co_cli)');
+                        clientRif = cliR.recordset[0]?.rif || '';
                     }
+                    const cleanRif = clientRif.replace(/[^A-Za-z0-9]/g, '').substring(0, 10);
+                    const companyRif = (srv.rif || retIvaMatch?.rif_comprador || 'J000000000').replace(/[^A-Za-z0-9]/g, '').substring(0, 10);
+                    const alicuota = Number(retIvaMatch?.alicuota || 16);
+                    const baseImp = Number(retIvaMatch?.base_imponible || (adjustedMontoRetencionIva / (alicuota / 100 * 0.75)));
+                    const docDate = retIvaMatch?.fecha_documento ? new Date(retIvaMatch.fecha_documento) : (docFecEmisStr ? new Date(docFecEmisStr) : tsDate);
+                    const tipoDocSeniat = isNcLine ? 'N/CR' : (docTypeUpper === 'NDEB' ? 'N/DB' : line.co_tipo_doc.trim().substring(0, 4));
+                    const docAfectadoSeniat = isNcLine
+                        ? ncrOriginDocNum
+                        : ((retIvaMatch?.numero_documento_afectado && retIvaMatch.numero_documento_afectado.trim() !== line.nro_doc.trim())
+                            ? retIvaMatch.numero_documento_afectado.trim()
+                            : '0');
+
+                    await transaction.request()
+                        .input('reng_num', sql.Int, 1)
+                        .input('rowguid_reng_cob', sql.UniqueIdentifier, ivanRengGuid)
+                        .input('rif_contribuyente', sql.Char(10), padProfit(cleanRif, 10))
+                        .input('periodo_impositivo', sql.Decimal(6, 0), periodNum)
+                        .input('fecha_documento', sql.SmallDateTime, docDate)
+                        .input('tipo_operacion', sql.Char(1), 'C')
+                        .input('tipo_documento', sql.Char(4), padProfit(tipoDocSeniat, 4))
+                        .input('rif_comprador', sql.Char(10), padProfit(companyRif, 10))
+                        .input('numero_documento', sql.Char(20), padProfit(retIvaMatch?.numero_documento || line.nro_doc, 20))
+                        .input('numero_control_documento', sql.Char(20), padProfit(retIvaMatch?.numero_control_documento || docNControl || line.nro_doc, 20))
+                        .input('monto_documento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_documento || docTotalNeto || docSaldo || adjustedMontoRetencionIva))
+                        .input('base_imponible', sql.Decimal(15, 2), baseImp)
+                        .input('monto_ret_imp', sql.Decimal(15, 2), adjustedMontoRetencionIva)
+                        .input('numero_documento_afectado', sql.Char(20), padProfit(docAfectadoSeniat, 20))
+                        .input('num_comprobante', sql.Char(14), padProfit(numComprobante.substring(0, 14), 14))
+                        .input('monto_excento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_excento || 0))
+                        .input('alicuota', sql.Decimal(5, 2), alicuota)
+                        .input('reten_tercero', sql.Bit, 0)
+                        .input('numero_expediente', sql.Char(15), '               ')
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saCobroRetenIvaReng (
+                                reng_num, rowguid_reng_cob, rif_contribuyente, periodo_impositivo, fecha_documento,
+                                tipo_operacion, tipo_documento, rif_comprador, numero_documento, numero_control_documento,
+                                monto_documento, base_imponible, monto_ret_imp, numero_documento_afectado, num_comprobante,
+                                monto_excento, alicuota, reten_tercero, numero_expediente, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid
+                            ) VALUES (
+                                @reng_num, @rowguid_reng_cob, @rif_contribuyente, @periodo_impositivo, @fecha_documento,
+                                @tipo_operacion, @tipo_documento, @rif_comprador, @numero_documento, @numero_control_documento,
+                                @monto_documento, @base_imponible, @monto_ret_imp, @numero_documento_afectado, @num_comprobante,
+                                @monto_excento, @alicuota, @reten_tercero, @numero_expediente, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID()
+                            )
+                        `);
                 }
 
                 if (adjustedMontoRetencion > 0) {
@@ -1650,12 +1945,12 @@ router.put('/:cob_num', async (req, res) => {
                     FROM saDocumentoVenta
                     WHERE doc_orig = 'COBRO' 
                       AND LTRIM(RTRIM(nro_orig)) = LTRIM(RTRIM(@cob_num)) 
-                      AND LTRIM(RTRIM(co_tipo_doc)) IN ('IVAN', 'ISLR', 'N/DB', 'NDEB', 'N/CR');
+                      AND LTRIM(RTRIM(co_tipo_doc)) IN ('IVAN', 'IVAP', 'ISLR', 'N/DB', 'NDEB', 'N/CR');
 
                     DELETE FROM saDocumentoVenta
                     WHERE doc_orig = 'COBRO' 
                       AND LTRIM(RTRIM(nro_orig)) = LTRIM(RTRIM(@cob_num)) 
-                      AND LTRIM(RTRIM(co_tipo_doc)) IN ('IVAN', 'ISLR', 'N/DB', 'NDEB', 'N/CR');
+                      AND LTRIM(RTRIM(co_tipo_doc)) IN ('IVAN', 'IVAP', 'ISLR', 'N/DB', 'NDEB', 'N/CR');
                 `);
 
             const autoGeneratedKeys = new Set(
@@ -1710,6 +2005,8 @@ router.put('/:cob_num', async (req, res) => {
 
             // Mapas y variables para relacionar Renglones
             const rengDocGuidMap = new Map();
+            const ivanRengGuidMap = new Map();
+            const docMetaMap = new Map();
             const insertedRenglones = [];
 
             // 8. Re-Insertar Renglones de Documentos (saCobroDocReng)
@@ -1717,7 +2014,7 @@ router.put('/:cob_num', async (req, res) => {
                 const type = r.co_tipo_doc ? r.co_tipo_doc.trim().toUpperCase() : '';
                 const num = r.nro_doc ? r.nro_doc.trim() : '';
                 const key = `${type}:${num}`;
-                return !['IVAN', 'ISLR'].includes(type) && !autoGeneratedKeys.has(key);
+                return !['IVAN', 'IVAP', 'ISLR'].includes(type) && !autoGeneratedKeys.has(key);
             });
             const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM'];
             const creditDocTypes = ['N/CR', 'AJNA', 'AJNM', 'ADEL'];
@@ -1758,14 +2055,22 @@ router.put('/:cob_num', async (req, res) => {
                 let docCoVen = data.co_ven || defVen;
 
                 let docFecEmisStr = '';
+                let docNControl = '';
+                let docOrig = '';
+                let docNroOrig = '';
+                let docTotalNeto = 0;
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL'];
+                const isNcLine = ['N/CR', 'NCR'].includes(docTypeUpper);
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                         .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                         .query(`
-                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, co_cli, co_ven,
+                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, total_neto, co_cli, co_ven,
+                                   RTRIM(ISNULL(n_control, '')) AS n_control,
+                                   RTRIM(ISNULL(doc_orig, '')) AS doc_orig,
+                                   RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
                                    CONVERT(VARCHAR(10), fec_emis, 120) AS fec_emis_str
                             FROM saDocumentoVenta
                             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
@@ -1773,28 +2078,35 @@ router.put('/:cob_num', async (req, res) => {
                         `);
                     if (docInfo.recordset.length > 0) {
                         docSaldo = Number(docInfo.recordset[0].saldo || 0);
+                        docTotalNeto = Number(docInfo.recordset[0].total_neto || docSaldo);
                         docTasa = Number(docInfo.recordset[0].tasa || 1);
                         docMone = docInfo.recordset[0].co_mone || 'BS';
                         docCoCli = docInfo.recordset[0].co_cli || docCoCli;
                         docCoVen = docInfo.recordset[0].co_ven || docCoVen;
+                        docNControl = docInfo.recordset[0].n_control || '';
+                        docOrig = docInfo.recordset[0].doc_orig || '';
+                        docNroOrig = docInfo.recordset[0].nro_orig || '';
                         docFecEmisStr = docInfo.recordset[0].fec_emis_str || '';
                     }
                 }
 
-                let finalMontCob = Math.abs(Number(line.mont_cob));
+                let finalMontCob = Math.abs(Number(line.mont_cob || 0));
+                let adjustedMontoRetencionIva = Math.abs(Number(line.monto_retencion_iva || 0));
+                let adjustedMontoRetencion = Math.abs(Number(line.monto_retencion || 0));
+                const hasLineRetention = adjustedMontoRetencionIva > 0.005 || adjustedMontoRetencion > 0.005;
 
                 // Respaldo de seguridad: si es un documento de crédito (N/CR, AJNA, AJNM, ADEL) y vino con mont_cob = 0 pero tiene saldo
                 if (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) {
-                    if (docSaldo > 0 && childLines.length === 1 && parentLines.length === 0) {
+                    if (hasLineRetention) {
+                        finalMontCob = 0;
+                    } else if (docSaldo > 0 && childLines.length === 1 && parentLines.length === 0) {
                         finalMontCob = docSaldo;
                     } else {
-                        // Si no se asignó monto en este cobro, omitir para no amortizar indebidamente
+                        // Si no se asignó monto ni retención en este cobro, omitir para no amortizar indebidamente
                         continue;
                     }
                 }
 
-                let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
-                let adjustedMontoRetencion = Number(line.monto_retencion || 0);
                 let diffBs = 0;
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
@@ -1819,11 +2131,8 @@ router.put('/:cob_num', async (req, res) => {
                             diffBs = diffBs + excess;
                         }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
-                    } else if (docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
-                        // Tolerancia contable de redondeo al saldar en divisa o bolívares:
-                        // Si la diferencia restante es menor o igual a 0.02 USD (o menor o igual a 25 Bs o a 0.02 * tasa),
-                        // o si la diferencia coincide con los créditos amortizados en este cobro,
-                        // amortizar automáticamente el 100% del saldo en Bs del documento para saldar a Bs 0,00 exactos
+                    } else if (!creditDocTypes.includes(docTypeUpper) && docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
+                        // Tolerancia contable de redondeo al saldar en divisa o bolívares
                         const diffPendingBs = docSaldo - totalRebaje;
                         const diffPendingUsd = rateCobro > 0 ? (diffPendingBs / rateCobro) : 0;
                         const maxBsTolerance = Math.max(25.0, (rateCobro > 0 ? rateCobro : docTasa) * 0.02);
@@ -1835,12 +2144,24 @@ router.put('/:cob_num', async (req, res) => {
                             finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
                             totalRebaje = docSaldo;
                         }
+                    } else if (creditDocTypes.includes(docTypeUpper) && finalMontCob > 0.005 && docSaldo > 0 && (docSaldo - totalRebaje) > 0 && (docSaldo - totalRebaje) <= 0.05) {
+                        finalMontCob = Math.max(0, docSaldo - adjustedMontoRetencionIva - adjustedMontoRetencion);
+                        totalRebaje = docSaldo;
                     }
                 }
 
                 const guidResult = await transaction.request().query('SELECT NEWID() AS guid');
                 const lineGuid = guidResult.recordset[0].guid;
                 rengDocGuidMap.set(line.nro_doc?.trim(), lineGuid);
+                docMetaMap.set(line.nro_doc?.trim(), {
+                    co_tipo_doc: docTypeUpper,
+                    isNcLine,
+                    docNControl,
+                    docOrig,
+                    docNroOrig,
+                    docTotalNeto,
+                    docFecEmisStr
+                });
 
                 await transaction.request()
                     .input('reng_num', sql.Int, rengNum)
@@ -1872,14 +2193,16 @@ router.put('/:cob_num', async (req, res) => {
 
                 // Rebajar saldo en saDocumentoVenta
                 totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                const saldoZeroThreshold = (creditDocTypes.includes(docTypeUpper) && finalMontCob <= 0.005) ? 0.05 : 2.00;
                 await transaction.request()
                     .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                     .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                     .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                    .input('zero_thresh', sql.Decimal(18, 2), saldoZeroThreshold)
                     .input('user', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         UPDATE saDocumentoVenta
-                        SET saldo = CASE WHEN (saldo - @rebaje) <= 2.00 OR (saldo - @rebaje) <= (@rebaje * 0.001) THEN 0.00 ELSE saldo - @rebaje END,
+                        SET saldo = CASE WHEN (saldo - @rebaje) <= @zero_thresh OR (@zero_thresh >= 2.00 AND (saldo - @rebaje) <= (@rebaje * 0.001)) THEN 0.00 ELSE saldo - @rebaje END,
                             fe_us_mo = GETDATE(),
                             co_us_mo = @user
                         WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
@@ -1900,32 +2223,45 @@ router.put('/:cob_num', async (req, res) => {
                         `);
                 }
 
-                // Generar documentos retención de IVA
+                // Generar documentos retención de IVA (IVAN para débito / IVAP para N/CR con origen fiscal)
                 if (adjustedMontoRetencionIva > 0) {
-                    let ivanNum = null;
-                    try {
-                        const ivanRes = await transaction.request()
-                            .input('sCo_Sucur', sql.Char(6), padProfit(sucuCode, 6))
-                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
-                            .execute('pConsecutivoProximo');
-                        ivanNum = ivanRes.recordset[0]?.ProximoConsecutivo?.trim();
-                    } catch (err) {
-                        const ivanResGlobal = await transaction.request()
-                            .input('sCo_Sucur', sql.Char(6), '')
-                            .input('sCo_Consecutivo', sql.Char(16), padProfit('DOC_VEN_IVAN', 16))
-                            .execute('pConsecutivoProximo');
-                        ivanNum = ivanResGlobal.recordset[0]?.ProximoConsecutivo?.trim();
-                    }
-
-                    if (!ivanNum) {
-                        throw new Error('No se pudo obtener el próximo consecutivo para el documento IVAN.');
-                    }
-
                     const retIvaMatch = data.retenciones_iva?.find(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
-                    const numComprobante = retIvaMatch?.num_comprobante || '';
+                    const numComprobante = (retIvaMatch?.num_comprobante || '').trim();
+
+                    if (!numComprobante) {
+                        throw new Error(`Debe especificar el número de comprobante de retención de IVA para el documento ${line.nro_doc.trim()}.`);
+                    }
+
+                    if (isNcLine) {
+                        const origCheck = await resolveNcrOriginDoc(transaction, {
+                            nroDoc: line.nro_doc,
+                            docOrig,
+                            nroOrig: docNroOrig,
+                            defaultFiscalSucu: sucuCode
+                        });
+                        const providedAffected = (retIvaMatch?.numero_documento_afectado || '').trim();
+                        const validProvidedAffected = (providedAffected && providedAffected !== '0' && providedAffected !== line.nro_doc.trim())
+                            ? providedAffected
+                            : '';
+                        const ncrOriginDocNum = origCheck.numDocOrig || validProvidedAffected;
+
+                        if (!ncrOriginDocNum) {
+                            throw new Error(`No se puede guardar retención de IVA en la Nota de Crédito ${line.nro_doc.trim()} porque no posee un documento de origen fiscal asociado.`);
+                        }
+                        if (origCheck.row && !origCheck.isFiscal) {
+                            throw new Error(`No se puede guardar retención de IVA en la Nota de Crédito ${line.nro_doc.trim()} porque su documento de origen (${ncrOriginDocNum}) no es fiscal.`);
+                        }
+                        const meta = docMetaMap.get(line.nro_doc?.trim());
+                        if (meta) meta.ncrOriginDocNum = ncrOriginDocNum;
+                    }
+
+                    const { retDocType, retDocNum: ivanNum } = await resolveIvaRetentionDocInfo(transaction, {
+                        isNcLine,
+                        sucuCode
+                    });
 
                     await transaction.request()
-                        .input('co_tipo_doc', sql.Char(6), padProfit('IVAN', 6))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(retDocType, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ivanNum, 20))
                         .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
                         .input('co_ven', sql.Char(6), padProfit(data.co_ven || defVen, 6))
@@ -1964,15 +2300,16 @@ router.put('/:cob_num', async (req, res) => {
                             )
                         `);
 
-                    // Insertar renglón de IVAN en saCobroDocReng
+                    // Insertar renglón de IVAN / IVAP en saCobroDocReng
                     const ivanRengNum = nextRengNum++;
                     const ivanRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
                     const ivanRengGuid = ivanRengGuidResult.recordset[0].guid;
+                    ivanRengGuidMap.set(line.nro_doc?.trim(), ivanRengGuid);
 
                     await transaction.request()
                         .input('reng_num', sql.Int, ivanRengNum)
                         .input('cob_num', cobNum)
-                        .input('co_tipo_doc', sql.Char(6), padProfit('IVAN', 6))
+                        .input('co_tipo_doc', sql.Char(6), padProfit(retDocType, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ivanNum, 20))
                         .input('mont_cob', sql.Decimal(18, 2), adjustedMontoRetencionIva)
                         .input('rowguid_reng_ori', sql.UniqueIdentifier, lineGuid)
@@ -2339,8 +2676,10 @@ router.put('/:cob_num', async (req, res) => {
                     const ret = data.retenciones_iva[i];
                     const parentDocNum = ret.nro_doc_asoc?.trim();
                     const lineGuid = rengDocGuidMap.get(parentDocNum);
+                    const targetRengGuid = ivanRengGuidMap.get(parentDocNum) || lineGuid;
+                    const meta = docMetaMap.get(parentDocNum);
 
-                    if (!lineGuid) continue;
+                    if (!targetRengGuid) continue;
 
                     let clientRif = ret.rif_contribuyente || '';
                     if (!clientRif) {
@@ -2350,24 +2689,36 @@ router.put('/:cob_num', async (req, res) => {
                         clientRif = cliR.recordset[0]?.rif || '';
                     }
                     const cleanRif = clientRif.replace(/[^A-Za-z0-9]/g, '').substring(0, 10);
+                    const companyRif = (srv.rif || ret.rif_comprador || 'J000000000').replace(/[^A-Za-z0-9]/g, '').substring(0, 10);
                     const alicuota = Number(ret.alicuota || 16);
                     const baseImp = Number(ret.base_imponible || 0);
+                    const isNcMeta = Boolean(meta?.isNcLine || ['N/CR', 'NCR'].includes((ret.tipo_documento || '').trim().toUpperCase()));
+                    const tipoDocSeniat = isNcMeta
+                        ? 'N/CR'
+                        : ((ret.tipo_documento || meta?.co_tipo_doc || 'FACT').trim().substring(0, 4));
+                    const docAfectadoSeniat = isNcMeta
+                        ? (meta?.ncrOriginDocNum || ((ret.numero_documento_afectado && ret.numero_documento_afectado.trim() !== parentDocNum) ? ret.numero_documento_afectado.trim() : '0'))
+                        : ((ret.numero_documento_afectado && ret.numero_documento_afectado.trim() !== parentDocNum) ? ret.numero_documento_afectado.trim() : '0');
+                    const docControlSeniat = ret.numero_control_documento || meta?.docNControl || parentDocNum;
+                    const docDateVal = ret.fecha_documento
+                        ? new Date(ret.fecha_documento)
+                        : (meta?.docFecEmisStr ? new Date(meta.docFecEmisStr) : originalCobDate);
 
                     await transaction.request()
                         .input('reng_num', sql.Int, 1)
-                        .input('rowguid_reng_cob', sql.UniqueIdentifier, lineGuid)
+                        .input('rowguid_reng_cob', sql.UniqueIdentifier, targetRengGuid)
                         .input('rif_contribuyente', sql.Char(10), padProfit(cleanRif, 10))
                         .input('periodo_impositivo', sql.Decimal(6, 0), Number(ret.periodo_impositivo || 0))
-                        .input('fecha_documento', sql.SmallDateTime, ret.fecha_documento ? new Date(ret.fecha_documento) : originalCobDate)
+                        .input('fecha_documento', sql.SmallDateTime, docDateVal)
                         .input('tipo_operacion', sql.Char(1), 'C')
-                        .input('tipo_documento', sql.Char(4), padProfit((ret.tipo_documento || 'FACT').trim().substring(0, 4), 4))
-                        .input('rif_comprador', sql.Char(10), padProfit('J000000000', 10))
+                        .input('tipo_documento', sql.Char(4), padProfit(tipoDocSeniat, 4))
+                        .input('rif_comprador', sql.Char(10), padProfit(companyRif, 10))
                         .input('numero_documento', sql.Char(20), padProfit(ret.numero_documento || parentDocNum, 20))
-                        .input('numero_control_documento', sql.Char(20), padProfit(ret.numero_control_documento || parentDocNum, 20))
-                        .input('monto_documento', sql.Decimal(15, 2), Number(ret.monto_documento || 0))
+                        .input('numero_control_documento', sql.Char(20), padProfit(docControlSeniat, 20))
+                        .input('monto_documento', sql.Decimal(15, 2), Number(ret.monto_documento || meta?.docTotalNeto || 0))
                         .input('base_imponible', sql.Decimal(15, 2), baseImp)
                         .input('monto_ret_imp', sql.Decimal(15, 2), Number(ret.monto_ret_imp || 0))
-                        .input('numero_documento_afectado', sql.Char(20), padProfit(parentDocNum, 20))
+                        .input('numero_documento_afectado', sql.Char(20), padProfit(docAfectadoSeniat, 20))
                         .input('num_comprobante', sql.Char(14), padProfit((ret.num_comprobante || '').substring(0, 14), 14))
                         .input('monto_excento', sql.Decimal(15, 2), Number(ret.monto_excento || 0))
                         .input('alicuota', sql.Decimal(5, 2), alicuota)
@@ -2523,9 +2874,11 @@ const eliminarCobroHandler = async (req, res) => {
             await transaction.begin();
 
             try {
-                // 3. Si no estaba anulado, revertir saldo de los documentos cobrados
+                // 3. Si no estaba anulado, revertir saldo de los documentos cobrados (excluyendo retenciones auto-generadas IVAN/IVAP/ISLR)
                 if (!cob.anulado) {
                     for (const line of resReng.recordset) {
+                        const lineTypeUpper = (line.co_tipo_doc || '').trim().toUpperCase();
+                        if (['IVAN', 'IVAP', 'ISLR'].includes(lineTypeUpper)) continue;
                         const totalRebaje = Number(line.mont_cob || 0);
                         if (Math.abs(totalRebaje) > 0.001) {
                             await transaction.request()
