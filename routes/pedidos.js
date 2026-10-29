@@ -138,7 +138,7 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
                                RTRIM(cl.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 
-                               cl.contribu_e, cl.porc_esp
+                               RTRIM(cl.tipo_per) AS tipo_per, cl.contrib, cl.contribu_e, cl.porc_esp
                         FROM saPedidoVenta c
                         LEFT JOIN saCliente      cl ON c.co_cli  = cl.co_cli
                         LEFT JOIN saVendedor     v  ON c.co_ven  = v.co_ven
@@ -194,6 +194,31 @@ router.post('/', async (req, res) => {
 
     if (!data.co_cli || !data.renglones) {
         return res.status(400).json({ success: false, message: 'Campos obligatorios: co_cli, renglones' });
+    }
+
+    if (Array.isArray(data.renglones)) {
+        const hasFlete = data.renglones.some(r => {
+            const co = String(r.co_art || '').trim().toUpperCase();
+            const subl = String(r.co_subl || '').trim().toUpperCase();
+            const lin = String(r.co_lin || '').trim().toUpperCase();
+            const des = String(r.art_des || r.des_art || '').trim().toUpperCase();
+            return subl === '0901' || co.startsWith('0901') || co.startsWith('901001') || ((co.startsWith('09') || lin === '09') && des.includes('FLETE'));
+        });
+        const hasCorte = data.renglones.some(r => {
+            const co = String(r.co_art || '').trim().toUpperCase();
+            const subl = String(r.co_subl || '').trim().toUpperCase();
+            const lin = String(r.co_lin || '').trim().toUpperCase();
+            const des = String(r.art_des || r.des_art || '').trim().toUpperCase();
+            const isFlete = subl === '0901' || co.startsWith('0901') || co.startsWith('901001') || ((co.startsWith('09') || lin === '09') && des.includes('FLETE'));
+            return !isFlete && (co.startsWith('09') || lin === '09' || subl.startsWith('09') || co.startsWith('902001') || co.startsWith('902002'));
+        });
+
+        if (hasFlete && hasCorte) {
+            return res.status(400).json({
+                success: false,
+                message: 'No se permite mezclar servicios de Flete y Corte en un mismo pedido. Deben facturarse en pedidos separados debido a la retención de ISLR.'
+            });
+        }
     }
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
