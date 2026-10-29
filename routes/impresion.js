@@ -352,6 +352,218 @@ router.post('/imprimir', async (req, res) => {
     }
 });
 
+// POST /api/v1/impresion/imprimir-devolucion — Enviar ticket de almacén para devolución
+router.post('/imprimir-devolucion', async (req, res) => {
+    const { ip, port, credit, sede } = req.body;
+    const printerPort = parseInt(port || '9100');
+
+    if (!ip || !credit) {
+        return res.status(400).json({ success: false, message: 'Faltan parámetros (ip, credit).' });
+    }
+
+    const devNum = cleanAscii(credit.doc_num || '').trim();
+    console.log(`[IMPRESION DEVOLUCION] Imprimiendo ticket de almacén para devolución ${devNum} en ${ip}:${printerPort}...`);
+
+    try {
+        const width = 42; // Ancho estándar para tickets térmicos de 80mm
+
+        // 1. Obtener ubicaciones de la base de datos de la sede
+        let pool = null;
+        let srv = null;
+        try {
+            const servers = getServers();
+            if (sede) {
+                srv = servers.find(s => s.id === sede) ||
+                    servers.find(s => s.name.trim().toLowerCase() === sede.trim().toLowerCase());
+            }
+            if (!srv && servers.length > 0) {
+                srv = servers[0];
+            }
+            if (srv) {
+                pool = await getPool(srv.id, req.sqlAuth);
+            }
+        } catch (dbErr) {
+            console.warn(`[IMPRESION DEVOLUCION] Error al conectar con la base de datos para buscar ubicaciones:`, dbErr.message);
+        }
+
+        if (pool && credit.renglones) {
+            for (const item of credit.renglones) {
+                try {
+                    const dbRes = await pool.request()
+                        .input('co_art', sql.Char(30), (item.co_art || '').trim())
+                        .query(`
+                            SELECT DISTINCT RTRIM(au.co_ubicacion) AS co_ubicacion,
+                                            RTRIM(au.co_ubicacion2) AS co_ubicacion2,
+                                            RTRIM(au.co_ubicacion3) AS co_ubicacion3
+                            FROM saArtUbicacion au
+                            WHERE LTRIM(RTRIM(au.co_art)) = LTRIM(RTRIM(@co_art))
+                        `);
+
+                    if (dbRes.recordset && dbRes.recordset.length > 0) {
+                        const locations = new Set();
+                        dbRes.recordset.forEach(row => {
+                            if (row.co_ubicacion && row.co_ubicacion.trim()) locations.add(row.co_ubicacion.trim());
+                            if (row.co_ubicacion2 && row.co_ubicacion2.trim()) locations.add(row.co_ubicacion2.trim());
+                            if (row.co_ubicacion3 && row.co_ubicacion3.trim()) locations.add(row.co_ubicacion3.trim());
+                        });
+                        item.locations = Array.from(locations).join(', ') || '---';
+                    } else {
+                        item.locations = '---';
+                    }
+                } catch (err) {
+                    console.warn(`[IMPRESION DEVOLUCION] Error al buscar ubicaciones para artículo ${item.co_art}:`, err.message);
+                    item.locations = '---';
+                }
+            }
+        }
+
+        let t = "";
+
+        const compName = cleanAscii(credit.branch_name || srv?.business_name || srv?.name || 'INVERSIONES GALPE').toUpperCase();
+        const compRif = cleanAscii(credit.branch_rif || srv?.rif || 'J-00000000-0');
+
+        // 1. Inicialización y Encabezado
+        t += CMD_INIT;
+        t += CMD_CENTER;
+        t += CMD_BOLD_ON;
+        t += CMD_DOUBLE_SIZE;
+        t += `${compName}\n`;
+        t += CMD_NORMAL_SIZE;
+        t += CMD_BOLD_OFF;
+        t += `RIF: ${compRif}\n`;
+        t += "-".repeat(width) + "\n";
+
+        // TÍTULO TICKET DE DEVOLUCIÓN
+        t += CMD_CENTER;
+        t += CMD_BOLD_ON;
+        t += CMD_DOUBLE_SIZE;
+        t += "DEVOLUCION\n";
+        t += CMD_NORMAL_SIZE;
+        t += "TICKET DE ALMACEN\n";
+        t += CMD_BOLD_OFF;
+        t += CMD_LEFT;
+        t += "-".repeat(width) + "\n";
+
+        // 2. Información del Documento y Cliente
+        const d = credit.fecha_evento || credit.fec_emis ? new Date(credit.fecha_evento || credit.fec_emis) : new Date();
+        const formattedDate = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+        const hours = d.getHours();
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        const displayHours = hours % 12 || 12;
+        const formattedTime = `${String(displayHours).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')} ${ampm}`;
+
+        const cliDes = cleanAscii(credit.cli_des || 'CLIENTE GENERAL').toUpperCase();
+        t += `Cliente:    ${cliDes.substring(0, 30)}\n`;
+        t += `R.I.F.:     ${cleanAscii(credit.rif || '---')}\n`;
+        t += `Fecha:      ${formattedDate}  ${formattedTime}\n`;
+        t += `Devolucion: Nro. ${devNum}\n`;
+        if (credit.nro_doc && credit.nro_doc.trim() !== devNum) {
+            t += `N/Credito:  Nro. ${cleanAscii(credit.nro_doc.trim())}\n`;
+        }
+        const origenDoc = credit.factura_origen || credit.num_doc || credit.origen || '';
+        if (origenDoc) {
+            t += `Origen:     FACTURA Nro. ${cleanAscii(origenDoc.trim())}\n`;
+        }
+        const venName = credit.ven_des || credit.vendedor || '';
+        if (venName) {
+            t += `Vendedor:   ${cleanAscii(venName).toUpperCase()}\n`;
+        }
+        const cajero = credit.cashier_name || credit.cajero || credit.co_us_in || '';
+        if (cajero) {
+            t += `Cajero:     ${cleanAscii(cajero).toUpperCase()}\n`;
+        }
+        const motivo = credit.comentario || credit.motivo || '';
+        if (motivo) {
+            t += `Motivo:     ${cleanAscii(motivo).substring(0, 30)}\n`;
+        }
+        t += "-".repeat(width) + "\n";
+
+        // 3. Cabecera de Artículos
+        t += CMD_BOLD_ON;
+        const hDesc = centerCol("Art. Devuelto", 22);
+        const hQty = centerCol("Cant.", 10);
+        const hLoc = centerCol("Ubicacion", 10);
+        t += hDesc + hQty + hLoc + "\n";
+        t += CMD_BOLD_OFF;
+        t += "-".repeat(width) + "\n";
+
+        // 4. Renglones (Código + Ubicación en línea 1, Descripción + Cantidad en siguientes líneas)
+        const items = credit.renglones || [];
+        items.forEach((item, idx) => {
+            if (idx > 0) {
+                t += "\n";
+            }
+
+            const descLines = [];
+            let remainingDesc = cleanAscii(item.art_des || item.co_art || '').trim();
+            while (remainingDesc.length > 0) {
+                descLines.push(remainingDesc.substring(0, 22));
+                remainingDesc = remainingDesc.substring(22);
+            }
+            if (descLines.length === 0) descLines.push('');
+
+            const locs = (item.locations || '---').split(',').map(l => l.trim()).filter(Boolean);
+            if (locs.length === 0) locs.push('---');
+
+            // Línea 1: Código + Espacio para cantidad + Primera ubicación
+            const codePart = centerCol(cleanAscii(item.co_art), 22);
+            const qPart1 = " ".repeat(10);
+            const lPart1 = centerCol(locs[0] || '---', 10);
+            t += codePart + qPart1 + lPart1 + "\n";
+
+            // Líneas siguientes: Descripción + Cantidad devuelta + Ubicaciones adicionales
+            const totalLines = Math.max(descLines.length, locs.length - 1);
+            for (let i = 0; i < totalLines; i++) {
+                const dPart = centerCol(descLines[i] || '', 22);
+                const qVal = i === 0 ? Number(item.cantidad || item.total_art || 0).toFixed(2) : '';
+                const qPart = centerCol(qVal, 10);
+                const lPart = centerCol(locs[i + 1] || '', 10);
+                t += dPart + qPart + lPart + "\n";
+            }
+        });
+        t += "-".repeat(width) + "\n";
+
+        // 5. Pie de Ticket: Código de devolución en tamaño grande
+        t += "\n";
+        t += CMD_CENTER;
+        t += CMD_BOLD_ON;
+        t += CMD_DOUBLE_SIZE;
+        t += `${devNum}\n`;
+        t += CMD_NORMAL_SIZE;
+        t += CMD_BOLD_OFF;
+        t += "\n\n\n";
+        t += CMD_CUT;
+
+        // 6. Enviar por Socket TCP a la impresora de red
+        const socket = new net.Socket();
+        socket.setTimeout(5000);
+
+        socket.connect(printerPort, ip, () => {
+            console.log(`[IMPRESION DEVOLUCION] Conectado a la impresora en ${ip}:${printerPort}. Enviando ticket de devolución...`);
+            socket.write(t, 'latin1', () => {
+                socket.destroy();
+                res.status(200).json({ success: true, message: 'Ticket de devolución enviado a la impresora exitosamente.' });
+            });
+        });
+
+        socket.on('error', (err) => {
+            console.error(`[IMPRESION DEVOLUCION] Error enviando ticket a ${ip}:${printerPort}:`, err.message);
+            socket.destroy();
+            res.status(200).json({ success: false, message: `Error al conectar con la impresora: ${err.message}` });
+        });
+
+        socket.on('timeout', () => {
+            console.error(`[IMPRESION DEVOLUCION] Timeout enviando ticket a ${ip}:${printerPort}`);
+            socket.destroy();
+            res.status(200).json({ success: false, message: 'Tiempo de espera agotado al conectar a la impresora.' });
+        });
+
+    } catch (err) {
+        console.error('[IMPRESION DEVOLUCION EXCEPTION]:', err);
+        res.status(500).json({ success: false, message: 'Error interno en el módulo de impresión de devoluciones.', error: err.message });
+    }
+});
+
 // Helper para construir el ticket compacto de notificación de anulación/eliminación
 function buildCancellationTicket(invoice, actionType = 'ANULACION') {
     const width = 42;
