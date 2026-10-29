@@ -79,6 +79,7 @@ router.get('/articulos', async (req, res) => {
                 RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
                 RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                 RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
+                p1.monto AS prec1, m1.monto_max AS margen1,
                 p2.monto AS prec2, m2.monto_max AS margen2,
                 fact.fec_emis AS fecha_ultima_compra,
                 fact.cost_unit_om AS ultimo_costo_om,
@@ -87,11 +88,23 @@ router.get('/articulos', async (req, res) => {
                 ROUND(CASE 
                     WHEN fact.cost_unit_om IS NULL AND p2.monto > 0 AND m2.monto_max > 0 THEN 
                         (p2.monto / (1 + (m2.monto_max / 100)))
+                    WHEN fact.cost_unit_om IS NULL AND p1.monto > 0 AND m1.monto_max > 0 THEN 
+                        (p1.monto / (1 + (m1.monto_max / 100)))
                     ELSE NULL 
                 END, 2) AS costo_estimado
             FROM saArticulo a
             LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
             LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
+            OUTER APPLY (
+                SELECT TOP 1 monto FROM saArtPrecio 
+                WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '01' OR LTRIM(RTRIM(co_precio)) = '1')
+                AND Inactivo = 0 AND GETDATE() >= desde AND (hasta IS NULL OR GETDATE() <= hasta)
+                ORDER BY desde DESC
+            ) p1
+            OUTER APPLY (
+                SELECT TOP 1 monto_max FROM saArtMargen 
+                WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '01' OR LTRIM(RTRIM(co_precio)) = '1')
+            ) m1
             OUTER APPLY (
                 SELECT TOP 1 monto FROM saArtPrecio 
                 WHERE co_art = a.co_art AND (LTRIM(RTRIM(co_precio)) = '02' OR LTRIM(RTRIM(co_precio)) = '2')
