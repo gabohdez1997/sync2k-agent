@@ -310,7 +310,8 @@ router.post('/:doc_num/anular', async (req, res) => {
                 }
 
                 // 3. Revertir inventario (Restar de 'ACT' porque se había sumado al devolver)
-                // Y revertir total_dev en la factura original (saFacturaVentaReng)
+                // Y revertir total_dev, pendiente y estatus en la factura original (saFacturaVentaReng / saFacturaVenta)
+                const facturasAfectadas = new Set();
                 for (const line of resL.recordset) {
                     const rStock = new sql.Request(transaction);
                     rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
@@ -322,20 +323,80 @@ router.post('/:doc_num/anular', async (req, res) => {
                     rStock.input('bPermiteStockNegativo', sql.Bit,      1);
                     await rStock.execute('pStockActualizar');
 
-                    // Revertir total_dev en saFacturaVentaReng
+                    // Revertir total_dev y restaurar pendiente en saFacturaVentaReng
                     if (line.rowguid_doc) {
-                        await transaction.request()
-                            .input('qty', sql.Decimal(18, 5), line.total_art)
+                        const origRengRes = await transaction.request()
                             .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
-                            .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                            .query(`
-                                UPDATE saFacturaVentaReng
-                                SET total_dev = CASE WHEN total_dev >= @qty THEN total_dev - @qty ELSE 0 END,
-                                    fe_us_mo = GETDATE(),
-                                    co_us_mo = @auditUser
-                                WHERE rowguid = @rowguid_doc;
-                            `);
+                            .query(`SELECT doc_num, co_art, co_alma, co_uni, total_art, pendiente, total_dev FROM saFacturaVentaReng WHERE rowguid = @rowguid_doc`);
+
+                        const origReng = origRengRes.recordset?.[0];
+                        if (origReng) {
+                            facturasAfectadas.add(origReng.doc_num.trim());
+
+                            const despRes = await transaction.request()
+                                .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
+                                .query(`
+                                    SELECT ISNULL(SUM(dr.total_art), 0) AS cant_desp
+                                    FROM saNotaDespachoVentaReng dr
+                                    INNER JOIN saNotaDespachoVenta d ON d.doc_num = dr.doc_num
+                                    WHERE dr.rowguid_doc = @rowguid_doc AND d.anulado = 0
+                                `);
+                            const cantDesp = Number(despRes.recordset?.[0]?.cant_desp || 0);
+                            const totalArt = Number(origReng.total_art || 0);
+                            const maxPendientePosible = Math.max(0, totalArt - cantDesp);
+                            const pendienteActual = Number(origReng.pendiente || 0);
+                            const cantARestaurarPend = Math.min(Number(line.total_art || 0), Math.max(0, maxPendientePosible - pendienteActual));
+
+                            if (cantARestaurarPend > 0) {
+                                // Restaurar DES en saStockAlmacen
+                                const rStockDes = new sql.Request(transaction);
+                                rStockDes.input('sCo_Alma',              sql.Char(6),  padProfit(origReng.co_alma || line.co_alma, 6));
+                                rStockDes.input('sCo_Art',               sql.Char(30), padProfit(origReng.co_art || line.co_art, 30));
+                                rStockDes.input('sCo_Uni',               sql.Char(6),  padProfit(origReng.co_uni || line.co_uni, 6));
+                                rStockDes.input('deCantidad',            sql.Decimal(18, 5), cantARestaurarPend);
+                                rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                                rStockDes.input('bSumarStock',           sql.Bit,      1); // Sumar stock DES
+                                rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                                await rStockDes.execute('pStockActualizar');
+                            }
+
+                            await transaction.request()
+                                .input('qty', sql.Decimal(18, 5), line.total_art)
+                                .input('cant_restaurar_pend', sql.Decimal(18, 5), cantARestaurarPend)
+                                .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
+                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                                .query(`
+                                    UPDATE saFacturaVentaReng
+                                    SET total_dev = CASE WHEN total_dev >= @qty THEN total_dev - @qty ELSE 0 END,
+                                        pendiente = pendiente + @cant_restaurar_pend,
+                                        fe_us_mo = GETDATE(),
+                                        co_us_mo = @auditUser
+                                    WHERE rowguid = @rowguid_doc;
+                                `);
+                        }
                     }
+                }
+
+                // Recalcular estatus de las facturas de venta afectadas
+                for (const docNumFact of facturasAfectadas) {
+                    await transaction.request()
+                        .input('doc_num', sql.Char(20), padProfit(docNumFact, 20))
+                        .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                        .query(`
+                            DECLARE @total_art DECIMAL(18,5), @pendiente DECIMAL(18,5);
+                            SELECT @total_art = ISNULL(SUM(total_art), 0), @pendiente = ISNULL(SUM(pendiente), 0)
+                            FROM saFacturaVentaReng WHERE doc_num = @doc_num;
+
+                            UPDATE saFacturaVenta 
+                            SET status = CASE 
+                                WHEN @pendiente <= 0 THEN '2'
+                                WHEN @pendiente < @total_art THEN '1'
+                                ELSE '0'
+                            END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                            WHERE doc_num = @doc_num;
+                        `);
                 }
 
                 await transaction.commit();
@@ -698,15 +759,38 @@ router.post('/', async (req, res) => {
                     rStock.input('bPermiteStockNegativo', sql.Bit,      1);
                     await rStock.execute('pStockActualizar');
 
-                    // 4. Actualizar total_dev en la factura original (saFacturaVentaReng)
+                    // 4. Actualizar total_dev y descontar de pendiente en la factura original (saFacturaVentaReng)
                     if (rowguidDocVal) {
+                        const curRengRes = await transaction.request()
+                            .input('rowguid_doc', sql.UniqueIdentifier, rowguidDocVal)
+                            .query(`SELECT pendiente, co_alma, co_art, co_uni FROM saFacturaVentaReng WHERE rowguid = @rowguid_doc`);
+
+                        const curReng = curRengRes.recordset?.[0];
+                        const curPendiente = Number(curReng?.pendiente || 0);
+                        const cantADescontarPendiente = Math.min(qty, curPendiente);
+
+                        if (cantADescontarPendiente > 0) {
+                            // Restar de Stock por Despachar (DES) en saStockAlmacen
+                            const rStockDes = new sql.Request(transaction);
+                            rStockDes.input('sCo_Alma',              sql.Char(6),  padProfit(curReng?.co_alma || targetAlma, 6));
+                            rStockDes.input('sCo_Art',               sql.Char(30), padProfit(curReng?.co_art || item.co_art, 30));
+                            rStockDes.input('sCo_Uni',               sql.Char(6),  padProfit(curReng?.co_uni || finalUni, 6));
+                            rStockDes.input('deCantidad',            sql.Decimal(18, 5), cantADescontarPendiente);
+                            rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                            rStockDes.input('bSumarStock',           sql.Bit,      0); // Restar stock DES
+                            rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                            await rStockDes.execute('pStockActualizar');
+                        }
+
                         await transaction.request()
                             .input('qty', sql.Decimal(18, 5), qty)
+                            .input('cant_pend_desc', sql.Decimal(18, 5), cantADescontarPendiente)
                             .input('rowguid_doc', sql.UniqueIdentifier, rowguidDocVal)
                             .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
                             .query(`
                                 UPDATE saFacturaVentaReng
                                 SET total_dev = ISNULL(total_dev, 0) + @qty,
+                                    pendiente = CASE WHEN pendiente >= @cant_pend_desc THEN pendiente - @cant_pend_desc ELSE 0 END,
                                     fe_us_mo = GETDATE(),
                                     co_us_mo = @auditUser
                                 WHERE rowguid = @rowguid_doc;
@@ -818,6 +902,26 @@ router.post('/', async (req, res) => {
                         SET co_tipo_doc = 'N/CR',
                             nro_doc = @nro_doc
                         WHERE doc_num = @doc_num
+                    `);
+
+                // 7. Actualizar estatus de la factura de origen (saFacturaVenta)
+                await transaction.request()
+                    .input('doc_num', sql.Char(20), padProfit(facturaNum, 20))
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        DECLARE @total_art DECIMAL(18,5), @pendiente DECIMAL(18,5);
+                        SELECT @total_art = ISNULL(SUM(total_art), 0), @pendiente = ISNULL(SUM(pendiente), 0)
+                        FROM saFacturaVentaReng WHERE doc_num = @doc_num;
+
+                        UPDATE saFacturaVenta 
+                        SET status = CASE 
+                            WHEN @pendiente <= 0 THEN '2'
+                            WHEN @pendiente < @total_art THEN '1'
+                            ELSE '0'
+                        END,
+                        fe_us_mo = GETDATE(),
+                        co_us_mo = @auditUser
+                        WHERE doc_num = @doc_num;
                     `);
 
                 await transaction.commit();

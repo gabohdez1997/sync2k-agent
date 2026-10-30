@@ -214,7 +214,7 @@ router.get('/facturas-pendientes', async (req, res) => {
                 let whereClauses = [
                     "c.anulado = 0",
                     "c.status IN ('0', '1')", // Sin procesar o parcialmente procesada
-                    "EXISTS (SELECT 1 FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0)"
+                    "EXISTS (SELECT 1 FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0 AND (r.total_art - ISNULL(r.total_dev, 0)) > 0)"
                 ];
 
                 if (search) {
@@ -250,9 +250,9 @@ router.get('/facturas-pendientes', async (req, res) => {
                         RTRIM(c.co_sucu_in) AS co_sucu_in,
                         RTRIM(c.co_sucu_mo) AS co_sucu_mo,
                         (SELECT COUNT(*) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num) AS total_renglones,
-                        (SELECT COUNT(*) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0) AS renglones_pendientes,
+                        (SELECT COUNT(*) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num AND r.pendiente > 0 AND (r.total_art - ISNULL(r.total_dev, 0)) > 0) AS renglones_pendientes,
                         (SELECT ISNULL(SUM(r.total_art), 0) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num) AS cant_total,
-                        (SELECT ISNULL(SUM(r.pendiente), 0) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num) AS cant_pendiente,
+                        (SELECT ISNULL(SUM(CASE WHEN r.pendiente > (r.total_art - ISNULL(r.total_dev, 0)) THEN (r.total_art - ISNULL(r.total_dev, 0)) ELSE r.pendiente END), 0) FROM saFacturaVentaReng r WHERE r.doc_num = c.doc_num AND (r.total_art - ISNULL(r.total_dev, 0)) > 0) AS cant_pendiente,
                         '${srv.name || srv.id}' AS sede_nombre,
                         '${srv.id}' AS sede_id
                     FROM saFacturaVenta c
@@ -350,7 +350,7 @@ router.get('/facturas-pendientes/:doc_num', async (req, res) => {
                             RTRIM(r.co_alma) AS co_alma_original,
                             RTRIM(al.des_alma) AS des_alma_original,
                             r.total_art AS cant_original,
-                            r.pendiente AS cant_pendiente,
+                            CASE WHEN r.pendiente > (r.total_art - ISNULL(r.total_dev, 0)) THEN (r.total_art - ISNULL(r.total_dev, 0)) ELSE r.pendiente END AS cant_pendiente,
                             r.prec_vta,
                             r.prec_vta_om,
                             r.tipo_imp,
@@ -362,7 +362,7 @@ router.get('/facturas-pendientes/:doc_num', async (req, res) => {
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni
                         LEFT JOIN saAlmacen al ON r.co_alma = al.co_alma
-                        WHERE r.doc_num = @doc_num AND r.pendiente > 0
+                        WHERE r.doc_num = @doc_num AND r.pendiente > 0 AND (r.total_art - ISNULL(r.total_dev, 0)) > 0
                         ORDER BY r.reng_num ASC
                     `);
 
