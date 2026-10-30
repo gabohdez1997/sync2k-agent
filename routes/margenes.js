@@ -44,13 +44,40 @@ router.get('/resumen', async (req, res) => {
             ORDER BY tp.co_precio;
         `;
 
-        const result = await pool.request().query(query);
+        const [result, distResult] = await Promise.all([
+            pool.request().query(query),
+            pool.request().query(`
+                SELECT 
+                    LTRIM(RTRIM(co_precio)) AS co_precio,
+                    CAST(ROUND(monto_max, 2) AS float) AS margen,
+                    COUNT(*) AS cantidad
+                FROM saArtMargen
+                WHERE monto_max > 0
+                GROUP BY LTRIM(RTRIM(co_precio)), ROUND(monto_max, 2)
+                ORDER BY LTRIM(RTRIM(co_precio)), COUNT(*) DESC;
+            `).catch(e => {
+                console.warn('[MARGENES] No se pudo obtener distribucion:', e.message);
+                return { recordset: [] };
+            })
+        ]);
+
+        const distMap = {};
+        (distResult.recordset || []).forEach(d => {
+            const cp = (d.co_precio || '').trim();
+            if (!distMap[cp]) distMap[cp] = [];
+            distMap[cp].push({
+                margen: Number(d.margen) || 0,
+                cantidad: Number(d.cantidad) || 0
+            });
+        });
+
         const data = (result.recordset || []).map(r => ({
             co_precio: r.co_precio,
             des_precio: r.des_precio,
             margen_actual: Number(r.margen_actual) || 0,
             total_articulos: Number(r.total_articulos) || 0,
-            total_con_precio: Number(r.total_con_precio) || 0
+            total_con_precio: Number(r.total_con_precio) || 0,
+            distribucion_margenes: distMap[r.co_precio.trim()] || []
         }));
 
         return res.status(200).json({
@@ -138,7 +165,7 @@ router.post('/actualizar-masivo', async (req, res) => {
                     let filterClause = '';
                     if (filter_old_margin && item.margen_actual != null) {
                         reqP.input('margen_actual_filtro', sql.Decimal(18, 5), Number(item.margen_actual));
-                        filterClause = ' AND (m.monto_max = @margen_actual_filtro OR m.monto_min = @margen_actual_filtro)';
+                        filterClause = ' AND (m.monto_max = @margen_actual_filtro OR m.monto_min = @margen_actual_filtro OR ROUND(m.monto_max, 2) = ROUND(@margen_actual_filtro, 2))';
                     }
 
                     const resP = await reqP.query(`
@@ -168,7 +195,7 @@ router.post('/actualizar-masivo', async (req, res) => {
                     let filterClause = '';
                     if (filter_old_margin && item.margen_actual != null) {
                         reqM.input('margen_actual_filtro', sql.Decimal(18, 5), Number(item.margen_actual));
-                        filterClause = ' AND (monto_max = @margen_actual_filtro OR monto_min = @margen_actual_filtro)';
+                        filterClause = ' AND (monto_max = @margen_actual_filtro OR monto_min = @margen_actual_filtro OR ROUND(monto_max, 2) = ROUND(@margen_actual_filtro, 2))';
                     }
 
                     const resM = await reqM.query(`
