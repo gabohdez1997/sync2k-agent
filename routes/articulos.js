@@ -457,7 +457,7 @@ router.get('/search', async (req, res) => {
 
         var globalSearch = req.query.search || req.query.q;
 
-        if (!filters.length && !req.query.sede && !req.query.sort && !globalSearch && !req.query.con_imagen) {
+        if (!filters.length && !req.query.sede && !req.query.sort && !globalSearch && !req.query.con_imagen && !req.query.in_stock) {
             return res.status(400).json({ success: false, message: 'Especifique al menos un parámetro de búsqueda.' });
         }
         const co_alma = req.query.co_alma;
