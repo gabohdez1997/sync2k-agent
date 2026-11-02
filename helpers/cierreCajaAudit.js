@@ -95,8 +95,12 @@ async function auditarCierreCajas(options = {}) {
     const profitDevoluciones = devsRes.recordset;
     const profitCobros = cobrosRes.recordset;
 
-    // Detectar archivos Excel en la carpeta
-    const allFiles = fs.readdirSync(cajasDir).filter(f => f.endsWith('.xlsx') && !f.startsWith('~$'));
+    // Detectar archivos Excel en la carpeta de cajas
+    const allFiles = fs.readdirSync(cajasDir).filter(f => 
+        f.endsWith('.xlsx') && 
+        !f.startsWith('~$') && 
+        (/cierre/i.test(f) || /caja\s*\d+/i.test(f))
+    );
     
     // Configuración para cada caja conocida
     const auditResults = {
@@ -116,8 +120,9 @@ async function auditarCierreCajas(options = {}) {
     const [y, m, d] = fecha.split('-');
     const patternDate = `${d}-${m}`; // ej "06-10"
 
+    // 1. Pre-escanear y parsear todos los libros Excel de las cajas
+    const parsedBoxes = [];
     for (const fileName of allFiles) {
-        // Identificar usuario caja
         let cajaId = '';
         if (/07/i.test(fileName)) cajaId = 'CAJA07';
         else if (/10/i.test(fileName)) cajaId = 'CAJA10';
@@ -128,19 +133,11 @@ async function auditarCierreCajas(options = {}) {
         const wb = XLSX.readFile(filePath);
 
         // Buscar hoja correspondiente
-        let targetSheet = null;
-
-        // 1. Buscar coincidencia por nombre de fecha exacta
-        targetSheet = wb.SheetNames.find(s => s.includes(patternDate) || s.includes(`${parseInt(d, 10)}-${parseInt(m, 10)}`));
-
-        // 2. Si no se encuentra (como en CAJA 10 donde la hoja fue nombrada "OCTUBRE 05-10-26 (4)"),
-        //    verificar si las facturas de la última hoja coinciden con las facturas de Profit para la fecha
+        let targetSheet = wb.SheetNames.find(s => s.includes(patternDate) || s.includes(`${parseInt(d, 10)}-${parseInt(m, 10)}`));
         if (!targetSheet) {
-            const lastSheet = wb.SheetNames[wb.SheetNames.length - 1];
-            targetSheet = lastSheet;
+            targetSheet = wb.SheetNames[wb.SheetNames.length - 1];
         }
 
-        // Si es CAJA 10 y la fecha es 2026-10-06 (donde la hoja fue nombrada excepcionalmente "05-10-26 (4)")
         if (cajaId === 'CAJA10' && fecha === '2026-10-06') {
             const sheetCand = wb.SheetNames.find(s => s.includes('05-10-26 (4)'));
             if (sheetCand) targetSheet = sheetCand;
@@ -149,21 +146,6 @@ async function auditarCierreCajas(options = {}) {
         const ws = wb.Sheets[targetSheet];
         if (!ws) continue;
 
-        const cajaAudit = {
-            cajaId,
-            archivo: fileName,
-            hoja: targetSheet,
-            facturas_fiscales: { excel_count: 0, profit_count: 0, diferencias: [] },
-            notas_entrega: { excel_count: 0, profit_count: 0, diferencias: [] },
-            anuladas_y_devoluciones: [],
-            diferencias_centimos: [],
-            formas_pago: {
-                excel: {},
-                profit: {}
-            }
-        };
-
-        // Extraer datos del Excel
         const excelFiscal = [];
         const excelNotas = [];
         const excelSummary = {};
@@ -183,6 +165,7 @@ async function auditarCierreCajas(options = {}) {
             if (aVal && /^\d+$/.test(aVal)) {
                 const anulada = banco.toUpperCase().includes('ANULADA') || (eVal === 0 && bVal === 0);
                 excelFiscal.push({
+                    cajaId,
                     fila: r,
                     num_fiscal: normalizeDocNum(aVal),
                     monto_bruto: bVal,
@@ -197,6 +180,7 @@ async function auditarCierreCajas(options = {}) {
             if (fVal && /^\d+$/.test(fVal)) {
                 const anulada = banco.toUpperCase().includes('ANULADA') || gVal === 0;
                 excelNotas.push({
+                    cajaId,
                     fila: r,
                     num_nota: normalizeDocNum(fVal),
                     monto: gVal,
@@ -214,9 +198,33 @@ async function auditarCierreCajas(options = {}) {
             }
         }
 
-        cajaAudit.facturas_fiscales.excel_count = excelFiscal.length;
-        cajaAudit.notas_entrega.excel_count = excelNotas.length;
-        cajaAudit.formas_pago.excel = excelSummary;
+        parsedBoxes.push({
+            cajaId,
+            fileName,
+            targetSheet,
+            excelFiscal,
+            excelNotas,
+            excelSummary
+        });
+    }
+
+    // 2. Auditar cada caja contra Profit Plus
+    for (const box of parsedBoxes) {
+        const { cajaId, fileName, targetSheet, excelFiscal, excelNotas, excelSummary } = box;
+
+        const cajaAudit = {
+            cajaId,
+            archivo: fileName,
+            hoja: targetSheet,
+            facturas_fiscales: { excel_count: excelFiscal.length, profit_count: 0, diferencias: [] },
+            notas_entrega: { excel_count: excelNotas.length, profit_count: 0, diferencias: [] },
+            anuladas_y_devoluciones: [],
+            diferencias_centimos: [],
+            formas_pago: {
+                excel: excelSummary,
+                profit: {}
+            }
+        };
 
         // Facturas de Profit para esta caja
         const profitCajaFacs = profitFacturas.filter(f => f.co_us_in === cajaId);
@@ -226,23 +234,39 @@ async function auditarCierreCajas(options = {}) {
         cajaAudit.facturas_fiscales.profit_count = profitFiscal.length;
         cajaAudit.notas_entrega.profit_count = profitNotas.length;
 
-        // 1. Comparar Facturas Fiscales
+        // Comparar Facturas Fiscales
         profitFiscal.forEach(pf => {
             const pfFis = normalizeDocNum(pf.impfisfac);
             const found = excelFiscal.find(ef => ef.num_fiscal === pfFis);
 
             if (!found) {
-                cajaAudit.facturas_fiscales.diferencias.push({
-                    tipo: 'FALTA EN EXCEL',
-                    doc_profit: pf.doc_num,
-                    num_fiscal: pfFis,
-                    monto_profit: pf.total_neto,
-                    cliente: pf.cli_des
-                });
+                // Verificar si fue registrada en el libro de otra caja
+                const otherBox = parsedBoxes
+                    .filter(b => b.cajaId !== cajaId)
+                    .flatMap(b => b.excelFiscal)
+                    .find(ef => ef.num_fiscal === pfFis);
+
+                if (otherBox) {
+                    cajaAudit.facturas_fiscales.diferencias.push({
+                        tipo: `REGISTRADO EN ${otherBox.cajaId}`,
+                        doc_profit: pf.doc_num,
+                        num_fiscal: pfFis,
+                        monto_profit: pf.total_neto,
+                        cliente: pf.cli_des,
+                        observacion: `Emitida en Profit por ${cajaId}, pero anotada en Excel de ${otherBox.cajaId} (Fila ${otherBox.fila})`
+                    });
+                } else {
+                    cajaAudit.facturas_fiscales.diferencias.push({
+                        tipo: 'FALTA EN EXCEL',
+                        doc_profit: pf.doc_num,
+                        num_fiscal: pfFis,
+                        monto_profit: pf.total_neto,
+                        cliente: pf.cli_des
+                    });
+                }
             } else {
                 // Verificar si en Excel fue marcada como ANULADA
                 if (found.anulada && !pf.anulado) {
-                    // Buscar si tiene devolución asociada
                     const devAsoc = profitDevoluciones.find(d => 
                         (d.nro_doc && d.nro_doc.includes(pf.doc_num)) || 
                         d.co_cli === pf.co_cli ||
@@ -274,18 +298,35 @@ async function auditarCierreCajas(options = {}) {
             }
         });
 
-        // 2. Comparar Notas de Entrega
+        // Comparar Notas de Entrega
         profitNotas.forEach(pn => {
             const pnNum = normalizeDocNum(pn.doc_num);
             const found = excelNotas.find(en => pn.doc_num.includes(en.num_nota) || normalizeDocNum(en.num_nota) === pnNum);
 
             if (!found) {
-                cajaAudit.notas_entrega.diferencias.push({
-                    tipo: 'FALTA EN EXCEL',
-                    doc_profit: pn.doc_num,
-                    monto_profit: pn.total_neto,
-                    cliente: pn.cli_des
-                });
+                // Verificar si fue registrada en el libro de otra caja
+                const otherBox = parsedBoxes
+                    .filter(b => b.cajaId !== cajaId)
+                    .flatMap(b => b.excelNotas)
+                    .find(en => pn.doc_num.includes(en.num_nota) || normalizeDocNum(en.num_nota) === pnNum);
+
+                if (otherBox) {
+                    cajaAudit.notas_entrega.diferencias.push({
+                        tipo: `REGISTRADO EN ${otherBox.cajaId}`,
+                        doc_profit: pn.doc_num,
+                        num_nota: pnNum,
+                        monto_profit: pn.total_neto,
+                        cliente: pn.cli_des,
+                        observacion: `Emitida en Profit por ${cajaId}, pero anotada en Excel de ${otherBox.cajaId} (Fila ${otherBox.fila})`
+                    });
+                } else {
+                    cajaAudit.notas_entrega.diferencias.push({
+                        tipo: 'FALTA EN EXCEL',
+                        doc_profit: pn.doc_num,
+                        monto_profit: pn.total_neto,
+                        cliente: pn.cli_des
+                    });
+                }
             } else {
                 if (found.anulada && !pn.anulado) {
                     const devAsoc = profitDevoluciones.find(d => 
@@ -305,6 +346,18 @@ async function auditarCierreCajas(options = {}) {
                 } else {
                     const diffMonto = found.monto - pn.total_neto;
                     if (Math.abs(diffMonto) > 0.05) {
+                        const devAsocParcial = profitDevoluciones.find(d => 
+                            ((d.nro_doc && d.nro_doc.includes(pn.doc_num)) || 
+                             (d.descrip && d.descrip.includes(pn.doc_num)) || 
+                             d.co_cli === pn.co_cli) &&
+                            Math.abs((found.monto + d.total_neto) - pn.total_neto) < 0.05
+                        );
+
+                        let observacion = Math.abs(diffMonto) < 1 ? 'Diferencia de redondeo/céntimos' : 'Diferencia de monto';
+                        if (devAsocParcial) {
+                            observacion = `Monto coincide tras Devolución Parcial ${devAsocParcial.doc_num} (-${devAsocParcial.total_neto.toFixed(2)} Bs)`;
+                        }
+
                         cajaAudit.diferencias_centimos.push({
                             doc_profit: pn.doc_num,
                             identificador: `Nota ${found.num_nota}`,
@@ -312,7 +365,7 @@ async function auditarCierreCajas(options = {}) {
                             monto_profit: pn.total_neto,
                             diferencia: Number(diffMonto.toFixed(2)),
                             cliente: pn.cli_des,
-                            observacion: Math.abs(diffMonto) < 1 ? 'Diferencia de redondeo/céntimos' : 'Diferencia de monto'
+                            observacion
                         });
                     }
                 }
@@ -398,6 +451,20 @@ function imprimirReporte(results) {
         console.log(`------------------------------------------------------------------------`);
         console.log(`• Facturas Fiscales: Excel = ${c.facturas_fiscales.excel_count} | Profit = ${c.facturas_fiscales.profit_count}`);
         console.log(`• Notas de Entrega:  Excel = ${c.notas_entrega.excel_count} | Profit = ${c.notas_entrega.profit_count}`);
+
+        if (c.facturas_fiscales.diferencias && c.facturas_fiscales.diferencias.length > 0) {
+            console.log(`\n  ⚠️ DISCREPANCIAS EN FACTURAS FISCALES (${c.facturas_fiscales.diferencias.length}):`);
+            c.facturas_fiscales.diferencias.forEach(d => {
+                console.log(`    - [${d.tipo}] Doc: ${d.doc_profit} (Fiscal ${d.num_fiscal}) | Profit: ${d.monto_profit.toLocaleString('es-VE', { minimumFractionDigits: 2 })} Bs | Cli: ${d.cliente}${d.observacion ? `\n      ℹ️ ${d.observacion}` : ''}`);
+            });
+        }
+
+        if (c.notas_entrega.diferencias && c.notas_entrega.diferencias.length > 0) {
+            console.log(`\n  ⚠️ DISCREPANCIAS EN NOTAS DE ENTREGA (${c.notas_entrega.diferencias.length}):`);
+            c.notas_entrega.diferencias.forEach(d => {
+                console.log(`    - [${d.tipo}] Doc: ${d.doc_profit} (Nota ${d.num_nota || ''}) | Profit: ${d.monto_profit.toLocaleString('es-VE', { minimumFractionDigits: 2 })} Bs | Cli: ${d.cliente}${d.observacion ? `\n      ℹ️ ${d.observacion}` : ''}`);
+            });
+        }
 
         if (c.anuladas_y_devoluciones.length > 0) {
             console.log(`\n  ⚠️ FACTURAS MARCADAS COMO ANULADAS EN EXCEL VS DEVOLUCIONES EN PROFIT (${c.anuladas_y_devoluciones.length}):`);
