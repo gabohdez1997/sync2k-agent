@@ -1403,7 +1403,7 @@ router.post('/', async (req, res) => {
 
                         await rMovC.execute('pInsertarMovimientoCaja');
                     }
-                } else if (tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP') {
+                } else if (tp.forma_pag === 'TE' || tp.forma_pag === 'TR' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP') {
                     // Obtener la moneda de la cuenta bancaria
                     let isUSDcuenta = false;
                     const resCtaInfo = await transaction.request()
@@ -1466,7 +1466,7 @@ router.post('/', async (req, res) => {
                 await transaction.request()
                     .input('reng_num', sql.Int, rengNum)
                     .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
-                    .input('forma_pag', sql.Char(2), tp.forma_pag === 'TE' ? 'TP' : tp.forma_pag)
+                    .input('forma_pag', sql.Char(2), tp.forma_pag === 'EF' ? 'EF' : tp.forma_pag === 'CH' ? 'CH' : 'TR')
                     .input('cod_cta', sql.Char(6), tp.cod_cta ? padProfit(tp.cod_cta, 6) : null)
                     .input('cod_caja', sql.Char(6), tp.cod_caja ? padProfit(tp.cod_caja, 6) : null)
                     .input('mov_num_c', sql.Char(20), movNumC ? padProfit(movNumC, 20) : null)
