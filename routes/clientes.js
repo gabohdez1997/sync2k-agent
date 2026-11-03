@@ -124,7 +124,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sDis_cen', sql.VarChar(sql.MAX), data.dis_cen || '<InformacionContable><Carpeta01><CuentaContable>1.1.05.001</CuentaContable></Carpeta01></InformacionContable>');
     r.input('sNit', sql.VarChar(18), '');
     r.input('sEmail', sql.VarChar(60), data.email || '');
-    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || 'I-001', 20));
+    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || d?.co_cta || '01', 20));
     r.input('sComentario', sql.VarChar(sql.MAX), data.comentario || 'Creado vía API');
     r.input('sCampo1', sql.VarChar(60), data.campo1 ? String(data.campo1).slice(0, 60) : '');
     r.input('sCampo2', sql.VarChar(60), data.campo2 ? String(data.campo2).slice(0, 60) : '');
@@ -207,7 +207,7 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999', def
     r.input('sDis_cen', sql.VarChar(sql.MAX), finalDisCen);
     r.input('sNit', sql.VarChar(18), '');
     r.input('sEmail', sql.VarChar(60), data.email || '');
-    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || row.co_cta_ingr_egr || 'I-001', 20));
+    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || row.co_cta_ingr_egr || '01', 20));
     r.input('sComentario', sql.VarChar(sql.MAX), data.comentario || 'Editado vía API');
     r.input('sCampo1', sql.VarChar(60), data.campo1 !== undefined ? String(data.campo1).slice(0, 60) : (row.campo1 || ''));
     r.input('sCampo2', sql.VarChar(60), data.campo2 !== undefined ? String(data.campo2).slice(0, 60) : (row.campo2 || ''));
@@ -286,7 +286,7 @@ async function loadDefaults(pool, srv = null) {
         pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS id FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur")
     ]);
     return {
-        co_cta: cta.recordset[0]?.id || prefCta,
+        co_cta: cta.recordset[0]?.id || (isAldanet ? 'I-001' : '01'),
         co_seg: seg.recordset[0]?.id || prefSeg,
         co_zon: zon.recordset[0]?.id || prefZon,
         co_ven: ven.recordset[0]?.id || prefVen,
