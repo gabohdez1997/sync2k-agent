@@ -2,8 +2,8 @@ const sql = require('mssql');
 const pg = require('pg');
 require('dotenv').config();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL || 'https://rwblykcpnduniexbivra.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3Ymx5a2NwbmR1bmlleGJpdnJhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTUxNzI0NCwiZXhwIjoyMDk3MDkzMjQ0fQ.Q04ibUleUEFCPcOsQ73qJI4W8nwDupfwACDeIczFAnw';
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL || 'https://xcawarqghigflksbhzaw.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhjYXdhcnFnaGlnZmxrc2JoemF3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjUyMTU0NiwiZXhwIjoyMTA4MDk3NTQ2fQ.p8LD4jZqsK4xpLo_B876A5ZDw5Qk2hk4cMPY6Z5u_eg';
 
 // ── Conexión a PostgreSQL Local (sync2k) ───────────────────────────────────
 // Esta base de datos es alimentada en background por "profit-web/sync-daemon"
@@ -71,7 +71,8 @@ async function initServers() {
                 let cloudRows = await res.json();
                 if (localBranchName) {
                     cloudRows = cloudRows.filter(r => 
-                        (r.name && r.name.toLowerCase() === localBranchName.toLowerCase()) || 
+                        (r.name && r.name.toLowerCase().includes(localBranchName.toLowerCase())) || 
+                        (r.business_name && r.business_name.toLowerCase().includes(localBranchName.toLowerCase())) || 
                         (r.id && r.id.toLowerCase() === localBranchName.toLowerCase())
                     );
                 }
@@ -109,6 +110,14 @@ async function getPool(serverId, sqlAuth = null) {
 
     if (!pools.has(poolId)) {
         let branch = null;
+        const fromCache = cachedServers.find(s => 
+            String(s.id).toLowerCase() === String(serverId).toLowerCase() ||
+            String(s.name || '').toLowerCase() === String(serverId).toLowerCase() ||
+            (s.profit_server_id && String(s.profit_server_id).toLowerCase() === String(serverId).toLowerCase())
+        );
+        if (fromCache && fromCache.sql_config) {
+            branch = { name: fromCache.name, sql_config: fromCache.sql_config };
+        }
         try {
             const { rows } = await pgPool.query(`SELECT name, sql_config FROM branches WHERE id = $1 AND active = true`, [serverId]);
             if (rows.length > 0) branch = rows[0];
@@ -132,7 +141,12 @@ async function getPool(serverId, sqlAuth = null) {
         }
 
         if (!branch) {
+            if (cachedServers && cachedServers.length > 0 && cachedServers[0].sql_config) {
+            console.log(`[Agente DB] Usando sede en caché (${cachedServers[0].name}) como fallback para nodo ${serverId}`);
+            branch = { name: cachedServers[0].name, sql_config: cachedServers[0].sql_config };
+        } else {
             throw new Error(`Nodo con ID "${serverId}" no existe o se encuentra inactivo.`);
+        }
         }
 
         const config = branch.sql_config || {};

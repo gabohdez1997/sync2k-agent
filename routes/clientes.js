@@ -124,16 +124,16 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('sDis_cen', sql.VarChar(sql.MAX), data.dis_cen || '<InformacionContable><Carpeta01><CuentaContable>1.1.05.001</CuentaContable></Carpeta01></InformacionContable>');
     r.input('sNit', sql.VarChar(18), '');
     r.input('sEmail', sql.VarChar(60), data.email || '');
-    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || '01', 20));
-    r.input('sComentario', sql.VarChar(sql.MAX), 'Creado vía API');
-    r.input('sCampo1', sql.VarChar(60), '');
-    r.input('sCampo2', sql.VarChar(60), '');
-    r.input('sCampo3', sql.VarChar(60), '');
-    r.input('sCampo4', sql.VarChar(60), '');
-    r.input('sCampo5', sql.VarChar(60), '');
-    r.input('sCampo6', sql.VarChar(60), '');
-    r.input('sCampo7', sql.VarChar(60), '');
-    r.input('sCampo8', sql.VarChar(60), '');
+    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || 'I-001', 20));
+    r.input('sComentario', sql.VarChar(sql.MAX), data.comentario || 'Creado vía API');
+    r.input('sCampo1', sql.VarChar(60), data.campo1 ? String(data.campo1).slice(0, 60) : '');
+    r.input('sCampo2', sql.VarChar(60), data.campo2 ? String(data.campo2).slice(0, 60) : '');
+    r.input('sCampo3', sql.VarChar(60), data.campo3 ? String(data.campo3).slice(0, 60) : '');
+    r.input('sCampo4', sql.VarChar(60), data.campo4 ? String(data.campo4).slice(0, 60) : '');
+    r.input('sCampo5', sql.VarChar(60), data.campo5 ? String(data.campo5).slice(0, 60) : '');
+    r.input('sCampo6', sql.VarChar(60), data.campo6 ? String(data.campo6).slice(0, 60) : '');
+    r.input('sCampo7', sql.VarChar(60), data.campo7 ? String(data.campo7).slice(0, 60) : '');
+    r.input('sCampo8', sql.VarChar(60), data.campo8 ? String(data.campo8).slice(0, 60) : '');
     r.input('sCo_Us_In', sql.VarChar(10), auditUser);
     r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
     r.input('sRevisado', sql.Char(1), '0');
@@ -207,16 +207,16 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999', def
     r.input('sDis_cen', sql.VarChar(sql.MAX), finalDisCen);
     r.input('sNit', sql.VarChar(18), '');
     r.input('sEmail', sql.VarChar(60), data.email || '');
-    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || row.co_cta_ingr_egr || '01', 20));
-    r.input('sComentario', sql.VarChar(sql.MAX), 'Editado vía API');
-    r.input('sCampo1', sql.VarChar(60), '');
-    r.input('sCampo2', sql.VarChar(60), '');
-    r.input('sCampo3', sql.VarChar(60), '');
-    r.input('sCampo4', sql.VarChar(60), '');
-    r.input('sCampo5', sql.VarChar(60), '');
-    r.input('sCampo6', sql.VarChar(60), '');
-    r.input('sCampo7', sql.VarChar(60), '');
-    r.input('sCampo8', sql.VarChar(60), '');
+    r.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(data.co_cta_ingr_egr || data.co_cta || row.co_cta_ingr_egr || 'I-001', 20));
+    r.input('sComentario', sql.VarChar(sql.MAX), data.comentario || 'Editado vía API');
+    r.input('sCampo1', sql.VarChar(60), data.campo1 !== undefined ? String(data.campo1).slice(0, 60) : (row.campo1 || ''));
+    r.input('sCampo2', sql.VarChar(60), data.campo2 !== undefined ? String(data.campo2).slice(0, 60) : (row.campo2 || ''));
+    r.input('sCampo3', sql.VarChar(60), data.campo3 !== undefined ? String(data.campo3).slice(0, 60) : (row.campo3 || ''));
+    r.input('sCampo4', sql.VarChar(60), data.campo4 !== undefined ? String(data.campo4).slice(0, 60) : (row.campo4 || ''));
+    r.input('sCampo5', sql.VarChar(60), data.campo5 !== undefined ? String(data.campo5).slice(0, 60) : (row.campo5 || ''));
+    r.input('sCampo6', sql.VarChar(60), data.campo6 !== undefined ? String(data.campo6).slice(0, 60) : (row.campo6 || ''));
+    r.input('sCampo7', sql.VarChar(60), data.campo7 !== undefined ? String(data.campo7).slice(0, 60) : (row.campo7 || ''));
+    r.input('sCampo8', sql.VarChar(60), data.campo8 !== undefined ? String(data.campo8).slice(0, 60) : (row.campo8 || ''));
     r.input('sCo_Us_Mo', sql.VarChar(10), auditUser);
     r.input('sCo_Sucu_Mo', sql.Char(6), padProfit(defaults?.co_sucu || '01', 6));
     r.input('sMaquina', sql.VarChar(60), 'SYNC2K');
@@ -246,27 +246,51 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999', def
 
 // ── Helper: carga defaults de FK ───────────────────────────────────────────
 async function loadDefaults(pool, srv = null) {
-    const defaultSucu = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code 
-        || (srv?.profit_branch_codes || [])[0]?.code 
-        || (srv?.profit_branch_codes || [])[0] 
+    const defaultSucu = (srv?.profit_branch_codes || []).find(b => b.is_default)?.code
+        || (srv?.profit_branch_codes || [])[0]?.code
+        || (srv?.profit_branch_codes || [])[0]
         || null;
 
+    const srvDefaults = srv?.sql_config?.profit_defaults || {};
+    const isAldanet = Boolean(
+        (process.env.LOCAL_BRANCH_NAME && process.env.LOCAL_BRANCH_NAME.toLowerCase().includes('aldanet')) ||
+        (srv?.name && srv.name.toLowerCase().includes('aldanet')) ||
+        (srv?.server && srv.server.toLowerCase().includes('aldanet')) ||
+        (srv?.database && srv.database.toLowerCase().includes('aldanet'))
+    );
+
+    const prefCta = srvDefaults.default_cta_ingr_egr || srv?.default_cta_ingr_egr || (isAldanet ? 'I-001' : '01');
+    const prefZon = srvDefaults.default_zone || srv?.default_zone || (isAldanet ? '004' : '01');
+    const prefTip = srvDefaults.default_client_type || srv?.default_client_type || (isAldanet ? 'DET' : '01');
+    const prefSeg = srvDefaults.default_segment || srv?.default_segment || '01';
+    const prefVen = srvDefaults.default_seller || srv?.default_seller || '01';
+
     const [cta, seg, zon, ven, tip, mon, cond, sucu] = await Promise.all([
-        pool.request().query('SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS id FROM saCuentaIngEgr'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_seg) AS id FROM saSegmento'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_zon) AS id FROM saZona'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_ven) AS id FROM saVendedor'),
-        pool.request().query('SELECT TOP 1 RTRIM(tip_cli) AS id FROM saTipoCliente ORDER BY CASE WHEN RTRIM(tip_cli) = \'01\' THEN 0 ELSE 1 END, tip_cli'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN co_mone IN (\'BS\',\'VES\',\'BSF\') THEN 0 ELSE 1 END, co_mone'),
+        pool.request()
+            .input('prefCta', sql.VarChar(20), prefCta)
+            .query("SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS id FROM saCuentaIngEgr ORDER BY CASE WHEN RTRIM(co_cta_ingr_egr) = @prefCta THEN 0 WHEN RTRIM(co_cta_ingr_egr) = '01' THEN 1 ELSE 2 END, co_cta_ingr_egr"),
+        pool.request()
+            .input('prefSeg', sql.VarChar(6), prefSeg)
+            .query("SELECT TOP 1 RTRIM(co_seg) AS id FROM saSegmento ORDER BY CASE WHEN RTRIM(co_seg) = @prefSeg THEN 0 ELSE 1 END, co_seg"),
+        pool.request()
+            .input('prefZon', sql.VarChar(6), prefZon)
+            .query("SELECT TOP 1 RTRIM(co_zon) AS id FROM saZona ORDER BY CASE WHEN RTRIM(co_zon) = @prefZon THEN 0 WHEN RTRIM(co_zon) = '01' THEN 1 ELSE 2 END, co_zon"),
+        pool.request()
+            .input('prefVen', sql.VarChar(10), prefVen)
+            .query("SELECT TOP 1 RTRIM(co_ven) AS id FROM saVendedor ORDER BY CASE WHEN RTRIM(co_ven) = @prefVen THEN 0 ELSE 1 END, co_ven"),
+        pool.request()
+            .input('prefTip', sql.VarChar(6), prefTip)
+            .query("SELECT TOP 1 RTRIM(tip_cli) AS id FROM saTipoCliente ORDER BY CASE WHEN RTRIM(tip_cli) = @prefTip THEN 0 WHEN RTRIM(tip_cli) = '01' THEN 1 ELSE 2 END, tip_cli"),
+        pool.request().query("SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN co_mone IN ('BS','VES','BSF') THEN 0 ELSE 1 END, co_mone"),
         pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago'),
-        pool.request().query('SELECT TOP 1 RTRIM(co_sucur) AS id FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = \'01\' THEN 0 ELSE 1 END, co_sucur')
+        pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS id FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur")
     ]);
     return {
-        co_cta: cta.recordset[0]?.id || '01',
-        co_seg: seg.recordset[0]?.id || '01',
-        co_zon: zon.recordset[0]?.id || '01',
-        co_ven: ven.recordset[0]?.id || '01',
-        tip_cli: tip.recordset[0]?.id || '01',
+        co_cta: cta.recordset[0]?.id || prefCta,
+        co_seg: seg.recordset[0]?.id || prefSeg,
+        co_zon: zon.recordset[0]?.id || prefZon,
+        co_ven: ven.recordset[0]?.id || prefVen,
+        tip_cli: tip.recordset[0]?.id || prefTip,
         co_mone: mon.recordset[0]?.id || '01',
         co_cond: cond.recordset[0]?.id || '01',
         co_sucu: defaultSucu || sucu.recordset[0]?.id || '01'
@@ -606,7 +630,7 @@ router.post('/import-batch', async (req, res) => {
                             .input('cli', sql.Char(16), padProfit(co_cli, 16))
                             .input('des', sql.VarChar(120), String(item.cli_des).trim().substring(0, 120))
                             .query('UPDATE saCliente SET cli_des = @des WHERE LTRIM(RTRIM(co_cli)) = LTRIM(RTRIM(@cli))');
-                    } catch {}
+                    } catch { }
                 }
 
                 if (dataToInsert.inactivo) {
