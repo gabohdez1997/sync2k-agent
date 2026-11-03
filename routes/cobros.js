@@ -2013,7 +2013,7 @@ router.put('/:cob_num', async (req, res) => {
             // 1. Verificar existencia y estado del cobro
             const resStatus = await transaction.request()
                 .input('cob_num', sql.Char(20), cobNum)
-                .query(`SELECT anulado, LTRIM(RTRIM(co_cli)) AS co_cli, fecha FROM saCobro WHERE cob_num = @cob_num`);
+                .query(`SELECT anulado, LTRIM(RTRIM(co_cli)) AS co_cli, fecha, LTRIM(RTRIM(co_us_in)) AS co_us_in, LTRIM(RTRIM(co_sucu_in)) AS co_sucu_in, fe_us_in FROM saCobro WHERE cob_num = @cob_num`);
             
             const cobRecord = resStatus.recordset[0];
             if (!cobRecord) {
@@ -2898,8 +2898,11 @@ router.put('/:cob_num', async (req, res) => {
                     .input('num_doc', sql.Char(20), tp.num_doc ? padProfit(tp.num_doc, 20) : null)
                     .input('mont_doc', sql.Decimal(18, 2), Number(tp.mont_doc))
                     .input('fecha_che', sql.SmallDateTime, tp.fecha_che ? new Date(tp.fecha_che) : tsDate)
-                    .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
-                    .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                    .input('co_sucu_in', sql.Char(6), padProfit(cobRecord.co_sucu_in || sucuCode, 6))
+                    .input('co_us_in', sql.Char(6), padProfit(cobRecord.co_us_in || auditUser, 6))
+                    .input('fe_us_in', sql.SmallDateTime, cobRecord.fe_us_in || tsDate)
+                    .input('co_sucu_mo', sql.Char(6), padProfit(sucuCode, 6))
+                    .input('co_us_mo', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         INSERT INTO saCobroTPReng (
                             reng_num, cob_num, co_tar, co_ban, forma_pag, cod_cta, cod_caja, co_vale,
@@ -2909,7 +2912,7 @@ router.put('/:cob_num', async (req, res) => {
                         ) VALUES (
                             @reng_num, @cob_num, @co_tar, @co_ban, @forma_pag, @cod_cta, @cod_caja, NULL,
                             @mov_num_c, @mov_num_b, @num_doc, 0, @mont_doc, @fecha_che,
-                            @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(),
+                            @co_sucu_in, @co_us_in, @fe_us_in, @co_sucu_mo, @co_us_mo, GETDATE(),
                             NULL, NULL, NEWID()
                         )
                     `);

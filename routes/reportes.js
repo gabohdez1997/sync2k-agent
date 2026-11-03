@@ -1610,7 +1610,7 @@ router.get('/articulos-ventas', async (req, res) => {
 
 router.get('/resumen-cobros', async (req, res) => {
     try {
-        const { sede, fecha } = req.query;
+        const { sede, fecha, criterio } = req.query;
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -1640,9 +1640,26 @@ router.get('/resumen-cobros', async (req, res) => {
         `);
         const tasaDia = (qTasa.recordset && qTasa.recordset.length > 0 && Number(qTasa.recordset[0].tasa_v) > 0) ? Number(qTasa.recordset[0].tasa_v) : 1;
 
+        // Criterio de filtro: 'fe_us_in' (default) | 'fe_us_mo' | 'fecha'
+        const crit = (criterio || 'fe_us_in').trim().toLowerCase();
+        let dateColumn = 'c.fe_us_in';
+        let userColumn = 'c.co_us_in';
+
+        if (crit === 'fe_us_mo' || crit === 'modificacion') {
+            dateColumn = "ISNULL(c.fe_us_mo, c.fe_us_in)";
+            userColumn = "ISNULL(NULLIF(c.co_us_mo, ''), c.co_us_in)";
+        } else if (crit === 'fecha' || crit === 'emision') {
+            dateColumn = 'c.fecha';
+            userColumn = 'c.co_us_in';
+        } else {
+            // fe_us_in / creacion por defecto
+            dateColumn = 'c.fe_us_in';
+            userColumn = 'c.co_us_in';
+        }
+
         const querySQL = `
             SELECT 
-                RTRIM(r.co_us_in) AS usuario, 
+                RTRIM(${userColumn}) AS usuario, 
                 RTRIM(r.forma_pag) AS forma_pag, 
                 CASE 
                     WHEN RTRIM(r.forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(r.cod_cta, ''))
@@ -1654,9 +1671,9 @@ router.get('/resumen-cobros', async (req, res) => {
             FROM saCobroTPReng r
             INNER JOIN saCobro c ON r.cob_num = c.cob_num
             WHERE ISNULL(c.anulado, 0) = 0
-              AND CAST(r.fe_us_in AS DATE) = CAST(@fecha AS DATE)
+              AND CAST(${dateColumn} AS DATE) = CAST(@fecha AS DATE)
             GROUP BY 
-                RTRIM(r.co_us_in), 
+                RTRIM(${userColumn}), 
                 RTRIM(r.forma_pag), 
                 CASE 
                     WHEN RTRIM(r.forma_pag) IN ('DP', 'TP') THEN RTRIM(ISNULL(r.cod_cta, ''))
@@ -1665,7 +1682,7 @@ router.get('/resumen-cobros', async (req, res) => {
                     ELSE ''
                 END
             ORDER BY 
-                RTRIM(r.co_us_in), 
+                RTRIM(${userColumn}), 
                 RTRIM(r.forma_pag), 
                 detalle
         `;
@@ -1681,6 +1698,7 @@ router.get('/resumen-cobros', async (req, res) => {
         return res.status(200).json({
             success: true,
             tasa_dia: tasaDia,
+            criterio: crit,
             data: rows
         });
     } catch (error) {
