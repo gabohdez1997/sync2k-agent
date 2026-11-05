@@ -909,16 +909,28 @@ router.post('/', async (req, res) => {
     }
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+        const configuredCtaIE = (data.co_cta_ingr_egr || srv.sql_config?.profit_defaults?.default_cta_ingr_egr || srv.profit_defaults?.default_cta_ingr_egr || '').trim();
+
         // Cargar Catálogos para valores predeterminados
         const [resVen, resSucu, resCtaIE] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(co_ven) AS co_ven FROM saVendedor`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
-            pool.request().query(`SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr FROM saCuentaIngEgr`)
+            pool.request().query(`
+                SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr 
+                FROM saCuentaIngEgr 
+                ORDER BY 
+                    CASE 
+                        WHEN RTRIM(co_cta_ingr_egr) = '${configuredCtaIE.replace(/'/g, "''")}' THEN 0 
+                        WHEN RTRIM(co_cta_ingr_egr) = 'I-001' THEN 1 
+                        WHEN RTRIM(co_cta_ingr_egr) = '01' THEN 2 
+                        ELSE 3 
+                    END
+            `)
         ]);
 
         const defVen = resVen.recordset[0]?.co_ven || '01';
         const defSucu = resSucu.recordset[0]?.co_sucur || '01';
-        const defCtaIE = '01';
+        const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'I-001';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
         const tsDate = new Date();
@@ -1987,15 +1999,27 @@ router.put('/:cob_num', async (req, res) => {
     }
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
+        const configuredCtaIE = (data.co_cta_ingr_egr || srv.sql_config?.profit_defaults?.default_cta_ingr_egr || srv.profit_defaults?.default_cta_ingr_egr || '').trim();
+
         const [resVen, resSucu, resCtaIE] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(co_ven) AS co_ven FROM saVendedor`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
-            pool.request().query(`SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr FROM saCuentaIngEgr`)
+            pool.request().query(`
+                SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr 
+                FROM saCuentaIngEgr 
+                ORDER BY 
+                    CASE 
+                        WHEN RTRIM(co_cta_ingr_egr) = '${configuredCtaIE.replace(/'/g, "''")}' THEN 0 
+                        WHEN RTRIM(co_cta_ingr_egr) = 'I-001' THEN 1 
+                        WHEN RTRIM(co_cta_ingr_egr) = '01' THEN 2 
+                        ELSE 3 
+                    END
+            `)
         ]);
 
         const defVen = resVen.recordset[0]?.co_ven || '01';
         const defSucu = resSucu.recordset[0]?.co_sucur || '01';
-        const defCtaIE = '01';
+        const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'I-001';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
         const tsDate = new Date();
