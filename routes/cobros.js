@@ -1035,6 +1035,73 @@ router.post('/', async (req, res) => {
             const creditDocTypes = ['N/CR', 'AJNA', 'AJNM', 'ADEL'];
             const parentLines = data.renglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = data.renglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
+
+            // 2.3 Procesar Retención de Timbre Fiscal 1x1000 (AJNM) para Entes Gubernamentales
+            if (data.timbre_fiscal && (data.timbre_fiscal.aplicar || Number(data.timbre_fiscal.monto_bs) > 0.01)) {
+                const timbreMontoBs = Math.round((Number(data.timbre_fiscal.monto_bs) || 0) * 100) / 100;
+                if (timbreMontoBs > 0.01) {
+                    const corrAj = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: 'V012',
+                        co_consecutivos: ['DOC_VEN_AJNM'],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoVenta',
+                        col: 'nro_doc'
+                    });
+                    const ajDocNum = corrAj.docNum;
+                    const ajObserva = `RETENCION TIMBRE FISCAL 1X1000 COBRO N° ${cobNum}`.substring(0, 120);
+
+                    await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNM', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                        .input('co_ven', sql.Char(6), padProfit(effectiveCoVen || '01', 6))
+                        .input('co_mone', sql.Char(6), padProfit(data.co_mone || 'USD', 6))
+                        .input('tasa', sql.Decimal(21, 8), data.tasa || 1.00)
+                        .input('observa', sql.VarChar(120), ajObserva)
+                        .input('doc_orig', sql.Char(6), padProfit('COBRO', 6))
+                        .input('tipo_origen', sql.Int, 0)
+                        .input('nro_orig', sql.VarChar(20), cobNum)
+                        .input('total_bruto', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('total_neto', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('saldo', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saDocumentoVenta (
+                                co_tipo_doc, nro_doc, co_cli, co_ven, co_mone, tasa, observa,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, contrib,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                comis1, comis2, comis3, comis4, comis5, comis6, adicional, ven_ter,
+                                otros1, otros2, otros3, n_control, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
+                            ) VALUES (
+                                @co_tipo_doc, @nro_doc, @co_cli, @co_ven, @co_mone, @tasa, @observa,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, @nro_doc, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0.00, 0.00
+                            )
+                        `);
+
+                    childLines.push({
+                        co_tipo_doc: 'AJNM',
+                        nro_doc: ajDocNum,
+                        mont_cob: timbreMontoBs,
+                        monto_retencion_iva: 0,
+                        monto_retencion: 0,
+                        parent_doc: parentLines[0]?.nro_doc
+                    });
+
+                    console.log(`✨ [COBROS] Retención Timbre Fiscal 1x1000 generada como AJNM ${ajDocNum} (${timbreMontoBs} Bs) para cobro ${cobNum}`);
+                }
+            }
+
             const sortedRenglones = [...parentLines, ...childLines];
 
             // Calcular monto total de créditos aplicados presentes en los renglones child
@@ -2252,6 +2319,73 @@ router.put('/:cob_num', async (req, res) => {
             const creditDocTypes = ['N/CR', 'AJNA', 'AJNM', 'ADEL'];
             const parentLines = cleanRenglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = cleanRenglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
+
+            // 2.3 Procesar Retención de Timbre Fiscal 1x1000 (AJNM) para Entes Gubernamentales (PUT)
+            if (data.timbre_fiscal && (data.timbre_fiscal.aplicar || Number(data.timbre_fiscal.monto_bs) > 0.01)) {
+                const timbreMontoBs = Math.round((Number(data.timbre_fiscal.monto_bs) || 0) * 100) / 100;
+                if (timbreMontoBs > 0.01) {
+                    const corrAj = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: 'V012',
+                        co_consecutivos: ['DOC_VEN_AJNM'],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoVenta',
+                        col: 'nro_doc'
+                    });
+                    const ajDocNum = corrAj.docNum;
+                    const ajObserva = `RETENCION TIMBRE FISCAL 1X1000 COBRO N° ${cob_num}`.substring(0, 120);
+
+                    await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNM', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('co_cli', sql.Char(16), padProfit(data.co_cli, 16))
+                        .input('co_ven', sql.Char(6), padProfit(effectiveCoVen || '01', 6))
+                        .input('co_mone', sql.Char(6), padProfit(data.co_mone || 'USD', 6))
+                        .input('tasa', sql.Decimal(21, 8), data.tasa || 1.00)
+                        .input('observa', sql.VarChar(120), ajObserva)
+                        .input('doc_orig', sql.Char(6), padProfit('COBRO', 6))
+                        .input('tipo_origen', sql.Int, 0)
+                        .input('nro_orig', sql.VarChar(20), cob_num)
+                        .input('total_bruto', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('total_neto', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('saldo', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saDocumentoVenta (
+                                co_tipo_doc, nro_doc, co_cli, co_ven, co_mone, tasa, observa,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, contrib,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                comis1, comis2, comis3, comis4, comis5, comis6, adicional, ven_ter,
+                                otros1, otros2, otros3, n_control, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
+                            ) VALUES (
+                                @co_tipo_doc, @nro_doc, @co_cli, @co_ven, @co_mone, @tasa, @observa,
+                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, @nro_doc, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0.00, 0.00
+                            )
+                        `);
+
+                    childLines.push({
+                        co_tipo_doc: 'AJNM',
+                        nro_doc: ajDocNum,
+                        mont_cob: timbreMontoBs,
+                        monto_retencion_iva: 0,
+                        monto_retencion: 0,
+                        parent_doc: parentLines[0]?.nro_doc
+                    });
+
+                    console.log(`✨ [COBROS] Retención Timbre Fiscal 1x1000 generada como AJNM ${ajDocNum} (${timbreMontoBs} Bs) para cobro ${cob_num} (PUT)`);
+                }
+            }
+
             const sortedRenglones = [...parentLines, ...childLines];
 
             // Calcular monto total de créditos aplicados presentes en los renglones child
