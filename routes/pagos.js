@@ -1225,34 +1225,70 @@ router.post('/', async (req, res) => {
                             )
                         `);
 
-                    // Insertar en saPagoRentenReng
-                    const retIslrMatch = data.retenciones_islr?.find(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
-                    const coIslr = retIslrMatch?.co_islr || '055';
-                    const baseIslr = Number(retIslrMatch?.monto_obj || (docSaldo - (Number(line.monto_imp) || 0)));
-                    const porcIslr = Number(retIslrMatch?.porc_retn || 2);
+                    // Insertar en saPagoRentenReng (soporta múltiples conceptos por documento)
+                    try {
+                        const docRetList = (data.retenciones_islr || []).filter(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
+                        if (docRetList.length > 0) {
+                            for (let islrIdx = 0; islrIdx < docRetList.length; islrIdx++) {
+                                const retItem = docRetList[islrIdx];
+                                const coIslr = retItem.co_islr || '055';
+                                const baseIslr = Number(retItem.monto_obj || 0);
+                                const montoReten = Number(retItem.monto_reten || (docRetList.length === 1 ? adjustedMontoRetencion : 0));
+                                const porcIslr = Number(retItem.porc_retn || 2);
+                                const sustraendo = Number(retItem.sustraendo || 0);
 
-                    await transaction.request()
-                        .input('reng_num', sql.Int, 1)
-                        .input('rowguid_reng_cob', sql.UniqueIdentifier, islrRengGuid)
-                        .input('co_islr', sql.Char(6), padProfit(coIslr, 6))
-                        .input('monto', sql.Decimal(18, 5), baseIslr)
-                        .input('monto_reten', sql.Decimal(18, 5), adjustedMontoRetencion)
-                        .input('monto_obj', sql.Decimal(18, 5), baseIslr)
-                        .input('sustraendo', sql.Decimal(18, 5), Number(retIslrMatch?.sustraendo || 0))
-                        .input('porc_retn', sql.Decimal(18, 5), porcIslr)
-                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
-                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
-                        .query(`
-                            INSERT INTO saPagoRentenReng (
-                                reng_num, rowguid_reng_cob, co_islr, monto, monto_reten, monto_obj,
-                                sustraendo, porc_retn, automatica, co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
-                                revisado, trasnfe, rowguid, rowguid_fact
-                            ) VALUES (
-                                @reng_num, @rowguid_reng_cob, @co_islr, @monto, @monto_reten, @monto_obj,
-                                @sustraendo, @porc_retn, 0, @co_us_in, @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(),
-                                NULL, NULL, NEWID(), NULL
-                            )
-                        `);
+                                await transaction.request()
+                                    .input('reng_num', sql.Int, islrIdx + 1)
+                                    .input('rowguid_reng_cob', sql.UniqueIdentifier, islrRengGuid)
+                                    .input('co_islr', sql.Char(6), padProfit(coIslr, 6))
+                                    .input('monto', sql.Decimal(18, 5), baseIslr)
+                                    .input('monto_reten', sql.Decimal(18, 5), montoReten)
+                                    .input('monto_obj', sql.Decimal(18, 5), baseIslr)
+                                    .input('sustraendo', sql.Decimal(18, 5), sustraendo)
+                                    .input('porc_retn', sql.Decimal(18, 5), porcIslr)
+                                    .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                                    .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                                    .query(`
+                                        INSERT INTO saPagoRentenReng (
+                                            reng_num, rowguid_reng_cob, co_islr, monto, monto_reten, monto_obj,
+                                            sustraendo, porc_retn, automatica, co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                                            revisado, trasnfe, rowguid, rowguid_fact
+                                        ) VALUES (
+                                            @reng_num, @rowguid_reng_cob, @co_islr, @monto, @monto_reten, @monto_obj,
+                                            @sustraendo, @porc_retn, 0, @co_us_in, @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(),
+                                            NULL, NULL, NEWID(), NULL
+                                        )
+                                    `);
+                            }
+                        } else {
+                            const coIslr = '055';
+                            const baseIslr = Number(docSaldo - (Number(line.monto_imp) || 0));
+                            await transaction.request()
+                                .input('reng_num', sql.Int, 1)
+                                .input('rowguid_reng_cob', sql.UniqueIdentifier, islrRengGuid)
+                                .input('co_islr', sql.Char(6), padProfit(coIslr, 6))
+                                .input('monto', sql.Decimal(18, 5), baseIslr)
+                                .input('monto_reten', sql.Decimal(18, 5), adjustedMontoRetencion)
+                                .input('monto_obj', sql.Decimal(18, 5), baseIslr)
+                                .input('sustraendo', sql.Decimal(18, 5), 0)
+                                .input('porc_retn', sql.Decimal(18, 5), 2)
+                                .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                                .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                                .query(`
+                                    INSERT INTO saPagoRentenReng (
+                                        reng_num, rowguid_reng_cob, co_islr, monto, monto_reten, monto_obj,
+                                        sustraendo, porc_retn, automatica, co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                                        revisado, trasnfe, rowguid, rowguid_fact
+                                    ) VALUES (
+                                        @reng_num, @rowguid_reng_cob, @co_islr, @monto, @monto_reten, @monto_obj,
+                                        @sustraendo, @porc_retn, 0, @co_us_in, @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(),
+                                        NULL, NULL, NEWID(), NULL
+                                    )
+                                `);
+                        }
+                    } catch (errIslrReng) {
+                        console.warn('[PAGOS] Error insertando saPagoRentenReng:', errIslrReng.message);
+                    }
                 }
             }
 
