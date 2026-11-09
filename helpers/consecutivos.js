@@ -146,6 +146,38 @@ const DOC_TYPE_CONFIG = {
         filter_col: 'co_tipo_doc',
         filter_val: 'AJPM'
     },
+    AJUSTE_POSITIVO_AUTOMATICO_VENTA: {
+        co_tipo_serie: 'V013',
+        co_consecutivos: ['DOC_VEN_AJPA', 'AJPA_NUM', 'AJPA'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPA'
+    },
+    V013: {
+        co_tipo_serie: 'V013',
+        co_consecutivos: ['DOC_VEN_AJPA', 'AJPA_NUM', 'AJPA'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPA'
+    },
+    AJUSTE_NEGATIVO_AUTOMATICO_VENTA: {
+        co_tipo_serie: 'V011',
+        co_consecutivos: ['DOC_VEN_AJNA', 'AJNA_NUM', 'AJNA'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNA'
+    },
+    V011: {
+        co_tipo_serie: 'V011',
+        co_consecutivos: ['DOC_VEN_AJNA', 'AJNA_NUM', 'AJNA'],
+        table: 'saDocumentoVenta',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNA'
+    },
     AJUSTE_NEGATIVO_COMPRA: {
         co_tipo_serie: 'C008',
         co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
