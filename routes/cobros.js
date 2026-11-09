@@ -933,7 +933,11 @@ router.post('/', async (req, res) => {
         const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'I-001';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
-        const tsDate = new Date();
+        const cobroFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/)) 
+            ? String(data.fecha).trim() 
+            : new Date().toISOString().split('T')[0];
+        const tsDate = new Date(`${cobroFechaStr}T12:00:00`);
+        const generarDiferencial = data.generar_diferencial !== false && data.aplicar_diferencial !== false;
 
         const branchCodes = srv.profit_branch_codes || [];
         const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: defSucu };
@@ -1265,12 +1269,11 @@ router.post('/', async (req, res) => {
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                 const isFactura = docTypeUpper === 'FACT';
-                const todayStr = new Date().toISOString().split('T')[0];
-                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
+                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < cobroFechaStr;
                 const rateCobro = Number(data.tasa || 1);
 
-                // Diferencial Cambiario SOLO para facturas de venta (FACT)
-                if (isFactura && isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
+                // Diferencial Cambiario SOLO para facturas de venta (FACT) cuando esté habilitado
+                if (generarDiferencial && isFactura && isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     // Llevar saldo en Bs a USD según la tasa del documento
                     const saldoUsd = docSaldo / docTasa;
                     // Calcular equivalente en Bs a la tasa actual
@@ -1286,7 +1289,7 @@ router.post('/', async (req, res) => {
                     if (totalRebaje > docSaldo) {
                         const excess = totalRebaje - docSaldo;
                         finalMontCob = Math.max(0, finalMontCob - excess);
-                        if (isFactura) {
+                        if (generarDiferencial && isFactura) {
                             diffBs = diffBs + excess;
                         }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
@@ -1711,7 +1714,7 @@ router.post('/', async (req, res) => {
                 });
 
                 // 3.2 Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario (SOLO facturas)
-                if (isFactura && Math.abs(diffBs) > 0.01) {
+                if (generarDiferencial && isFactura && Math.abs(diffBs) > 0.01) {
                     const isDebit = diffBs > 0;
                     const diffDocType = isDebit ? 'N/DB' : 'N/CR';
                     const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
@@ -2121,7 +2124,11 @@ router.put('/:cob_num', async (req, res) => {
         const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'I-001';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
-        const tsDate = new Date();
+        const cobroFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/)) 
+            ? String(data.fecha).trim() 
+            : (cobRecord.fecha ? new Date(cobRecord.fecha).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
+        const tsDate = new Date(`${cobroFechaStr}T12:00:00`);
+        const generarDiferencial = data.generar_diferencial !== false && data.aplicar_diferencial !== false;
 
         const branchCodes = srv.profit_branch_codes || [];
         const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: defSucu };
@@ -2292,12 +2299,13 @@ router.put('/:cob_num', async (req, res) => {
                 .input('co_ven', sql.Char(6), padProfit(data.co_ven || defVen, 6))
                 .input('co_mone', sql.Char(6), padProfit(collectionMone, 6))
                 .input('tasa', sql.Decimal(21, 8), rateCobro)
+                .input('fecha', sql.SmallDateTime, tsDate)
                 .input('monto', sql.Decimal(18, 2), finalMontoHeader)
                 .input('descrip', sql.VarChar(60), (data.descrip || 'COBRO DE CLIENTE').substring(0, 60))
                 .input('co_us_mo', sql.Char(6), padProfit(auditUser, 6))
                 .query(`
                     UPDATE saCobro
-                    SET co_cli = @co_cli, co_ven = @co_ven, co_mone = @co_mone, tasa = @tasa,
+                    SET fecha = @fecha, co_cli = @co_cli, co_ven = @co_ven, co_mone = @co_mone, tasa = @tasa,
                         monto = @monto, descrip = @descrip, co_us_mo = @co_us_mo, fe_us_mo = GETDATE()
                     WHERE cob_num = @cob_num
                 `);
@@ -2546,11 +2554,10 @@ router.put('/:cob_num', async (req, res) => {
 
                 let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
                 const isFactura = docTypeUpper === 'FACT';
-                const todayStr = new Date().toISOString().split('T')[0];
-                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < todayStr;
+                const isPreviousDateDoc = docFecEmisStr && docFecEmisStr < cobroFechaStr;
 
-                // Diferencial Cambiario SOLO para facturas de venta (FACT)
-                if (isFactura && isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
+                // Diferencial Cambiario SOLO para facturas de venta (FACT) cuando esté habilitado
+                if (generarDiferencial && isFactura && isPreviousDateDoc && docSaldo > 0 && docTasa > 0 && rateCobro > docTasa) {
                     const saldoUsd = docSaldo / docTasa;
                     const montoBsActual = Math.round((saldoUsd * rateCobro) * 100) / 100;
                     diffBs = Math.max(0, Math.round((montoBsActual - docSaldo) * 100) / 100);
@@ -2562,7 +2569,7 @@ router.put('/:cob_num', async (req, res) => {
                     if (totalRebaje > docSaldo) {
                         const excess = totalRebaje - docSaldo;
                         finalMontCob = Math.max(0, finalMontCob - excess);
-                        if (isFactura) {
+                        if (generarDiferencial && isFactura) {
                             diffBs = diffBs + excess;
                         }
                         totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
@@ -2859,7 +2866,7 @@ router.put('/:cob_num', async (req, res) => {
                 });
 
                 // Generar Nota de Débito (N/DB) o Crédito (N/CR) por diferencial cambiario en edición (SOLO facturas)
-                if (isFactura && Math.abs(diffBs) > 0.01) {
+                if (generarDiferencial && isFactura && Math.abs(diffBs) > 0.01) {
                     const isDebit = diffBs > 0;
                     const diffDocType = isDebit ? 'N/DB' : 'N/CR';
                     const consecName = isDebit ? 'DOC_VEN_N/DB' : 'DOC_VEN_N/CR';
