@@ -170,7 +170,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                                    WHERE p.anulado = 0 
                                      AND LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                      AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), 0) AS ya_reten_islr_bs,
-                           ISNULL((SELECT TOP 1 RTRIM(dc.nro_doc) 
+                           ISNULL((SELECT TOP 1 COALESCE(NULLIF(RTRIM(dc.num_comprobante), ''), RTRIM(dc.nro_doc), '') 
                                    FROM saPagoDocReng pdr 
                                    INNER JOIN saPago p ON pdr.cob_num = p.cob_num 
                                    INNER JOIN saDocumentoCompra dc ON dc.doc_orig = 'PAGO' AND LTRIM(RTRIM(dc.nro_orig)) = LTRIM(RTRIM(p.cob_num)) AND UPPER(RTRIM(dc.co_tipo_doc)) = 'IVAN' 
@@ -816,7 +816,10 @@ router.post('/', async (req, res) => {
         const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'P-001';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
-        const tsDate = new Date();
+        const pagoFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/)) 
+            ? String(data.fecha).trim() 
+            : new Date().toISOString().split('T')[0];
+        const tsDate = new Date(`${pagoFechaStr}T12:00:00`);
 
         const branchCodes = srv.profit_branch_codes || [];
         const defaultCodeObj = branchCodes.find(b => b.is_default === true) || branchCodes[0] || { code: defSucu };
@@ -1023,19 +1026,91 @@ router.post('/', async (req, res) => {
 
                 // 3.1 Generar documento IVAN (Retención de IVA en compras)
                 if (adjustedMontoRetencionIva > 0) {
-                    const corrIvan = await getProximoConsecutivoRetencion({
-                        runner: transaction,
-                        co_tipo_serie: 'IVAN_COMPRA',
-                        co_sucur: sucuCode,
-                        currentSrvId: srv.id,
-                        sqlAuth: req.sqlAuth
-                    });
-                    const ivanNum = corrIvan.docNum;
+                    const retIvaMatch = data.retenciones_iva?.find(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
+                    const customComp = (retIvaMatch?.num_comprobante || line.num_comprobante || line.num_comprobante_iva || '').trim();
 
-                    // Formatear comprobante fiscal SENIAT: YYYYMM + 8 dígitos
-                    const today = new Date();
-                    const periodStr = today.getFullYear() + String(today.getMonth() + 1).padStart(2, "0");
-                    const comprobanteSeniat = `${periodStr}${String(corrIvan.proxN).padStart(8, '0')}`;
+                    let ivanNum = '';
+                    let comprobanteSeniat = '';
+                    let periodStr = '';
+
+                    if (customComp) {
+                        // Comprobante manual / antiguo proporcionado por el usuario
+                        if (/^\d{14}$/.test(customComp)) {
+                            comprobanteSeniat = customComp;
+                            periodStr = customComp.substring(0, 6);
+                        } else if (/^\d{1,8}$/.test(customComp)) {
+                            const pYear = tsDate.getFullYear();
+                            const pMonth = String(tsDate.getMonth() + 1).padStart(2, '0');
+                            periodStr = `${pYear}${pMonth}`;
+                            comprobanteSeniat = `${periodStr}${customComp.padStart(8, '0')}`;
+                        } else {
+                            comprobanteSeniat = customComp.substring(0, 14);
+                            if (/^\d{6}/.test(customComp)) {
+                                periodStr = customComp.substring(0, 6);
+                            } else {
+                                const pYear = tsDate.getFullYear();
+                                const pMonth = String(tsDate.getMonth() + 1).padStart(2, '0');
+                                periodStr = `${pYear}${pMonth}`;
+                            }
+                        }
+
+                        // Obtener prefijo de serie C016 (ej. 'G3')
+                        let seriePrefix = 'G3';
+                        try {
+                            const serieInfoRes = await transaction.request().query(`
+                                SELECT TOP 1 LTRIM(RTRIM(ISNULL(prefijo, ''))) AS prefijo 
+                                FROM saSerieTipo 
+                                WHERE co_tipo_serie = 'C016'
+                            `);
+                            if (serieInfoRes.recordset[0]?.prefijo) {
+                                seriePrefix = serieInfoRes.recordset[0].prefijo;
+                            }
+                        } catch (ePrefix) {
+                            console.warn('[PAGOS AGENT] No se pudo leer prefijo C016:', ePrefix.message);
+                        }
+
+                        const numOnly = customComp.replace(/\D/g, '');
+                        const seq8 = numOnly.length >= 8 ? numOnly.slice(-8) : numOnly.padStart(8, '0');
+
+                        const candidate1 = `${seriePrefix}${seq8}`;
+                        const candidate2 = seq8;
+                        const candidate3 = customComp.substring(0, 20);
+
+                        const checkCandidate = async (cand) => {
+                            const cRes = await transaction.request()
+                                .input('candDoc', sql.Char(20), padProfit(cand, 20))
+                                .query(`SELECT TOP 1 nro_doc FROM saDocumentoCompra WHERE co_tipo_doc = 'IVAN' AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@candDoc))`);
+                            return cRes.recordset.length === 0;
+                        };
+
+                        if (await checkCandidate(candidate1)) {
+                            ivanNum = candidate1;
+                        } else if (await checkCandidate(candidate2)) {
+                            ivanNum = candidate2;
+                        } else if (await checkCandidate(candidate3)) {
+                            ivanNum = candidate3;
+                        } else {
+                            ivanNum = `${seriePrefix}${seq8}`.substring(0, 18) + 'A';
+                        }
+                        console.log(`📌 [PAGOS AGENT] Retención IVA manual asignada: Doc=${ivanNum}, Comprobante=${comprobanteSeniat}, Periodo=${periodStr} (Sin consumir correlativo)`);
+                    } else {
+                        // Modo automático: obtener correlativo y avanzar contador oficial
+                        const corrIvan = await getProximoConsecutivoRetencion({
+                            runner: transaction,
+                            co_tipo_serie: 'IVAN_COMPRA',
+                            co_sucur: sucuCode,
+                            currentSrvId: srv.id,
+                            sqlAuth: req.sqlAuth
+                        });
+                        ivanNum = corrIvan.docNum;
+
+                        // Formatear comprobante fiscal SENIAT: YYYYMM + 8 dígitos
+                        const pYear = tsDate.getFullYear();
+                        const pMonth = String(tsDate.getMonth() + 1).padStart(2, "0");
+                        periodStr = `${pYear}${pMonth}`;
+                        comprobanteSeniat = `${periodStr}${String(corrIvan.proxN).padStart(8, '0')}`;
+                        console.log(`✨ [PAGOS AGENT] Retención IVA auto-generada: Doc=${ivanNum}, Comprobante=${comprobanteSeniat}, Periodo=${periodStr}`);
+                    }
 
                     await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit('IVAN', 6))
@@ -1050,6 +1125,7 @@ router.post('/', async (req, res) => {
                         .input('total_bruto', sql.Decimal(18, 2), adjustedMontoRetencionIva)
                         .input('total_neto', sql.Decimal(18, 2), adjustedMontoRetencionIva)
                         .input('saldo', sql.Decimal(18, 2), 0.00)
+                        .input('fec_doc', sql.SmallDateTime, tsDate)
                         .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                         .input('num_comprobante', sql.Char(14), comprobanteSeniat.substring(0, 14))
@@ -1064,7 +1140,7 @@ router.post('/', async (req, res) => {
                                 monto_desc_glob, monto_reca, num_comprobante, tipo_imp
                             ) VALUES (
                                 @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
-                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
                                 0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
@@ -1101,7 +1177,6 @@ router.post('/', async (req, res) => {
                         `);
 
                     // Insertar en saPagoRetenIvaReng
-                    const retIvaMatch = data.retenciones_iva?.find(r => r.nro_doc_asoc?.trim() === line.nro_doc?.trim());
                     const rifComprador = retIvaMatch?.rif_comprador || data.co_prov;
                     const baseImponible = Number(retIvaMatch?.base_imponible || 0);
                     const montoDoc = Number(retIvaMatch?.monto_documento || totalRebaje);
