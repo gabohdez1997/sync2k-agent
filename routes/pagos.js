@@ -66,6 +66,11 @@ router.get('/', async (req, res) => {
                            ) OR EXISTS (
                                SELECT 1 FROM saPagoDocReng pdr WHERE pdr.cob_num = p.cob_num AND (pdr.co_tipo_doc = 'IVAN' OR pdr.monto_retencion_iva > 0)
                            ) THEN 1 ELSE 0 END AS has_retencion_iva,
+                           CASE WHEN EXISTS (
+                               SELECT 1 FROM saPagoRentenReng rn INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid WHERE pdr.cob_num = p.cob_num
+                           ) OR EXISTS (
+                               SELECT 1 FROM saPagoDocReng pdr WHERE pdr.cob_num = p.cob_num AND (pdr.co_tipo_doc = 'ISLR' OR pdr.monto_retencion > 0)
+                           ) THEN 1 ELSE 0 END AS has_retencion_islr,
                            ISNULL(
                                SUBSTRING(
                                    (SELECT ', ' + RTRIM(r.co_tipo_doc) + ' ' + RTRIM(r.nro_doc) + ':' + CAST(ISNULL(d.total_neto, 0) AS VARCHAR)
@@ -305,6 +310,7 @@ router.get('/:cob_num', async (req, res) => {
                         SELECT RTRIM(p.cob_num) AS cob_num, RTRIM(p.recibo) AS recibo, RTRIM(p.descrip) AS descrip,
                                RTRIM(p.co_prov) AS co_prov, RTRIM(pr.prov_des) AS prov_des, RTRIM(pr.rif) AS rif,
                                ISNULL(pr.porc_esp, 0) AS porc_esp, pr.contribu_e,
+                               RTRIM(pr.tipo_per) AS tipo_per, RTRIM(pr.co_tab) AS co_tab,
                                RTRIM(pr.direc1) AS direc1, RTRIM(pr.direc2) AS direc2, RTRIM(pr.telefonos) AS telefonos, RTRIM(pr.email) AS email,
                                ISNULL(p.fecha, p.fe_us_in) AS fecha, p.anulado,
                                ISNULL((SELECT SUM(mont_doc) FROM saPagoTPReng WHERE cob_num = p.cob_num), 0) AS monto,
@@ -420,11 +426,25 @@ router.get('/:cob_num', async (req, res) => {
                     `),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT rn.reng_num, rn.rowguid_reng_cob, RTRIM(rn.co_islr) AS co_islr,
-                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn,
+                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn, ISNULL(rn.sustraendo, 0) AS sustraendo,
                                RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact
+                               RTRIM(pdr.nro_fact) AS nro_fact,
+                               RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
+                               ISNULL(RTRIM(d.nro_doc), '') AS nro_doc_islr,
+                               ISNULL(RTRIM(d.num_comprobante), '') AS num_comprobante,
+                               ISNULL(orig.fec_emis, p.fecha) AS fecha_documento,
+                               ISNULL(NULLIF(RTRIM(orig.n_control), ''), '---') AS numero_control_documento,
+                               ISNULL(orig.total_bruto, rn.monto) AS monto_documento,
+                               ISNULL(RTRIM(orig.descrip), RTRIM(p.descrip)) AS doc_descrip,
+                               ISNULL((SELECT TOP 1 RTRIM(islr_des) FROM v_saConISLR_saTabuladorISLR WHERE LTRIM(RTRIM(co_islr)) = LTRIM(RTRIM(rn.co_islr))), 'Retención de ISLR') AS islr_des
                         FROM saPagoRentenReng rn
                         INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid
+                        INNER JOIN saPago p ON pdr.cob_num = p.cob_num
+                        LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
+                                                        AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
+                        LEFT JOIN saPagoDocReng islrPdr ON islrPdr.cob_num = p.cob_num AND LTRIM(RTRIM(islrPdr.co_tipo_doc)) = 'ISLR'
+                        LEFT JOIN saDocumentoCompra d ON LTRIM(RTRIM(islrPdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
+                                                      AND LTRIM(RTRIM(islrPdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
                         UNION ALL
                         SELECT r.reng_num, r.rowguid_reng_ori AS rowguid_reng_cob, '055' AS co_islr,
@@ -432,11 +452,21 @@ router.get('/:cob_num', async (req, res) => {
                                d.total_neto AS monto_reten, 
                                orig.total_bruto - orig.otros1 AS monto_obj,
                                CASE WHEN orig.total_bruto - orig.otros1 > 0 THEN ROUND((d.total_neto / (orig.total_bruto - orig.otros1)) * 100, 2) ELSE 2.00 END AS porc_retn,
+                               0 AS sustraendo,
                                RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact
+                               RTRIM(pdr.nro_fact) AS nro_fact,
+                               RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
+                               ISNULL(RTRIM(d.nro_doc), '') AS nro_doc_islr,
+                               ISNULL(RTRIM(d.num_comprobante), '') AS num_comprobante,
+                               ISNULL(orig.fec_emis, p.fecha) AS fecha_documento,
+                               ISNULL(NULLIF(RTRIM(orig.n_control), ''), '---') AS numero_control_documento,
+                               ISNULL(orig.total_bruto, d.total_bruto) AS monto_documento,
+                               ISNULL(RTRIM(orig.descrip), RTRIM(p.descrip)) AS doc_descrip,
+                               'Pagos a Empresas Contratistas o Subcontratistas' AS islr_des
                         FROM saPagoDocReng r
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                        INNER JOIN saPago p ON r.cob_num = p.cob_num
                         LEFT JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
