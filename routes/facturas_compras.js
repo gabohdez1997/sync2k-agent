@@ -166,8 +166,41 @@ router.get('/', async (req, res) => {
     try {
         const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 12;
-        const { sede, doc_num, nro_fact, n_control, co_prov, co_us_in, fec_d, fec_h, search, status } = req.query;
+        const { sede, doc_num, nro_fact, n_control, co_prov, co_us_in, fec_d, fec_h, search, status, order_by, order_dir } = req.query;
         
+        const sortCol = (order_by || 'fec_emis').trim().toLowerCase();
+        const sortDir = (order_dir || 'DESC').trim().toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+        let orderSQL = 'f.fec_emis DESC, f.doc_num DESC';
+        switch (sortCol) {
+            case 'saldo':
+                orderSQL = `f.saldo ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'monto':
+                orderSQL = `f.total_neto ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'doc_num':
+                orderSQL = `f.doc_num ${sortDir}`;
+                break;
+            case 'nro_fact':
+                orderSQL = `f.nro_fact ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'proveedor':
+                orderSQL = `p.prov_des ${sortDir}, f.doc_num DESC`;
+                break;
+            case 'registrado':
+            case 'co_us_in':
+                orderSQL = `f.co_us_in ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'estatus':
+                orderSQL = `f.anulado ${sortDir}, f.fec_emis DESC`;
+                break;
+            case 'fec_emis':
+            default:
+                orderSQL = `f.fec_emis ${sortDir}, f.doc_num DESC`;
+                break;
+        }
+
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
 
@@ -262,7 +295,7 @@ router.get('/', async (req, res) => {
                     LEFT JOIN saProveedor p ON f.co_prov = p.co_prov
                     LEFT JOIN saCondicionPago cd ON f.co_cond = cd.co_cond
                     WHERE ${whereSQL}
-                    ORDER BY f.fec_emis DESC, f.doc_num DESC
+                    ORDER BY ${orderSQL}
                 `;
 
                 const result = await request.query(querySQL);
@@ -274,7 +307,42 @@ router.get('/', async (req, res) => {
         }));
 
         const combined = [].concat(...allData);
-        combined.sort((a, b) => new Date(b.fec_emis) - new Date(a.fec_emis));
+        const dir = sortDir === 'ASC' ? 1 : -1;
+        combined.sort((a, b) => {
+            let res = 0;
+            switch (sortCol) {
+                case 'saldo':
+                    res = (Number(a.saldo) || 0) - (Number(b.saldo) || 0);
+                    break;
+                case 'monto':
+                    res = (Number(a.total_neto) || 0) - (Number(b.total_neto) || 0);
+                    break;
+                case 'doc_num':
+                    res = String(a.doc_num || '').localeCompare(String(b.doc_num || ''), undefined, { numeric: true });
+                    break;
+                case 'nro_fact':
+                    res = String(a.nro_fact || '').localeCompare(String(b.nro_fact || ''), undefined, { numeric: true });
+                    break;
+                case 'proveedor':
+                    res = String(a.prov_des || a.co_prov || '').localeCompare(String(b.prov_des || b.co_prov || ''));
+                    break;
+                case 'registrado':
+                case 'co_us_in':
+                    res = String(a.user_name || a.co_us_in || '').localeCompare(String(b.user_name || b.co_us_in || ''));
+                    break;
+                case 'estatus':
+                    res = (a.anulado ? 1 : 0) - (b.anulado ? 1 : 0);
+                    break;
+                case 'fec_emis':
+                default:
+                    res = new Date(a.fec_emis || 0) - new Date(b.fec_emis || 0);
+                    break;
+            }
+            if (res === 0) {
+                res = String(a.doc_num || '').localeCompare(String(b.doc_num || ''), undefined, { numeric: true });
+            }
+            return res * dir;
+        });
         return paginatedResponse(res, combined, page, limit);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error al consultar Facturas de Compra.', error: error.message });
