@@ -305,13 +305,12 @@ router.get('/:cob_num', async (req, res) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
 
-                const [resEnc, resReng, resTP, resIva, resIslr] = await Promise.all([
-                    pool.request().input('cob_num', sql.VarChar, cob_num).query(`
+                const resEnc = await pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT RTRIM(p.cob_num) AS cob_num, RTRIM(p.recibo) AS recibo, RTRIM(p.descrip) AS descrip,
                                RTRIM(p.co_prov) AS co_prov, RTRIM(pr.prov_des) AS prov_des, RTRIM(pr.rif) AS rif,
                                ISNULL(pr.porc_esp, 0) AS porc_esp, pr.contribu_e,
-                               RTRIM(pr.tipo_per) AS tipo_per, RTRIM(pr.co_tab) AS co_tab,
-                               RTRIM(pr.direc1) AS direc1, RTRIM(pr.direc2) AS direc2, RTRIM(pr.telefonos) AS telefonos, RTRIM(pr.email) AS email,
+                               RTRIM(ISNULL(pr.tipo_per, '3')) AS tipo_per, RTRIM(ISNULL(pr.co_tab, '')) AS co_tab,
+                               RTRIM(ISNULL(pr.direc1, '')) AS direc1, '' AS direc2, RTRIM(ISNULL(pr.telefonos, '')) AS telefonos, RTRIM(ISNULL(pr.email, '')) AS email,
                                ISNULL(p.fecha, p.fe_us_in) AS fecha, p.anulado,
                                ISNULL((SELECT SUM(mont_doc) FROM saPagoTPReng WHERE cob_num = p.cob_num), 0) AS monto,
                                RTRIM(p.co_mone) AS co_mone, 
@@ -322,7 +321,9 @@ router.get('/:cob_num', async (req, res) => {
                         FROM saPago p
                         LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
                         WHERE LTRIM(RTRIM(p.cob_num)) = LTRIM(RTRIM(@cob_num))
-                    `),
+                    `);
+
+                const [resReng, resTP, resIva, resIslr] = await Promise.all([
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT r.reng_num, RTRIM(r.co_tipo_doc) AS co_tipo_doc, RTRIM(r.nro_doc) AS nro_doc,
                                RTRIM(r.nro_fact) AS nro_fact,
@@ -423,7 +424,10 @@ router.get('/:cob_num', async (req, res) => {
                               INNER JOIN saPagoDocReng pdr2 ON ri2.rowguid_reng_cob = pdr2.rowguid
                               WHERE LTRIM(RTRIM(pdr2.cob_num)) = LTRIM(RTRIM(@cob_num))
                           )
-                    `),
+                    `).catch(err => {
+                        console.warn('[PAGOS] Advertencia al consultar retenciones IVA para ' + cob_num + ':', err.message);
+                        return { recordset: [] };
+                    }),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT rn.reng_num, rn.rowguid_reng_cob, RTRIM(rn.co_islr) AS co_islr,
                                rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn, ISNULL(rn.sustraendo, 0) AS sustraendo,
@@ -436,7 +440,7 @@ router.get('/:cob_num', async (req, res) => {
                                ISNULL(NULLIF(RTRIM(orig.n_control), ''), '---') AS numero_control_documento,
                                ISNULL(orig.total_bruto, rn.monto) AS monto_documento,
                                ISNULL(RTRIM(orig.descrip), RTRIM(p.descrip)) AS doc_descrip,
-                               ISNULL((SELECT TOP 1 RTRIM(islr_des) FROM v_saConISLR_saTabuladorISLR WHERE LTRIM(RTRIM(co_islr)) = LTRIM(RTRIM(rn.co_islr))), 'Retención de ISLR') AS islr_des
+                               ISNULL((SELECT TOP 1 RTRIM(islr_des) FROM saConISLR WHERE LTRIM(RTRIM(co_islr)) = LTRIM(RTRIM(rn.co_islr))), 'Retención de ISLR') AS islr_des
                         FROM saPagoRentenReng rn
                         INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid
                         INNER JOIN saPago p ON pdr.cob_num = p.cob_num
@@ -477,7 +481,10 @@ router.get('/:cob_num', async (req, res) => {
                               INNER JOIN saPagoDocReng pdr2 ON rn2.rowguid_reng_cob = pdr2.rowguid
                               WHERE LTRIM(RTRIM(pdr2.cob_num)) = LTRIM(RTRIM(@cob_num))
                           )
-                    `)
+                    `).catch(err => {
+                        console.warn('[PAGOS] Advertencia al consultar retenciones ISLR para ' + cob_num + ':', err.message);
+                        return { recordset: [] };
+                    })
                 ]);
 
                 if (!resEnc.recordset.length) return null;
@@ -495,9 +502,21 @@ router.get('/:cob_num', async (req, res) => {
             }
         }));
 
+        const errors = results.filter(r => r && r.error);
         const found = results.filter(r => r && !r.error);
-        if (!found.length)
+
+        if (!found.length) {
+            if (errors.length) {
+                console.error('[PAGOS GET :cob_num ERROR]:', errors);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Error al consultar pago en la sede: ' + errors[0].error,
+                    error: errors[0].error,
+                    errors
+                });
+            }
             return res.status(404).json({ success: false, message: 'Pago no encontrado.' });
+        }
 
         res.status(200).json({ success: true, count: found.length, data: results.filter(r => r !== null) });
     } catch (error) {
