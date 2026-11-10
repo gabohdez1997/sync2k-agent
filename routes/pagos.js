@@ -414,7 +414,7 @@ router.get('/:cob_num', async (req, res) => {
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         INNER JOIN saPago p ON r.cob_num = p.cob_num
                         LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
-                        LEFT JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
+                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND pdr.co_tipo_doc NOT IN ('IVAN', 'ISLR') AND pdr.monto_retencion_iva > 0))
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -430,7 +430,7 @@ router.get('/:cob_num', async (req, res) => {
                     }),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT rn.reng_num, rn.rowguid_reng_cob, RTRIM(rn.co_islr) AS co_islr,
-                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn, ISNULL(rn.sustraendo, 0) AS sustraendo,
+                               rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn, CASE WHEN rn.monto_obj * (rn.porc_retn / 100.0) > rn.monto_reten THEN ROUND(rn.monto_obj * (rn.porc_retn / 100.0) - rn.monto_reten, 2) ELSE 0.0 END AS sustraendo,
                                RTRIM(pdr.nro_doc) AS nro_doc,
                                RTRIM(pdr.nro_fact) AS nro_fact,
                                RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
@@ -471,7 +471,7 @@ router.get('/:cob_num', async (req, res) => {
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         INNER JOIN saPago p ON r.cob_num = p.cob_num
-                        LEFT JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
+                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND pdr.co_tipo_doc NOT IN ('IVAN', 'ISLR') AND pdr.monto_retencion > 0))
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -488,12 +488,71 @@ router.get('/:cob_num', async (req, res) => {
                 ]);
 
                 if (!resEnc.recordset.length) return null;
+
+                let finalRetIslr = resIslr.recordset || [];
+                if (finalRetIslr.length === 0 && resReng.recordset && resReng.recordset.length > 0) {
+                    const facturasConIslr = resReng.recordset.filter(r => 
+                        Number(r.monto_retencion || 0) > 0 && r.co_tipo_doc !== 'IVAN' && r.co_tipo_doc !== 'ISLR'
+                    );
+                    const islrDoc = resReng.recordset.find(r => r.co_tipo_doc === 'ISLR');
+
+                    if (facturasConIslr.length > 0) {
+                        finalRetIslr = facturasConIslr.map((f, idx) => {
+                            const docBruto = Number(f.total_neto || f.mont_cob || 0);
+                            const retIslr = Number(f.monto_retencion || 0);
+                            const base = Number(f.total_bruto || (docBruto - (Number(f.monto_imp) || 0)) || docBruto);
+                            const porc = base > 0 ? Number(((retIslr / base) * 100).toFixed(2)) : 5.0;
+
+                            return {
+                                reng_num: idx + 1,
+                                co_islr: '084',
+                                islr_des: 'Pagos a Empresas Contratistas o Subcontratistas',
+                                monto: docBruto,
+                                monto_obj: base,
+                                monto_reten: retIslr,
+                                porc_retn: porc,
+                                sustraendo: 0,
+                                num_comprobante: islrDoc?.nro_doc || resEnc.recordset[0]?.recibo || resEnc.recordset[0]?.cob_num,
+                                nro_doc_islr: islrDoc?.nro_doc || '',
+                                fecha_documento: f.fec_emis || resEnc.recordset[0]?.fecha,
+                                numero_control_documento: f.n_control || '---',
+                                nro_doc: f.nro_doc,
+                                nro_fact: f.nro_fact || f.nro_doc,
+                                co_tipo_doc: f.co_tipo_doc || 'FACT',
+                                monto_documento: docBruto,
+                                doc_descrip: 'Retención de ISLR'
+                            };
+                        });
+                    } else if (islrDoc) {
+                        const retIslr = Number(islrDoc.mont_cob || 0);
+                        finalRetIslr = [{
+                            reng_num: 1,
+                            co_islr: '084',
+                            islr_des: 'Pagos a Empresas Contratistas o Subcontratistas',
+                            monto: retIslr,
+                            monto_obj: retIslr,
+                            monto_reten: retIslr,
+                            porc_retn: 5.0,
+                            sustraendo: 0,
+                            num_comprobante: islrDoc.nro_doc,
+                            nro_doc_islr: islrDoc.nro_doc,
+                            fecha_documento: resEnc.recordset[0]?.fecha,
+                            numero_control_documento: '---',
+                            nro_doc: islrDoc.nro_doc,
+                            nro_fact: '',
+                            co_tipo_doc: 'ISLR',
+                            monto_documento: retIslr,
+                            doc_descrip: 'Retención de ISLR'
+                        }];
+                    }
+                }
+
                 return {
                     ...resEnc.recordset[0],
                     renglones: resReng.recordset,
                     formas_pago: resTP.recordset,
                     retenciones_iva: resIva.recordset,
-                    retenciones_islr: resIslr.recordset,
+                    retenciones_islr: finalRetIslr,
                     sede_id: srv.id,
                     sede_nombre: srv.name
                 };
