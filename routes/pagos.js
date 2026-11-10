@@ -61,6 +61,11 @@ router.get('/', async (req, res) => {
                                 ISNULL((SELECT TOP 1 t.tasa_v FROM saTasa t WHERE LTRIM(RTRIM(t.co_mone)) IN ('USD', 'US$', 'US') AND CONVERT(VARCHAR(10), t.fecha, 120) <= CONVERT(VARCHAR(10), p.fecha, 120) ORDER BY t.fecha DESC), 1.0)
                            ELSE p.tasa END AS tasa,
                            RTRIM(p.co_us_in) AS co_us_in,
+                           CASE WHEN EXISTS (
+                               SELECT 1 FROM saPagoRetenIvaReng ri INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid WHERE pdr.cob_num = p.cob_num
+                           ) OR EXISTS (
+                               SELECT 1 FROM saPagoDocReng pdr WHERE pdr.cob_num = p.cob_num AND (pdr.co_tipo_doc = 'IVAN' OR pdr.monto_retencion_iva > 0)
+                           ) THEN 1 ELSE 0 END AS has_retencion_iva,
                            ISNULL(
                                SUBSTRING(
                                    (SELECT ', ' + RTRIM(r.co_tipo_doc) + ' ' + RTRIM(r.nro_doc) + ':' + CAST(ISNULL(d.total_neto, 0) AS VARCHAR)
@@ -300,6 +305,7 @@ router.get('/:cob_num', async (req, res) => {
                         SELECT RTRIM(p.cob_num) AS cob_num, RTRIM(p.recibo) AS recibo, RTRIM(p.descrip) AS descrip,
                                RTRIM(p.co_prov) AS co_prov, RTRIM(pr.prov_des) AS prov_des, RTRIM(pr.rif) AS rif,
                                ISNULL(pr.porc_esp, 0) AS porc_esp, pr.contribu_e,
+                               RTRIM(pr.direc1) AS direc1, RTRIM(pr.direc2) AS direc2, RTRIM(pr.telefonos) AS telefonos, RTRIM(pr.email) AS email,
                                ISNULL(p.fecha, p.fe_us_in) AS fecha, p.anulado,
                                ISNULL((SELECT SUM(mont_doc) FROM saPagoTPReng WHERE cob_num = p.cob_num), 0) AS monto,
                                RTRIM(p.co_mone) AS co_mone, 
@@ -341,6 +347,12 @@ router.get('/:cob_num', async (req, res) => {
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT ri.reng_num, ri.rowguid_reng_cob, RTRIM(ri.num_comprobante) AS num_comprobante,
                                ri.monto_documento, ri.base_imponible, ri.monto_ret_imp, ri.alicuota,
+                               ISNULL(ri.monto_excento, 0) AS monto_excento,
+                               RTRIM(ri.periodo_impositivo) AS periodo_impositivo,
+                               ISNULL(ri.fecha_documento, ISNULL(orig.fec_emis, p.fecha)) AS fecha_documento,
+                               ISNULL(NULLIF(RTRIM(ri.numero_control_documento), ''), ISNULL(RTRIM(orig.n_control), '---')) AS numero_control_documento,
+                               ISNULL(NULLIF(RTRIM(ri.tipo_documento), ''), RTRIM(pdr.co_tipo_doc)) AS tipo_documento,
+                               ISNULL(RTRIM(ri.tipo_operacion), 'C') AS tipo_operacion,
                                CASE 
                                    WHEN NULLIF(RTRIM(ri.numero_documento_afectado), '0') IS NOT NULL AND RTRIM(ri.numero_documento_afectado) <> '' 
                                    THEN RTRIM(ri.numero_documento_afectado)
@@ -349,9 +361,20 @@ router.get('/:cob_num', async (req, res) => {
                                    ELSE RTRIM(pdr.nro_doc)
                                END AS numero_documento_afectado,
                                RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact
+                               RTRIM(pdr.nro_fact) AS nro_fact,
+                               RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
+                               CASE 
+                                   WHEN ri.base_imponible * (ri.alicuota / 100.0) > 0 
+                                   THEN ROUND((ri.monto_ret_imp / (ri.base_imponible * (ri.alicuota / 100.0))) * 100, 0)
+                                   WHEN ISNULL(pr.porc_esp, 0) > 0 THEN pr.porc_esp
+                                   ELSE 75 
+                               END AS porc_ret
                         FROM saPagoRetenIvaReng ri
                         INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid
+                        INNER JOIN saPago p ON pdr.cob_num = p.cob_num
+                        LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
+                        LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
+                                                        AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
                         UNION ALL
                         SELECT r.reng_num, r.rowguid_reng_ori AS rowguid_reng_cob, RTRIM(d.num_comprobante) AS num_comprobante,
@@ -359,16 +382,31 @@ router.get('/:cob_num', async (req, res) => {
                                orig.total_bruto - orig.otros1 AS base_imponible, 
                                d.total_neto AS monto_ret_imp, 
                                orig.porc_imp AS alicuota,
+                               ISNULL(orig.otros1, 0) AS monto_excento,
+                               CONVERT(VARCHAR(6), ISNULL(orig.fec_emis, p.fecha), 112) AS periodo_impositivo,
+                               ISNULL(orig.fec_emis, p.fecha) AS fecha_documento,
+                               ISNULL(RTRIM(orig.n_control), '---') AS numero_control_documento,
+                               RTRIM(orig.co_tipo_doc) AS tipo_documento,
+                               'C' AS tipo_operacion,
                                CASE 
                                    WHEN NULLIF(RTRIM(pdr.nro_fact), '') IS NOT NULL 
                                    THEN RTRIM(pdr.nro_fact)
                                    ELSE RTRIM(pdr.nro_doc)
                                END AS numero_documento_afectado,
                                RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact
+                               RTRIM(pdr.nro_fact) AS nro_fact,
+                               RTRIM(orig.co_tipo_doc) AS co_tipo_doc,
+                               CASE 
+                                   WHEN (orig.total_bruto - orig.otros1) * (orig.porc_imp / 100.0) > 0 
+                                   THEN ROUND((d.total_neto / ((orig.total_bruto - orig.otros1) * (orig.porc_imp / 100.0))) * 100, 0)
+                                   WHEN ISNULL(pr.porc_esp, 0) > 0 THEN pr.porc_esp
+                                   ELSE 75 
+                               END AS porc_ret
                         FROM saPagoDocReng r
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                        INNER JOIN saPago p ON r.cob_num = p.cob_num
+                        LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
                         LEFT JOIN saPagoDocReng pdr ON r.rowguid_reng_ori = pdr.rowguid
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
