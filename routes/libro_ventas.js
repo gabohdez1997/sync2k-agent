@@ -121,18 +121,64 @@ router.get('/', async (req, res) => {
                     }
                 }
 
-                // Construir campos de impresora fiscal unificando saFacturaVenta / saDevolucionCliente con saDocumentoVenta
-                const facImpfisfac = "COALESCE(NULLIF(RTRIM(f.impfisfac), ''), NULLIF(RTRIM(dv_fac.impfisfac), ''), '')";
-                const facImpfis = "COALESCE(NULLIF(RTRIM(f.impfis), ''), NULLIF(RTRIM(dv_fac.impfis), ''), '')";
-                const facNroZ = "COALESCE(NULLIF(RTRIM(f.imp_nro_z), ''), NULLIF(RTRIM(dv_fac.imp_nro_z), ''), '')";
+                // Construir campos de impresora fiscal verificando existencia real en cada tabla física
+                const fHasImpfisfac = facCols.has('impfisfac');
+                const fHasImpfis = facCols.has('impfis');
+                const fHasNroZ = facCols.has('imp_nro_z');
 
-                const devImpfisfac = "COALESCE(NULLIF(RTRIM(dc.impfisfac), ''), NULLIF(RTRIM(dv_dev.impfisfac), ''), '')";
-                const devImpfis = "COALESCE(NULLIF(RTRIM(dc.impfis), ''), NULLIF(RTRIM(dv_dev.impfis), ''), '')";
-                const devNroZ = "COALESCE(NULLIF(RTRIM(dc.imp_nro_z), ''), NULLIF(RTRIM(dv_dev.imp_nro_z), ''), '')";
+                const dcHasImpfisfac = devCols.has('impfisfac');
+                const dcHasImpfis = devCols.has('impfis');
+                const dcHasNroZ = devCols.has('imp_nro_z');
 
-                const docImpfisfac = docCols.has('impfisfac') ? "RTRIM(ISNULL(d.impfisfac, ''))" : "''";
-                const docImpfis = docCols.has('impfis') ? "RTRIM(ISNULL(d.impfis, ''))" : "''";
-                const docNroZ = docCols.has('imp_nro_z') ? "RTRIM(ISNULL(d.imp_nro_z, ''))" : "''";
+                const dvHasImpfisfac = docCols.has('impfisfac');
+                const dvHasImpfis = docCols.has('impfis');
+                const dvHasNroZ = docCols.has('imp_nro_z');
+
+                const facImpfisfac = fHasImpfisfac
+                    ? (dvHasImpfisfac ? "COALESCE(NULLIF(RTRIM(f.impfisfac), ''), NULLIF(RTRIM(dv_fac.impfisfac), ''), '')" : "RTRIM(ISNULL(f.impfisfac, ''))")
+                    : (dvHasImpfisfac ? "RTRIM(ISNULL(dv_fac.impfisfac, ''))" : "''");
+
+                const facImpfis = fHasImpfis
+                    ? (dvHasImpfis ? "COALESCE(NULLIF(RTRIM(f.impfis), ''), NULLIF(RTRIM(dv_fac.impfis), ''), '')" : "RTRIM(ISNULL(f.impfis, ''))")
+                    : (dvHasImpfis ? "RTRIM(ISNULL(dv_fac.impfis, ''))" : "''");
+
+                const facNroZ = fHasNroZ
+                    ? (dvHasNroZ ? "COALESCE(NULLIF(RTRIM(f.imp_nro_z), ''), NULLIF(RTRIM(dv_fac.imp_nro_z), ''), '')" : "RTRIM(ISNULL(f.imp_nro_z, ''))")
+                    : (dvHasNroZ ? "RTRIM(ISNULL(dv_fac.imp_nro_z, ''))" : "''");
+
+                const devImpfisfac = dcHasImpfisfac
+                    ? (dvHasImpfisfac ? "COALESCE(NULLIF(RTRIM(dc.impfisfac), ''), NULLIF(RTRIM(dv_dev.impfisfac), ''), '')" : "RTRIM(ISNULL(dc.impfisfac, ''))")
+                    : (dvHasImpfisfac ? "RTRIM(ISNULL(dv_dev.impfisfac, ''))" : "''");
+
+                const devImpfis = dcHasImpfis
+                    ? (dvHasImpfis ? "COALESCE(NULLIF(RTRIM(dc.impfis), ''), NULLIF(RTRIM(dv_dev.impfis), ''), '')" : "RTRIM(ISNULL(dc.impfis, ''))")
+                    : (dvHasImpfis ? "RTRIM(ISNULL(dv_dev.impfis, ''))" : "''");
+
+                const devNroZ = dcHasNroZ
+                    ? (dvHasNroZ ? "COALESCE(NULLIF(RTRIM(dc.imp_nro_z), ''), NULLIF(RTRIM(dv_dev.imp_nro_z), ''), '')" : "RTRIM(ISNULL(dc.imp_nro_z, ''))")
+                    : (dvHasNroZ ? "RTRIM(ISNULL(dv_dev.imp_nro_z, ''))" : "''");
+
+                const docImpfisfac = dvHasImpfisfac ? "RTRIM(ISNULL(d.impfisfac, ''))" : "''";
+                const docImpfis = dvHasImpfis ? "RTRIM(ISNULL(d.impfis, ''))" : "''";
+                const docNroZ = dvHasNroZ ? "RTRIM(ISNULL(d.imp_nro_z, ''))" : "''";
+
+                // Filtros de documentos fiscales seguros según las columnas disponibles
+                const facFiscalFilter = [
+                    fHasImpfisfac ? "(f.impfisfac IS NOT NULL AND LTRIM(RTRIM(f.impfisfac)) <> '')" : null,
+                    dvHasImpfisfac ? "(dv_fac.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_fac.impfisfac)) <> '')" : null,
+                    "ISNULL(f.monto_imp, 0) > 0"
+                ].filter(Boolean).join(" OR ");
+
+                const devFiscalFilter = [
+                    dcHasImpfisfac ? "(dc.impfisfac IS NOT NULL AND LTRIM(RTRIM(dc.impfisfac)) <> '')" : null,
+                    dvHasImpfisfac ? "(dv_dev.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_dev.impfisfac)) <> '')" : null,
+                    "ISNULL(dc.monto_imp, 0) > 0"
+                ].filter(Boolean).join(" OR ");
+
+                const docFiscalFilter = [
+                    dvHasImpfisfac ? "(d.impfisfac IS NOT NULL AND LTRIM(RTRIM(d.impfisfac)) <> '')" : null,
+                    "ISNULL(d.monto_imp, 0) > 0"
+                ].filter(Boolean).join(" OR ");
 
                 // Construir campos dinámicos de retención de IVA según existan en saCobroRetenIvaReng
                 const riFecha = retCols.has('fecha_documento') 
@@ -222,12 +268,8 @@ router.get('/', async (req, res) => {
                     ) ret
                     WHERE CONVERT(VARCHAR(10), f.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), f.fec_emis, 120) <= @endDate
-                      -- Filtro estricto: Solo documentos fiscales (impresos en maquina fiscal o con debito fiscal / IVA)
-                      AND (
-                          (f.impfisfac IS NOT NULL AND LTRIM(RTRIM(f.impfisfac)) <> '')
-                          OR (dv_fac.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_fac.impfisfac)) <> '')
-                          OR ISNULL(f.monto_imp, 0) > 0
-                      )
+                      -- Filtro estricto: Solo documentos fiscales
+                      AND (${facFiscalFilter})
                 `;
 
                 // --- 2. DEVOLUCIONES / NOTAS DE CRÉDITO ---
@@ -293,11 +335,7 @@ router.get('/', async (req, res) => {
                     WHERE CONVERT(VARCHAR(10), dc.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), dc.fec_emis, 120) <= @endDate
                       -- Filtro estricto: Solo notas de credito fiscales
-                      AND (
-                          (dc.impfisfac IS NOT NULL AND LTRIM(RTRIM(dc.impfisfac)) <> '')
-                          OR (dv_dev.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_dev.impfisfac)) <> '')
-                          OR ISNULL(dc.monto_imp, 0) > 0
-                      )
+                      AND (${devFiscalFilter})
                 `;
 
                 // --- 3. NOTAS DE DÉBITO ---
@@ -351,10 +389,7 @@ router.get('/', async (req, res) => {
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) <= @endDate
                       -- Filtro estricto: Solo notas de debito fiscales
-                      AND (
-                          (d.impfisfac IS NOT NULL AND LTRIM(RTRIM(d.impfisfac)) <> '')
-                          OR ISNULL(d.monto_imp, 0) > 0
-                      )
+                      AND (${docFiscalFilter})
                 `;
 
                 // --- 4. RETENCIONES DE IVA REGISTRADAS COMO DOCUMENTO FISCAL INDEPENDIENTE ---
