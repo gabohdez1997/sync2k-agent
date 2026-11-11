@@ -27,10 +27,10 @@ async function getTableColumns(pool, tableName) {
  *     parameters:
  *       - in: query
  *         name: startDate
- *         schema: { type: string, example: '2026-10-01' }
+ *         schema: { type: string, example: '2026-08-01' }
  *       - in: query
  *         name: endDate
- *         schema: { type: string, example: '2026-10-15' }
+ *         schema: { type: string, example: '2026-08-15' }
  *       - in: query
  *         name: sede
  *         schema: { type: string }
@@ -98,9 +98,6 @@ router.get('/', async (req, res) => {
         for (const srv of targetServers) {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
-                const facCols = await getTableColumns(pool, 'saFacturaCompra');
-                const devCols = await getTableColumns(pool, 'saDevolucionProveedor');
-                const docCols = await getTableColumns(pool, 'saDocumentoCompra');
                 const retCols = await getTableColumns(pool, 'saPagoRetenIvaReng');
 
                 // 1. Datos de empresa (Priorizar configuración de sucursales con fallback a par_emp)
@@ -148,9 +145,9 @@ router.get('/', async (req, res) => {
                 const riControl = retCols.has('numero_control_documento') ? "RTRIM(ISNULL(ri.numero_control_documento, ''))" : "''";
                 const riDocAfectado = retCols.has('numero_documento_afectado') ? "RTRIM(ISNULL(ri.numero_documento_afectado, ''))" : "''";
 
-                // --- 1. FACTURAS Y DOCUMENTOS CON PAGO / RETENCIÓN PROCESADOS EN EL PERÍODO (SET PRINCIPAL) ---
-                // Para Contribuyentes Especiales, el período impositivo lo determina la fecha del pago/retención.
-                // Aquí se cargan con su base completa, IVA, exento y monto retenido.
+                // --- 1. FACTURAS Y DOCUMENTOS CON PAGO / RETENCIÓN DEL PERÍODO FISCAL ---
+                // En la contabilidad fiscal de Contribuyentes Especiales (SENIAT), el período impositivo
+                // de las compras lo determina la fecha del pago y la emisión del comprobante de retención (p.fecha).
                 const qPagosConRetencion = `
                     SELECT 
                         'FACT' AS tipo_doc_raw,
@@ -159,10 +156,15 @@ router.get('/', async (req, res) => {
                             WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/DB', 'NDEB') THEN 'ND'
                             ELSE 'FAC'
                         END AS tipo_doc,
-                        RTRIM(pdr.nro_doc) AS doc_num,
+                        COALESCE(
+                            NULLIF(RTRIM(d.nro_doc), ''),
+                            NULLIF(RTRIM(f.doc_num), ''),
+                            RTRIM(pdr.nro_doc)
+                        ) AS doc_num,
                         COALESCE(
                             NULLIF(RTRIM(d.nro_fact), ''), 
                             NULLIF(RTRIM(f.nro_fact), ''), 
+                            NULLIF(RTRIM(d.nro_doc), ''),
                             NULLIF(RTRIM(pdr.nro_fact), ''), 
                             RTRIM(pdr.nro_doc)
                         ) AS nro_fact,
@@ -172,9 +174,8 @@ router.get('/', async (req, res) => {
                             NULLIF(${riControl}, ''), 
                             ''
                         ) AS n_control,
-                        -- Fecha del libro (fecha de retención / pago de la quincena)
-                        COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis, d.fec_emis, f.fec_emis) AS fec_emis,
-                        -- Fecha de emisión real de la factura
+                        -- FECHA DE LA FACTURA (Columna B en el Libro de Compras oficial)
+                        COALESCE(d.fec_emis, f.fec_emis, ${riFecha}, p.fecha) AS fec_emis,
                         COALESCE(d.fec_emis, f.fec_emis, ${riFecha}, p.fecha) AS fec_factura,
                         RTRIM(ISNULL(p.co_prov, d.co_prov)) AS co_prov,
                         CASE 
@@ -190,7 +191,7 @@ router.get('/', async (req, res) => {
                         END AS doc_afectado,
                         'FACT' AS tipo_doc_afectado,
                         '' AS nro_expediente,
-                        -- Montos con signo
+                        -- Montos con signo según tipo de documento (NC = negativo)
                         (CASE WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN -1.0 ELSE 1.0 END) * 
                         COALESCE(
                             NULLIF(f.total_bruto, 0),
@@ -216,7 +217,7 @@ router.get('/', async (req, res) => {
                         0 AS monto_igtf,
                         ISNULL(d.tasa, ISNULL(f.tasa, 1.0)) AS tasa,
                         COALESCE(RTRIM(d.co_mone), RTRIM(f.co_mone), 'BS') AS co_mone,
-                        -- Exento
+                        -- Compras sin derecho a crédito (Exentas)
                         (CASE WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN -1.0 ELSE 1.0 END) * 
                         COALESCE(
                             reng.compras_exentas,
@@ -245,15 +246,16 @@ router.get('/', async (req, res) => {
                         (CASE WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN -1.0 ELSE 1.0 END) * ISNULL(reng.imp_reducida, 0) AS imp_reducida,
                         (CASE WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN -1.0 ELSE 1.0 END) * ISNULL(reng.base_adicional, 0) AS base_adicional,
                         (CASE WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN -1.0 ELSE 1.0 END) * ISNULL(reng.imp_adicional, 0) AS imp_adicional,
-                        -- Retención aplicada
+                        -- Comprobante de Retención
                         COALESCE(
                             NULLIF(${riComp}, ''),
                             NULLIF(RTRIM(dc_ret.num_comprobante), ''),
                             RTRIM(dc_ret.nro_doc),
                             ''
                         ) AS num_comprobante_iva,
-                        COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis) AS fec_emis_ret,
-                        COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis) AS fec_recep_ret,
+                        -- Fecha del Pago / Retención
+                        COALESCE(p.fecha, dc_ret.fec_emis, ${riFecha}) AS fec_emis_ret,
+                        COALESCE(p.fecha, dc_ret.fec_emis, ${riFecha}) AS fec_recep_ret,
                         (CASE WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN -1.0 ELSE 1.0 END) * 
                         COALESCE(
                             NULLIF(${riMonto}, 0),
@@ -286,12 +288,11 @@ router.get('/', async (req, res) => {
                         WHERE r.doc_num = f.doc_num
                     ) reng
                     WHERE UPPER(RTRIM(pdr.co_tipo_doc)) NOT IN ('IVAN', 'ISLR', 'AJPA')
-                      AND CONVERT(VARCHAR(10), COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis), 120) >= @startDate
-                      AND CONVERT(VARCHAR(10), COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis), 120) <= @endDate
+                      AND CONVERT(VARCHAR(10), COALESCE(p.fecha, dc_ret.fec_emis), 120) >= @startDate
+                      AND CONVERT(VARCHAR(10), COALESCE(p.fecha, dc_ret.fec_emis), 120) <= @endDate
                 `;
 
-                // --- 2. FACTURAS DE COMPRA EMITIDAS EN EL PERÍODO (saFacturaCompra) ---
-                // Se incluyen si no fueron ya procesadas en pagos del período, y si tienen retención o el usuario consulta todo
+                // --- 2. FACTURAS DIRECTAS EMITIDAS EN EL PERÍODO (SOLO PARA MODO NO FILTRADO) ---
                 const qFacturas = `
                     SELECT 
                         'FACT' AS tipo_doc_raw,
@@ -325,10 +326,10 @@ router.get('/', async (req, res) => {
                         CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE ISNULL(reng.imp_reducida, 0) END AS imp_reducida,
                         CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE ISNULL(reng.base_adicional, 0) END AS base_adicional,
                         CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE ISNULL(reng.imp_adicional, 0) END AS imp_adicional,
-                        RTRIM(ISNULL(ret.num_comprobante_iva, '')) AS num_comprobante_iva,
-                        ret.fec_emis_ret,
-                        ret.fec_recep_ret,
-                        ISNULL(ret.iva_retenido, 0) AS iva_retenido,
+                        '' AS num_comprobante_iva,
+                        NULL AS fec_emis_ret,
+                        NULL AS fec_recep_ret,
+                        0 AS iva_retenido,
                         0 AS from_pago
                     FROM saFacturaCompra f
                     LEFT JOIN saProveedor p ON f.co_prov = p.co_prov
@@ -344,36 +345,6 @@ router.get('/', async (req, res) => {
                         FROM saFacturaCompraReng r
                         WHERE r.doc_num = f.doc_num
                     ) reng
-                    OUTER APPLY (
-                        SELECT TOP 1
-                            COALESCE(
-                                NULLIF(${riComp}, ''),
-                                NULLIF(RTRIM(dc_ret.num_comprobante), ''),
-                                RTRIM(dc_ret.nro_doc),
-                                RTRIM(pdr.nro_doc),
-                                ''
-                            ) AS num_comprobante_iva,
-                            COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis) AS fec_emis_ret,
-                            COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis) AS fec_recep_ret,
-                            COALESCE(
-                                NULLIF(${riMonto}, 0),
-                                NULLIF(pdr.monto_retencion_iva, 0),
-                                dc_ret.total_neto,
-                                0
-                            ) AS iva_retenido
-                        FROM saPagoDocReng pdr
-                        INNER JOIN saPago p ON pdr.cob_num = p.cob_num AND p.anulado = 0
-                        LEFT JOIN saPagoRetenIvaReng ri ON ri.rowguid_reng_cob = pdr.rowguid
-                        LEFT JOIN saDocumentoCompra dc_ret ON dc_ret.doc_orig = 'PAGO' 
-                                                          AND LTRIM(RTRIM(dc_ret.nro_orig)) = LTRIM(RTRIM(p.cob_num)) 
-                                                          AND UPPER(RTRIM(dc_ret.co_tipo_doc)) = 'IVAN'
-                        WHERE (
-                            LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(f.doc_num)) OR
-                            (NULLIF(RTRIM(f.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(f.nro_fact))) OR
-                            (NULLIF(RTRIM(f.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(pdr.nro_fact)) = LTRIM(RTRIM(f.nro_fact)))
-                        )
-                        ORDER BY p.fecha DESC
-                    ) ret
                     WHERE CONVERT(VARCHAR(10), f.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), f.fec_emis, 120) <= @endDate
                       AND NOT EXISTS (
@@ -390,7 +361,7 @@ router.get('/', async (req, res) => {
                       )
                 `;
 
-                // --- 3. FACTURAS DIRECTAS EN CUENTAS POR PAGAR (saDocumentoCompra no en saFacturaCompra) ---
+                // --- 3. DOCUMENTOS DIRECTOS EN CUENTAS POR PAGAR (SOLO PARA MODO NO FILTRADO) ---
                 const qDirectDocFacturas = `
                     SELECT 
                         'FACT' AS tipo_doc_raw,
@@ -424,43 +395,13 @@ router.get('/', async (req, res) => {
                         0 AS imp_reducida,
                         0 AS base_adicional,
                         0 AS imp_adicional,
-                        RTRIM(ISNULL(ret.num_comprobante_iva, '')) AS num_comprobante_iva,
-                        ret.fec_emis_ret,
-                        ret.fec_recep_ret,
-                        ISNULL(ret.iva_retenido, 0) AS iva_retenido,
+                        '' AS num_comprobante_iva,
+                        NULL AS fec_emis_ret,
+                        NULL AS fec_recep_ret,
+                        0 AS iva_retenido,
                         0 AS from_pago
                     FROM saDocumentoCompra d
                     LEFT JOIN saProveedor p ON d.co_prov = p.co_prov
-                    OUTER APPLY (
-                        SELECT TOP 1
-                            COALESCE(
-                                NULLIF(${riComp}, ''),
-                                NULLIF(RTRIM(dc_ret.num_comprobante), ''),
-                                RTRIM(dc_ret.nro_doc),
-                                RTRIM(pdr.nro_doc),
-                                ''
-                            ) AS num_comprobante_iva,
-                            COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis) AS fec_emis_ret,
-                            COALESCE(${riFecha}, p.fecha, dc_ret.fec_emis) AS fec_recep_ret,
-                            COALESCE(
-                                NULLIF(${riMonto}, 0),
-                                NULLIF(pdr.monto_retencion_iva, 0),
-                                dc_ret.total_neto,
-                                0
-                            ) AS iva_retenido
-                        FROM saPagoDocReng pdr
-                        INNER JOIN saPago p ON pdr.cob_num = p.cob_num AND p.anulado = 0
-                        LEFT JOIN saPagoRetenIvaReng ri ON ri.rowguid_reng_cob = pdr.rowguid
-                        LEFT JOIN saDocumentoCompra dc_ret ON dc_ret.doc_orig = 'PAGO' 
-                                                          AND LTRIM(RTRIM(dc_ret.nro_orig)) = LTRIM(RTRIM(p.cob_num)) 
-                                                          AND UPPER(RTRIM(dc_ret.co_tipo_doc)) = 'IVAN'
-                        WHERE (
-                            LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc)) OR
-                            (NULLIF(RTRIM(d.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_fact))) OR
-                            (NULLIF(RTRIM(d.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(pdr.nro_fact)) = LTRIM(RTRIM(d.nro_fact)))
-                        )
-                        ORDER BY p.fecha DESC
-                    ) ret
                     WHERE UPPER(RTRIM(d.co_tipo_doc)) = 'FACT'
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) <= @endDate
@@ -483,183 +424,35 @@ router.get('/', async (req, res) => {
                       )
                 `;
 
-                // --- 4. DEVOLUCIONES / NOTAS DE CRÉDITO A PROVEEDOR (saDevolucionProveedor) ---
-                const qDevoluciones = `
-                    SELECT 
-                        'N/CR' AS tipo_doc_raw,
-                        'NC' AS tipo_doc,
-                        RTRIM(dp.doc_num) AS doc_num,
-                        RTRIM(ISNULL(dp.nro_fact, dp.doc_num)) AS nro_fact,
-                        RTRIM(ISNULL(dp.n_control, '')) AS n_control,
-                        dp.fec_emis,
-                        dp.fec_emis AS fec_factura,
-                        RTRIM(dp.co_prov) AS co_prov,
-                        CASE 
-                            WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 'ANULADA'
-                            ELSE RTRIM(ISNULL(p.prov_des, dp.descrip))
-                        END AS prov_des,
-                        RTRIM(ISNULL(p.rif, '')) AS rif,
-                        dp.anulado,
-                        RTRIM(ISNULL(dp.status, '0')) AS status,
-                        RTRIM(ISNULL(dp.nro_fact, '')) AS doc_afectado,
-                        'FACT' AS tipo_doc_afectado,
-                        '' AS nro_expediente,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dp.total_bruto, 0)) END AS total_bruto,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dp.monto_imp, 0)) END AS monto_imp,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -(ISNULL(dp.total_bruto, 0) + ISNULL(dp.monto_imp, 0)) END AS total_neto,
-                        -ABS(ISNULL(dp.otros1, 0)) AS monto_igtf,
-                        dp.tasa,
-                        RTRIM(ISNULL(dp.co_mone, 'BS')) AS co_mone,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.compras_exentas, 0)) END AS compras_exentas,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.base_general, CASE WHEN ISNULL(dp.monto_imp, 0) > 0 THEN dp.total_bruto ELSE 0 END)) END AS base_general,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.imp_general, dp.monto_imp)) END AS imp_general,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.base_reducida, 0)) END AS base_reducida,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.imp_reducida, 0)) END AS imp_reducida,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.base_adicional, 0)) END AS base_adicional,
-                        CASE WHEN dp.anulado = 1 OR RTRIM(ISNULL(dp.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.imp_adicional, 0)) END AS imp_adicional,
-                        '' AS num_comprobante_iva,
-                        NULL AS fec_emis_ret,
-                        NULL AS fec_recep_ret,
-                        0 AS iva_retenido,
-                        0 AS from_pago
-                    FROM saDevolucionProveedor dp
-                    LEFT JOIN saProveedor p ON dp.co_prov = p.co_prov
-                    OUTER APPLY (
-                        SELECT 
-                            SUM(CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN r.reng_neto ELSE 0 END) AS compras_exentas,
-                            SUM(CASE WHEN r.porc_imp >= 15 AND r.porc_imp <= 17 THEN r.reng_neto ELSE 0 END) AS base_general,
-                            SUM(CASE WHEN r.porc_imp >= 15 AND r.porc_imp <= 17 THEN (r.reng_neto * r.porc_imp / 100.0) ELSE 0 END) AS imp_general,
-                            SUM(CASE WHEN r.porc_imp > 0 AND r.porc_imp < 15 THEN r.reng_neto ELSE 0 END) AS base_reducida,
-                            SUM(CASE WHEN r.porc_imp > 0 AND r.porc_imp < 15 THEN (r.reng_neto * r.porc_imp / 100.0) ELSE 0 END) AS imp_reducida,
-                            SUM(CASE WHEN r.porc_imp > 17 THEN r.reng_neto ELSE 0 END) AS base_adicional,
-                            SUM(CASE WHEN r.porc_imp > 17 THEN (r.reng_neto * r.porc_imp / 100.0) ELSE 0 END) AS imp_adicional
-                        FROM saDevolucionProveedorReng r
-                        WHERE r.doc_num = dp.doc_num
-                    ) reng
-                    WHERE CONVERT(VARCHAR(10), dp.fec_emis, 120) >= @startDate
-                      AND CONVERT(VARCHAR(10), dp.fec_emis, 120) <= @endDate
-                `;
-
-                // --- 5. NOTAS DE CRÉDITO DIRECTAS EN CUENTAS POR PAGAR (saDocumentoCompra N/CR) ---
-                const qDirectDocNC = `
-                    SELECT 
-                        'N/CR' AS tipo_doc_raw,
-                        'NC' AS tipo_doc,
-                        RTRIM(d.nro_doc) AS doc_num,
-                        RTRIM(ISNULL(d.nro_fact, d.nro_doc)) AS nro_fact,
-                        RTRIM(ISNULL(d.n_control, '')) AS n_control,
-                        d.fec_emis,
-                        d.fec_emis AS fec_factura,
-                        RTRIM(d.co_prov) AS co_prov,
-                        CASE 
-                            WHEN d.anulado = 1 THEN 'ANULADA'
-                            ELSE RTRIM(ISNULL(p.prov_des, d.observa))
-                        END AS prov_des,
-                        RTRIM(ISNULL(p.rif, '')) AS rif,
-                        d.anulado,
-                        '0' AS status,
-                        RTRIM(ISNULL(d.nro_orig, '')) AS doc_afectado,
-                        'FACT' AS tipo_doc_afectado,
-                        '' AS nro_expediente,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE -ABS(ISNULL(d.total_bruto, 0)) END AS total_bruto,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE -ABS(ISNULL(d.monto_imp, 0)) END AS monto_imp,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE -(ISNULL(d.total_bruto, 0) + ISNULL(d.monto_imp, 0)) END AS total_neto,
-                        0 AS monto_igtf,
-                        d.tasa,
-                        RTRIM(ISNULL(d.co_mone, 'BS')) AS co_mone,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE -ABS(ISNULL(d.otros1, CASE WHEN ISNULL(d.monto_imp, 0) = 0 THEN d.total_bruto ELSE 0 END)) END AS compras_exentas,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE -ABS(CASE WHEN ISNULL(d.monto_imp, 0) > 0 THEN (d.total_bruto - ISNULL(d.otros1, 0)) ELSE 0 END) END AS base_general,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE -ABS(ISNULL(d.monto_imp, 0)) END AS imp_general,
-                        0 AS base_reducida,
-                        0 AS imp_reducida,
-                        0 AS base_adicional,
-                        0 AS imp_adicional,
-                        '' AS num_comprobante_iva,
-                        NULL AS fec_emis_ret,
-                        NULL AS fec_recep_ret,
-                        0 AS iva_retenido,
-                        0 AS from_pago
-                    FROM saDocumentoCompra d
-                    LEFT JOIN saProveedor p ON d.co_prov = p.co_prov
-                    WHERE UPPER(RTRIM(d.co_tipo_doc)) IN ('N/CR', 'NCRE')
-                      AND CONVERT(VARCHAR(10), d.fec_emis, 120) >= @startDate
-                      AND CONVERT(VARCHAR(10), d.fec_emis, 120) <= @endDate
-                      AND NOT EXISTS (
-                          SELECT 1 FROM saDevolucionProveedor dp2 
-                          WHERE LTRIM(RTRIM(dp2.doc_num)) = LTRIM(RTRIM(d.nro_doc))
-                      )
-                `;
-
-                // --- 6. NOTAS DE DÉBITO EN CUENTAS POR PAGAR (saDocumentoCompra N/DB) ---
-                const qNotasDebito = `
-                    SELECT 
-                        'N/DB' AS tipo_doc_raw,
-                        'ND' AS tipo_doc,
-                        RTRIM(d.nro_doc) AS doc_num,
-                        RTRIM(ISNULL(d.nro_fact, d.nro_doc)) AS nro_fact,
-                        RTRIM(ISNULL(d.n_control, '')) AS n_control,
-                        d.fec_emis,
-                        d.fec_emis AS fec_factura,
-                        RTRIM(d.co_prov) AS co_prov,
-                        CASE 
-                            WHEN d.anulado = 1 THEN 'ANULADA'
-                            ELSE RTRIM(ISNULL(p.prov_des, d.observa))
-                        END AS prov_des,
-                        RTRIM(ISNULL(p.rif, '')) AS rif,
-                        d.anulado,
-                        '0' AS status,
-                        RTRIM(ISNULL(d.nro_orig, '')) AS doc_afectado,
-                        'FACT' AS tipo_doc_afectado,
-                        '' AS nro_expediente,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.total_bruto, 0) END AS total_bruto,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.monto_imp, 0) END AS monto_imp,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE (ISNULL(d.total_bruto, 0) + ISNULL(d.monto_imp, 0)) END AS total_neto,
-                        0 AS monto_igtf,
-                        d.tasa,
-                        RTRIM(ISNULL(d.co_mone, 'BS')) AS co_mone,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.otros1, CASE WHEN ISNULL(d.monto_imp, 0) = 0 THEN d.total_bruto ELSE 0 END) END AS compras_exentas,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE CASE WHEN ISNULL(d.monto_imp, 0) > 0 THEN (d.total_bruto - ISNULL(d.otros1, 0)) ELSE 0 END END AS base_general,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.monto_imp, 0) END AS imp_general,
-                        0 AS base_reducida,
-                        0 AS imp_reducida,
-                        0 AS base_adicional,
-                        0 AS imp_adicional,
-                        '' AS num_comprobante_iva,
-                        NULL AS fec_emis_ret,
-                        NULL AS fec_recep_ret,
-                        0 AS iva_retenido,
-                        0 AS from_pago
-                    FROM saDocumentoCompra d
-                    LEFT JOIN saProveedor p ON d.co_prov = p.co_prov
-                    WHERE UPPER(RTRIM(d.co_tipo_doc)) IN ('N/DB', 'NDEB')
-                      AND CONVERT(VARCHAR(10), d.fec_emis, 120) >= @startDate
-                      AND CONVERT(VARCHAR(10), d.fec_emis, 120) <= @endDate
-                `;
-
-                const fullUnionQuery = `
-                    WITH LibroUnion AS (
+                // Query SQL a ejecutar según el modo de consulta
+                let querySql = '';
+                if (onlyWithRetentions) {
+                    // Modo estándar de Libro de Compras oficial SENIAT (filtrado por la quincena del pago/retención)
+                    querySql = `
                         ${qPagosConRetencion}
-                        UNION ALL
-                        ${qFacturas}
-                        UNION ALL
-                        ${qDirectDocFacturas}
-                        UNION ALL
-                        ${qDevoluciones}
-                        UNION ALL
-                        ${qDirectDocNC}
-                        UNION ALL
-                        ${qNotasDebito}
-                    )
-                    SELECT * 
-                    FROM LibroUnion
-                    ORDER BY fec_emis ASC, doc_num ASC
-                `;
+                        ORDER BY fec_emis ASC, doc_num ASC
+                    `;
+                } else {
+                    // Modo general completo (todas las facturas emitidas + pagos con retenciones)
+                    querySql = `
+                        WITH LibroUnion AS (
+                            ${qPagosConRetencion}
+                            UNION ALL
+                            ${qFacturas}
+                            UNION ALL
+                            ${qDirectDocFacturas}
+                        )
+                        SELECT * 
+                        FROM LibroUnion
+                        ORDER BY fec_emis ASC, doc_num ASC
+                    `;
+                }
 
                 const reqSql = pool.request();
                 reqSql.input('startDate', sql.VarChar(10), startDate);
                 reqSql.input('endDate', sql.VarChar(10), endDate);
 
-                const resUnion = await reqSql.query(fullUnionQuery);
+                const resUnion = await reqSql.query(querySql);
                 const records = resUnion.recordset || [];
 
                 for (const row of records) {
@@ -674,7 +467,7 @@ router.get('/', async (req, res) => {
             }
         }
 
-        // 1. Deduplicación inteligente: si un documento fue tomado por pago y por fecha de factura, prevalece el del pago
+        // 1. Deduplicación por número de documento y tipo dentro de la sede
         const seen = new Set();
         const dedupedDocs = [];
         for (const doc of allDocs) {
@@ -686,21 +479,7 @@ router.get('/', async (req, res) => {
         }
         allDocs = dedupedDocs;
 
-        // 2. Filtro fiscal: solo facturas con retención o pagos procesados (exentas pagadas como FEBECA o con retención de IVA)
-        if (onlyWithRetentions) {
-            allDocs = allDocs.filter(doc => {
-                const isAnulada = Number(doc.anulado) === 1 || String(doc.status) === '3';
-                if (isAnulada) return true;
-
-                const hasRetencion = Number(doc.iva_retenido || 0) > 0 || (doc.num_comprobante_iva && String(doc.num_comprobante_iva).trim() !== '');
-                const isExentaProcesada = Number(doc.compras_exentas || 0) > 0 && doc.from_pago === 1;
-                const isNcNd = doc.tipo_doc === 'NC' || doc.tipo_doc === 'ND';
-
-                return hasRetencion || isExentaProcesada || isNcNd;
-            });
-        }
-
-        // 3. Ordenar cronológicamente y correlativamente por fecha de libro y número de documento
+        // 2. Ordenar cronológicamente por fecha de la factura y número de documento (idéntico al Libro de Compras oficial en Excel)
         allDocs.sort((a, b) => {
             const dateA = new Date(a.fec_emis).getTime();
             const dateB = new Date(b.fec_emis).getTime();
@@ -708,13 +487,13 @@ router.get('/', async (req, res) => {
             return String(a.doc_num).localeCompare(String(b.doc_num), undefined, { numeric: true });
         });
 
-        // 4. Asignar número de operación (correlativo oficial)
+        // 3. Asignar número de operación oficial (correlativo 1, 2, 3...)
         let op = 1;
         for (const doc of allDocs) {
             doc.oper_nro = op++;
         }
 
-        // 5. Totales y KPIs fiscales (SENIAT)
+        // 4. Totales y KPIs fiscales (SENIAT)
         let totalCompras = 0;
         let totalExento = 0;
         let totalBaseGeneral = 0;
