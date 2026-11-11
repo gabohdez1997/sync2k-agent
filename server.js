@@ -150,6 +150,9 @@ app.use('/api/v1/margenes',         require('./routes/margenes'));
 app.use('/api/v1/margins',          require('./routes/margenes'));
 app.use('/api/v1/devoluciones-ventas', require('./routes/devoluciones_ventas'));
 app.use('/api/v1/sales-returns',       require('./routes/devoluciones_ventas'));
+app.use('/api/v1/libro-ventas',          require('./routes/libro_ventas'));
+app.use('/api/v1/reportes/libro-ventas', require('./routes/libro_ventas'));
+app.use('/api/v1/sales-book',            require('./routes/libro_ventas'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

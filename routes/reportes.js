@@ -1707,4 +1707,6 @@ router.get('/resumen-cobros', async (req, res) => {
     }
 });
 
+router.use('/libro-ventas', require('./libro_ventas'));
+
 module.exports = router;
