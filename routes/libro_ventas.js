@@ -154,19 +154,24 @@ router.get('/', async (req, res) => {
                 const docImpfis = dvHasImpfis ? "RTRIM(ISNULL(d.impfis, ''))" : "''";
                 const docNroZ = dvHasNroZ ? "RTRIM(ISNULL(d.imp_nro_z, ''))" : "''";
 
-                // Filtro estricto de documentos fiscales (impresos por máquina fiscal o facturación digital registrada en impfisfac)
+                // Filtro de documentos fiscales: si tiene impfisfac o reporte z (o serial de impresora)
                 const facFiscalFilter = [
                     fHasImpfisfac ? "(f.impfisfac IS NOT NULL AND LTRIM(RTRIM(f.impfisfac)) <> '')" : null,
-                    dvHasImpfisfac ? "(dv_fac.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_fac.impfisfac)) <> '')" : null
+                    fHasNroZ ? "(f.imp_nro_z IS NOT NULL AND LTRIM(RTRIM(f.imp_nro_z)) <> '')" : null,
+                    dvHasImpfisfac ? "(dv_fac.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_fac.impfisfac)) <> '')" : null,
+                    dvHasNroZ ? "(dv_fac.imp_nro_z IS NOT NULL AND LTRIM(RTRIM(dv_fac.imp_nro_z)) <> '')" : null
                 ].filter(Boolean).join(" OR ") || "1=1";
 
-                const devFiscalFilter = dcHasImpfisfac 
-                    ? "(dc.impfisfac IS NOT NULL AND LTRIM(RTRIM(dc.impfisfac)) <> '')" 
-                    : "1=1";
+                const devFiscalFilter = [
+                    dcHasImpfisfac ? "(dc.impfisfac IS NOT NULL AND LTRIM(RTRIM(dc.impfisfac)) <> '')" : null,
+                    dcHasNroZ ? "(dc.imp_nro_z IS NOT NULL AND LTRIM(RTRIM(dc.imp_nro_z)) <> '')" : null,
+                    "ISNULL(dc.monto_imp, 0) > 0"
+                ].filter(Boolean).join(" OR ") || "1=1";
 
-                const docFiscalFilter = dvHasImpfisfac 
-                    ? "(d.impfisfac IS NOT NULL AND LTRIM(RTRIM(d.impfisfac)) <> '')" 
-                    : "1=1";
+                const docFiscalFilter = [
+                    dvHasImpfisfac ? "(d.impfisfac IS NOT NULL AND LTRIM(RTRIM(d.impfisfac)) <> '')" : null,
+                    dvHasNroZ ? "(d.imp_nro_z IS NOT NULL AND LTRIM(RTRIM(d.imp_nro_z)) <> '')" : null
+                ].filter(Boolean).join(" OR ") || "1=1";
 
                 // Construir campos dinámicos de retención de IVA según existan en saCobroRetenIvaReng
                 const riFecha = retCols.has('fecha_documento') 
