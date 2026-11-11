@@ -86,22 +86,38 @@ router.get('/', async (req, res) => {
                 const facCols = await getTableColumns(pool, 'saFacturaVenta');
                 const devCols = await getTableColumns(pool, 'saDevolucionCliente');
                 const docCols = await getTableColumns(pool, 'saDocumentoVenta');
+                const retCols = await getTableColumns(pool, 'saCobroRetenIvaReng');
 
-                // 1. Datos de empresa de saParEmp
+                // 1. Datos de empresa (Consultar par_emp de forma segura con fallback)
                 if (!primaryCompany) {
                     try {
-                        const compRes = await pool.request().query(`
-                            SELECT TOP 1 
-                                RTRIM(ISNULL(emp_des, '')) AS emp_des,
-                                RTRIM(ISNULL(rif, '')) AS rif,
-                                RTRIM(ISNULL(direc, '')) AS direc
-                            FROM saParEmp
-                        `);
-                        if (compRes.recordset && compRes.recordset.length > 0) {
-                            primaryCompany = compRes.recordset[0];
+                        const parCols = await getTableColumns(pool, 'par_emp');
+                        if (parCols.size > 0) {
+                            const desCol = parCols.has('emp_des') ? 'emp_des' : (parCols.has('empresa') ? 'empresa' : null);
+                            const rifCol = parCols.has('rif') ? 'rif' : (parCols.has('rif_emp') ? 'rif_emp' : null);
+                            const dirCol = parCols.has('direc') ? 'direc' : (parCols.has('dir_emp') ? 'dir_emp' : (parCols.has('direccion') ? 'direccion' : null));
+
+                            const selectFields = [
+                                desCol ? `RTRIM(ISNULL(${desCol}, '')) AS emp_des` : `'${srv.business_name || srv.name || 'EMPRESA'}' AS emp_des`,
+                                rifCol ? `RTRIM(ISNULL(${rifCol}, '')) AS rif` : `'${srv.rif || ''}' AS rif`,
+                                dirCol ? `RTRIM(ISNULL(${dirCol}, '')) AS direc` : `'${srv.address || ''}' AS direc`
+                            ].join(', ');
+
+                            const compRes = await pool.request().query(`SELECT TOP 1 ${selectFields} FROM par_emp`);
+                            if (compRes.recordset && compRes.recordset.length > 0) {
+                                primaryCompany = compRes.recordset[0];
+                            }
                         }
                     } catch (eComp) {
-                        console.warn('[LIBRO-VENTAS] No se pudo leer saParEmp:', eComp.message);
+                        console.warn('[LIBRO-VENTAS] No se pudo leer par_emp:', eComp.message);
+                    }
+
+                    if (!primaryCompany) {
+                        primaryCompany = {
+                            emp_des: srv.business_name || srv.name || 'EMPRESA',
+                            rif: srv.rif || '',
+                            direc: srv.address || ''
+                        };
                     }
                 }
 
@@ -117,6 +133,15 @@ router.get('/', async (req, res) => {
                 const docImpfisfac = docCols.has('impfisfac') ? "RTRIM(ISNULL(d.impfisfac, ''))" : "''";
                 const docImpfis = docCols.has('impfis') ? "RTRIM(ISNULL(d.impfis, ''))" : "''";
                 const docNroZ = docCols.has('imp_nro_z') ? "RTRIM(ISNULL(d.imp_nro_z, ''))" : "''";
+
+                // Construir campos dinámicos de retención de IVA según existan en saCobroRetenIvaReng
+                const riFecha = retCols.has('fecha_documento') 
+                    ? "ri.fecha_documento" 
+                    : (retCols.has('fecha_emision') ? "ri.fecha_emision" : "cb.fecha");
+                const riComp = retCols.has('num_comprobante') ? "RTRIM(ISNULL(ri.num_comprobante, ''))" : "''";
+                const riCtrl = retCols.has('numero_control_documento') ? "RTRIM(ISNULL(ri.numero_control_documento, ''))" : "''";
+                const riAfec = retCols.has('numero_documento_afectado') ? "RTRIM(ISNULL(ri.numero_documento_afectado, ''))" : "''";
+                const riMonto = retCols.has('monto_ret_imp') ? "ri.monto_ret_imp" : "NULL";
 
                 // --- 1. FACTURAS DE VENTA ---
                 const qFacturas = `
@@ -182,10 +207,10 @@ router.get('/', async (req, res) => {
                     ) reng
                     OUTER APPLY (
                         SELECT TOP 1
-                            COALESCE(NULLIF(RTRIM(ri.num_comprobante), ''), NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc)) AS num_comprobante_iva,
-                            COALESCE(ri.fecha_emision, cb.fecha) AS fec_emis_ret,
-                            COALESCE(ri.fecha_recepcion, cb.fecha) AS fec_recep_ret,
-                            ISNULL(ri.monto_ret_imp, ISNULL(cdr.monto_retencion_iva, dv.total_neto)) AS iva_retenido
+                            COALESCE(NULLIF(${riComp}, ''), NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc)) AS num_comprobante_iva,
+                            COALESCE(${riFecha}, cb.fecha) AS fec_emis_ret,
+                            COALESCE(${riFecha}, cb.fecha) AS fec_recep_ret,
+                            ISNULL(${riMonto}, ISNULL(cdr.monto_retencion_iva, dv.total_neto)) AS iva_retenido
                         FROM saCobroDocReng cdr
                         INNER JOIN saCobro cb ON cdr.cob_num = cb.cob_num AND cb.anulado = 0
                         LEFT JOIN saCobroRetenIvaReng ri ON ri.rowguid_reng_cob = cdr.rowguid
@@ -318,9 +343,9 @@ router.get('/', async (req, res) => {
                     SELECT 
                         'RET/IVA' AS tipo_doc_raw,
                         'RET/IVA' AS tipo_doc,
-                        RTRIM(ISNULL(ri.num_comprobante, dv.nro_doc)) AS doc_num,
-                        RTRIM(ISNULL(ri.numero_control_documento, dv.n_control)) AS n_control,
-                        COALESCE(ri.fecha_recepcion, ri.fecha_emision, cb.fecha, dv.fec_emis) AS fec_emis,
+                        COALESCE(NULLIF(${riComp}, ''), RTRIM(dv.nro_doc), RTRIM(cdr.nro_doc)) AS doc_num,
+                        COALESCE(NULLIF(${riCtrl}, ''), RTRIM(dv.n_control), '') AS n_control,
+                        COALESCE(${riFecha}, cb.fecha, dv.fec_emis) AS fec_emis,
                         RTRIM(ISNULL(cb.co_cli, dv.co_cli)) AS co_cli,
                         RTRIM(ISNULL(c.cli_des, '')) AS cli_des,
                         RTRIM(ISNULL(c.rif, '')) AS rif,
@@ -331,7 +356,7 @@ router.get('/', async (req, res) => {
                         '' AS reporte_z,
                         '' AS comp_fiscal_desde,
                         '' AS comp_fiscal_hasta,
-                        RTRIM(ISNULL(ri.numero_documento_afectado, dv.nro_orig)) AS doc_afectado,
+                        COALESCE(NULLIF(${riAfec}, ''), RTRIM(dv.nro_orig), RTRIM(cdr.nro_doc)) AS doc_afectado,
                         'FACT' AS tipo_doc_afectado,
                         0 AS total_bruto,
                         0 AS monto_imp,
@@ -345,18 +370,18 @@ router.get('/', async (req, res) => {
                         0 AS imp_reducida,
                         0 AS base_adicional,
                         0 AS imp_adicional,
-                        RTRIM(ISNULL(ri.num_comprobante, dv.num_comprobante)) AS num_comprobante_iva,
-                        COALESCE(ri.fecha_emision, cb.fecha, dv.fec_emis) AS fec_emis_ret,
-                        COALESCE(ri.fecha_recepcion, cb.fecha, dv.fec_emis) AS fec_recep_ret,
-                        COALESCE(ri.monto_ret_imp, cdr.monto_retencion_iva, dv.total_neto) AS iva_retenido
+                        COALESCE(NULLIF(${riComp}, ''), RTRIM(dv.num_comprobante), RTRIM(dv.nro_doc)) AS num_comprobante_iva,
+                        COALESCE(${riFecha}, cb.fecha, dv.fec_emis) AS fec_emis_ret,
+                        COALESCE(${riFecha}, cb.fecha, dv.fec_emis) AS fec_recep_ret,
+                        COALESCE(${riMonto}, cdr.monto_retencion_iva, dv.total_neto) AS iva_retenido
                     FROM saCobroDocReng cdr
                     INNER JOIN saCobro cb ON cdr.cob_num = cb.cob_num AND cb.anulado = 0
                     LEFT JOIN saCobroRetenIvaReng ri ON ri.rowguid_reng_cob = cdr.rowguid
                     LEFT JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO' AND dv.nro_orig = cb.cob_num AND UPPER(RTRIM(dv.co_tipo_doc)) IN ('IVAN', 'IVAP')
                     LEFT JOIN saCliente c ON cb.co_cli = c.co_cli
                     WHERE UPPER(RTRIM(cdr.co_tipo_doc)) IN ('IVAN', 'IVAP')
-                      AND CONVERT(VARCHAR(10), COALESCE(ri.fecha_recepcion, ri.fecha_emision, cb.fecha, dv.fec_emis), 120) >= @startDate
-                      AND CONVERT(VARCHAR(10), COALESCE(ri.fecha_recepcion, ri.fecha_emision, cb.fecha, dv.fec_emis), 120) <= @endDate
+                      AND CONVERT(VARCHAR(10), COALESCE(${riFecha}, cb.fecha, dv.fec_emis), 120) >= @startDate
+                      AND CONVERT(VARCHAR(10), COALESCE(${riFecha}, cb.fecha, dv.fec_emis), 120) <= @endDate
                 `;
 
                 const fullUnionQuery = `
@@ -510,4 +535,3 @@ router.get('/', async (req, res) => {
 });
 
 module.exports = router;
-
