@@ -146,17 +146,9 @@ router.get('/', async (req, res) => {
                     ? (dvHasNroZ ? "COALESCE(NULLIF(RTRIM(f.imp_nro_z), ''), NULLIF(RTRIM(dv_fac.imp_nro_z), ''), '')" : "RTRIM(ISNULL(f.imp_nro_z, ''))")
                     : (dvHasNroZ ? "RTRIM(ISNULL(dv_fac.imp_nro_z, ''))" : "''");
 
-                const devImpfisfac = dcHasImpfisfac
-                    ? (dvHasImpfisfac ? "COALESCE(NULLIF(RTRIM(dc.impfisfac), ''), NULLIF(RTRIM(dv_dev.impfisfac), ''), '')" : "RTRIM(ISNULL(dc.impfisfac, ''))")
-                    : (dvHasImpfisfac ? "RTRIM(ISNULL(dv_dev.impfisfac, ''))" : "''");
-
-                const devImpfis = dcHasImpfis
-                    ? (dvHasImpfis ? "COALESCE(NULLIF(RTRIM(dc.impfis), ''), NULLIF(RTRIM(dv_dev.impfis), ''), '')" : "RTRIM(ISNULL(dc.impfis, ''))")
-                    : (dvHasImpfis ? "RTRIM(ISNULL(dv_dev.impfis, ''))" : "''");
-
-                const devNroZ = dcHasNroZ
-                    ? (dvHasNroZ ? "COALESCE(NULLIF(RTRIM(dc.imp_nro_z), ''), NULLIF(RTRIM(dv_dev.imp_nro_z), ''), '')" : "RTRIM(ISNULL(dc.imp_nro_z, ''))")
-                    : (dvHasNroZ ? "RTRIM(ISNULL(dv_dev.imp_nro_z, ''))" : "''");
+                const devImpfisfac = dcHasImpfisfac ? "RTRIM(ISNULL(dc.impfisfac, ''))" : "''";
+                const devImpfis = dcHasImpfis ? "RTRIM(ISNULL(dc.impfis, ''))" : "''";
+                const devNroZ = dcHasNroZ ? "RTRIM(ISNULL(dc.imp_nro_z, ''))" : "''";
 
                 const docImpfisfac = dvHasImpfisfac ? "RTRIM(ISNULL(d.impfisfac, ''))" : "''";
                 const docImpfis = dvHasImpfis ? "RTRIM(ISNULL(d.impfis, ''))" : "''";
@@ -171,7 +163,6 @@ router.get('/', async (req, res) => {
 
                 const devFiscalFilter = [
                     dcHasImpfisfac ? "(dc.impfisfac IS NOT NULL AND LTRIM(RTRIM(dc.impfisfac)) <> '')" : null,
-                    dvHasImpfisfac ? "(dv_dev.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_dev.impfisfac)) <> '')" : null,
                     "ISNULL(dc.monto_imp, 0) > 0"
                 ].filter(Boolean).join(" OR ");
 
@@ -221,7 +212,9 @@ router.get('/', async (req, res) => {
                         -- Si está anulada, montos fiscales en 0 para no alterar base
                         CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE ISNULL(f.total_bruto, 0) END AS total_bruto,
                         CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE ISNULL(f.monto_imp, 0) END AS monto_imp,
-                        CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE ISNULL(f.total_neto, 0) END AS total_neto,
+                        -- En el Libro de Ventas SENIAT, 'Total Ventas mas Impuesto' = Exento + Base + IVA (total_bruto + monto_imp). El IGTF (otros1) no forma parte del debito fiscal ni del total con IVA.
+                        CASE WHEN f.anulado = 1 OR RTRIM(ISNULL(f.status, '0')) = '3' THEN 0 ELSE (ISNULL(f.total_bruto, 0) + ISNULL(f.monto_imp, 0)) END AS total_neto,
+                        ISNULL(f.otros1, 0) AS monto_igtf,
                         f.tasa,
                         RTRIM(ISNULL(f.co_mone, 'BS')) AS co_mone,
                         -- Desglose de renglones
@@ -254,10 +247,10 @@ router.get('/', async (req, res) => {
                     ) reng
                     OUTER APPLY (
                         SELECT TOP 1
-                            COALESCE(NULLIF(${riComp}, ''), NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc)) AS num_comprobante_iva,
+                            COALESCE(NULLIF(${riComp}, ''), NULLIF(RTRIM(dv.num_comprobante), ''), RTRIM(dv.nro_doc), RTRIM(cdr.nro_doc)) AS num_comprobante_iva,
                             COALESCE(${riFecha}, cb.fecha) AS fec_emis_ret,
                             COALESCE(${riFecha}, cb.fecha) AS fec_recep_ret,
-                            ISNULL(${riMonto}, ISNULL(cdr.monto_retencion_iva, dv.total_neto)) AS iva_retenido
+                            COALESCE(NULLIF(${riMonto}, 0), NULLIF(cdr.monto_retencion_iva, 0), NULLIF(cdr.mont_cob, 0), dv.total_neto, 0) AS iva_retenido
                         FROM saCobroDocReng cdr
                         INNER JOIN saCobro cb ON cdr.cob_num = cb.cob_num AND cb.anulado = 0
                         LEFT JOIN saCobroRetenIvaReng ri ON ri.rowguid_reng_cob = cdr.rowguid
@@ -303,7 +296,8 @@ router.get('/', async (req, res) => {
                         'FACT' AS tipo_doc_afectado,
                         CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dc.total_bruto, 0)) END AS total_bruto,
                         CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dc.monto_imp, 0)) END AS monto_imp,
-                        CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dc.total_neto, 0)) END AS total_neto,
+                        CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -(ISNULL(dc.total_bruto, 0) + ISNULL(dc.monto_imp, 0)) END AS total_neto,
+                        -ABS(ISNULL(dc.otros1, 0)) AS monto_igtf,
                         dc.tasa,
                         RTRIM(ISNULL(dc.co_mone, 'BS')) AS co_mone,
                         CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(reng.ventas_exentas, 0)) END AS ventas_exentas,
@@ -319,7 +313,6 @@ router.get('/', async (req, res) => {
                         0 AS iva_retenido
                     FROM saDevolucionCliente dc
                     LEFT JOIN saCliente c ON dc.co_cli = c.co_cli
-                    LEFT JOIN saDocumentoVenta dv_dev ON LTRIM(RTRIM(dc.doc_num)) = LTRIM(RTRIM(dv_dev.nro_doc)) AND UPPER(RTRIM(dv_dev.co_tipo_doc)) IN ('N/CR', 'NCR')
                     OUTER APPLY (
                         SELECT 
                             SUM(CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN r.reng_neto ELSE 0 END) AS ventas_exentas,
@@ -369,7 +362,8 @@ router.get('/', async (req, res) => {
                         'FACT' AS tipo_doc_afectado,
                         CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.total_bruto, 0) END AS total_bruto,
                         CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.monto_imp, 0) END AS monto_imp,
-                        CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.total_neto, 0) END AS total_neto,
+                        CASE WHEN d.anulado = 1 THEN 0 ELSE (ISNULL(d.total_bruto, 0) + ISNULL(d.monto_imp, 0)) END AS total_neto,
+                        0 AS monto_igtf,
                         d.tasa,
                         RTRIM(ISNULL(d.co_mone, 'BS')) AS co_mone,
                         CASE WHEN d.anulado = 1 THEN 0 ELSE CASE WHEN ISNULL(d.monto_imp, 0) = 0 THEN d.total_bruto ELSE 0 END END AS ventas_exentas,
@@ -415,6 +409,7 @@ router.get('/', async (req, res) => {
                         0 AS total_bruto,
                         0 AS monto_imp,
                         0 AS total_neto,
+                        0 AS monto_igtf,
                         1 AS tasa,
                         'BS' AS co_mone,
                         0 AS ventas_exentas,
@@ -427,7 +422,7 @@ router.get('/', async (req, res) => {
                         COALESCE(NULLIF(${riComp}, ''), RTRIM(dv.num_comprobante), RTRIM(dv.nro_doc)) AS num_comprobante_iva,
                         COALESCE(${riFecha}, cb.fecha, dv.fec_emis) AS fec_emis_ret,
                         COALESCE(${riFecha}, cb.fecha, dv.fec_emis) AS fec_recep_ret,
-                        COALESCE(${riMonto}, cdr.monto_retencion_iva, dv.total_neto) AS iva_retenido
+                        COALESCE(NULLIF(${riMonto}, 0), NULLIF(cdr.monto_retencion_iva, 0), NULLIF(cdr.mont_cob, 0), dv.total_neto, 0) AS iva_retenido
                     FROM saCobroDocReng cdr
                     INNER JOIN saCobro cb ON cdr.cob_num = cb.cob_num AND cb.anulado = 0
                     LEFT JOIN saCobroRetenIvaReng ri ON ri.rowguid_reng_cob = cdr.rowguid
@@ -500,6 +495,7 @@ router.get('/', async (req, res) => {
         let totalBaseAdicional = 0;
         let totalDebitoAdicional = 0;
         let totalIvaRetenido = 0;
+        let totalIgtf = 0;
 
         let cantFacturas = 0;
         let cantNotasCredito = 0;
@@ -530,6 +526,7 @@ router.get('/', async (req, res) => {
             totalDebitoReducida += Number(doc.imp_reducida || 0);
             totalBaseAdicional += Number(doc.base_adicional || 0);
             totalDebitoAdicional += Number(doc.imp_adicional || 0);
+            totalIgtf += Number(doc.monto_igtf || 0);
 
             if (hasSeparateRetRows) {
                 if (doc.tipo_doc === 'RET/IVA') {
@@ -552,6 +549,7 @@ router.get('/', async (req, res) => {
             total_base_imponible_total: Math.round((totalBaseGeneral + totalBaseReducida + totalBaseAdicional) * 100) / 100,
             total_debito_fiscal_total: Math.round((totalDebitoGeneral + totalDebitoReducida + totalDebitoAdicional) * 100) / 100,
             total_iva_retenido: Math.round(totalIvaRetenido * 100) / 100,
+            total_igtf: Math.round(totalIgtf * 100) / 100,
             total_documentos: allDocs.length,
             cant_facturas: cantFacturas,
             cant_notas_credito: cantNotasCredito,
