@@ -88,8 +88,9 @@ router.get('/', async (req, res) => {
                 const docCols = await getTableColumns(pool, 'saDocumentoVenta');
                 const retCols = await getTableColumns(pool, 'saCobroRetenIvaReng');
 
-                // 1. Datos de empresa (Consultar par_emp de forma segura con fallback)
+                // 1. Datos de empresa (Priorizar configuración de sucursal en branches, con fallback a par_emp)
                 if (!primaryCompany) {
+                    let dbComp = {};
                     try {
                         const parCols = await getTableColumns(pool, 'par_emp');
                         if (parCols.size > 0) {
@@ -98,27 +99,25 @@ router.get('/', async (req, res) => {
                             const dirCol = parCols.has('direc') ? 'direc' : (parCols.has('dir_emp') ? 'dir_emp' : (parCols.has('direccion') ? 'direccion' : null));
 
                             const selectFields = [
-                                desCol ? `RTRIM(ISNULL(${desCol}, '')) AS emp_des` : `'${srv.business_name || srv.name || 'EMPRESA'}' AS emp_des`,
-                                rifCol ? `RTRIM(ISNULL(${rifCol}, '')) AS rif` : `'${srv.rif || ''}' AS rif`,
-                                dirCol ? `RTRIM(ISNULL(${dirCol}, '')) AS direc` : `'${srv.address || ''}' AS direc`
+                                desCol ? `RTRIM(ISNULL(${desCol}, '')) AS emp_des` : `'' AS emp_des`,
+                                rifCol ? `RTRIM(ISNULL(${rifCol}, '')) AS rif` : `'' AS rif`,
+                                dirCol ? `RTRIM(ISNULL(${dirCol}, '')) AS direc` : `'' AS direc`
                             ].join(', ');
 
                             const compRes = await pool.request().query(`SELECT TOP 1 ${selectFields} FROM par_emp`);
                             if (compRes.recordset && compRes.recordset.length > 0) {
-                                primaryCompany = compRes.recordset[0];
+                                dbComp = compRes.recordset[0];
                             }
                         }
                     } catch (eComp) {
                         console.warn('[LIBRO-VENTAS] No se pudo leer par_emp:', eComp.message);
                     }
 
-                    if (!primaryCompany) {
-                        primaryCompany = {
-                            emp_des: srv.business_name || srv.name || 'EMPRESA',
-                            rif: srv.rif || '',
-                            direc: srv.address || ''
-                        };
-                    }
+                    primaryCompany = {
+                        emp_des: (srv.business_name && srv.business_name.trim()) || (dbComp.emp_des && dbComp.emp_des.trim()) || srv.name || 'EMPRESA',
+                        rif: (srv.rif && srv.rif.trim()) || (dbComp.rif && dbComp.rif.trim()) || '',
+                        direc: (srv.address && srv.address.trim()) || (dbComp.direc && dbComp.direc.trim()) || ''
+                    };
                 }
 
                 // Construir campos de impresora fiscal verificando existencia real en cada tabla física
