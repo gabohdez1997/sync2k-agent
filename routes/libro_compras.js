@@ -260,8 +260,12 @@ router.get('/', async (req, res) => {
                         COALESCE(
                             NULLIF(${riMonto}, 0),
                             NULLIF(pdr.monto_retencion_iva, 0),
-                            CASE WHEN (SELECT COUNT(1) FROM saPagoDocReng WHERE cob_num = p.cob_num AND co_tipo_doc NOT IN ('IVAN', 'ISLR', 'AJPA')) = 1 THEN dc_ret.total_neto ELSE 0 END,
-                            0
+                            CASE WHEN (SELECT COUNT(1) FROM saPagoDocReng WHERE cob_num = p.cob_num AND co_tipo_doc NOT IN ('IVAN', 'ISLR', 'AJPA')) = 1 THEN NULLIF(dc_ret.total_neto, 0) ELSE NULL END,
+                            CASE WHEN (NULLIF(RTRIM(ISNULL(dc_ret.num_comprobante, '')), '') IS NOT NULL OR NULLIF(RTRIM(ISNULL(${riComp}, '')), '') IS NOT NULL) 
+                                      AND COALESCE(reng.imp_general, d.monto_imp, 0) > 0 
+                                 THEN (COALESCE(reng.imp_general, d.monto_imp, 0) * 0.75) 
+                                 ELSE 0 
+                            END
                         ) AS iva_retenido,
                         1 AS from_pago
                     FROM saPagoDocReng pdr
@@ -290,6 +294,14 @@ router.get('/', async (req, res) => {
                     WHERE UPPER(RTRIM(pdr.co_tipo_doc)) NOT IN ('IVAN', 'ISLR', 'AJPA')
                       AND CONVERT(VARCHAR(10), COALESCE(p.fecha, dc_ret.fec_emis), 120) >= @startDate
                       AND CONVERT(VARCHAR(10), COALESCE(p.fecha, dc_ret.fec_emis), 120) <= @endDate
+                      ${onlyWithRetentions ? `
+                      AND (
+                          NULLIF(RTRIM(ISNULL(${riComp}, '')), '') IS NOT NULL 
+                          OR NULLIF(RTRIM(ISNULL(dc_ret.num_comprobante, '')), '') IS NOT NULL 
+                          OR NULLIF(RTRIM(ISNULL(dc_ret.nro_doc, '')), '') IS NOT NULL
+                          OR ISNULL(${riMonto}, 0) > 0 
+                          OR ISNULL(pdr.monto_retencion_iva, 0) > 0
+                      )` : ''}
                 `;
 
                 // --- 2. FACTURAS DIRECTAS EMITIDAS EN EL PERÍODO (SOLO PARA MODO NO FILTRADO) ---
@@ -479,7 +491,20 @@ router.get('/', async (req, res) => {
         }
         allDocs = dedupedDocs;
 
-        // 2. Ordenar cronológicamente por fecha de la factura y número de documento (idéntico al Libro de Compras oficial en Excel)
+        // 2. Filtro fiscal estricto: Si está activo "Solo con retención", excluir cualquier pago sin comprobante ni monto retenido
+        if (onlyWithRetentions) {
+            allDocs = allDocs.filter(doc => {
+                const isAnulada = Number(doc.anulado) === 1 || String(doc.status) === '3';
+                if (isAnulada) return true;
+
+                const hasComp = doc.num_comprobante_iva && String(doc.num_comprobante_iva).trim() !== '';
+                const hasRetMonto = Number(doc.iva_retenido || 0) !== 0;
+
+                return hasComp || hasRetMonto;
+            });
+        }
+
+        // 3. Ordenar cronológicamente por fecha de la factura y número de documento (idéntico al Libro de Compras oficial en Excel)
         allDocs.sort((a, b) => {
             const dateA = new Date(a.fec_emis).getTime();
             const dateB = new Date(b.fec_emis).getTime();
