@@ -410,7 +410,7 @@ router.get('/', async (req, res) => {
                     allDocs.push({
                         ...row,
                         sede_id: srv.id,
-                        sede_nombre: srv.business_name || srv.name
+                        sede_nombre: srv.name || srv.business_name
                     });
                 }
             } catch (srvErr) {
