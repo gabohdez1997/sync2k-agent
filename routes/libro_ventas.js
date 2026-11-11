@@ -121,14 +121,14 @@ router.get('/', async (req, res) => {
                     }
                 }
 
-                // Construir campos de impresora fiscal según existan en la tabla
-                const facImpfisfac = facCols.has('impfisfac') ? "RTRIM(ISNULL(f.impfisfac, ''))" : "''";
-                const facImpfis = facCols.has('impfis') ? "RTRIM(ISNULL(f.impfis, ''))" : "''";
-                const facNroZ = facCols.has('imp_nro_z') ? "RTRIM(ISNULL(f.imp_nro_z, ''))" : "''";
+                // Construir campos de impresora fiscal unificando saFacturaVenta / saDevolucionCliente con saDocumentoVenta
+                const facImpfisfac = "COALESCE(NULLIF(RTRIM(f.impfisfac), ''), NULLIF(RTRIM(dv_fac.impfisfac), ''), '')";
+                const facImpfis = "COALESCE(NULLIF(RTRIM(f.impfis), ''), NULLIF(RTRIM(dv_fac.impfis), ''), '')";
+                const facNroZ = "COALESCE(NULLIF(RTRIM(f.imp_nro_z), ''), NULLIF(RTRIM(dv_fac.imp_nro_z), ''), '')";
 
-                const devImpfisfac = devCols.has('impfisfac') ? "RTRIM(ISNULL(dc.impfisfac, ''))" : "''";
-                const devImpfis = devCols.has('impfis') ? "RTRIM(ISNULL(dc.impfis, ''))" : "''";
-                const devNroZ = devCols.has('imp_nro_z') ? "RTRIM(ISNULL(dc.imp_nro_z, ''))" : (docCols.has('imp_nro_z') ? "(SELECT TOP 1 RTRIM(ISNULL(dv_z.imp_nro_z, '')) FROM saDocumentoVenta dv_z WHERE dv_z.nro_doc = dc.doc_num AND UPPER(RTRIM(dv_z.co_tipo_doc)) IN ('N/CR', 'NCR'))" : "''");
+                const devImpfisfac = "COALESCE(NULLIF(RTRIM(dc.impfisfac), ''), NULLIF(RTRIM(dv_dev.impfisfac), ''), '')";
+                const devImpfis = "COALESCE(NULLIF(RTRIM(dc.impfis), ''), NULLIF(RTRIM(dv_dev.impfis), ''), '')";
+                const devNroZ = "COALESCE(NULLIF(RTRIM(dc.imp_nro_z), ''), NULLIF(RTRIM(dv_dev.imp_nro_z), ''), '')";
 
                 const docImpfisfac = docCols.has('impfisfac') ? "RTRIM(ISNULL(d.impfisfac, ''))" : "''";
                 const docImpfis = docCols.has('impfis') ? "RTRIM(ISNULL(d.impfis, ''))" : "''";
@@ -193,6 +193,7 @@ router.get('/', async (req, res) => {
                         ISNULL(ret.iva_retenido, 0) AS iva_retenido
                     FROM saFacturaVenta f
                     LEFT JOIN saCliente c ON f.co_cli = c.co_cli
+                    LEFT JOIN saDocumentoVenta dv_fac ON LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(dv_fac.nro_doc)) AND UPPER(RTRIM(dv_fac.co_tipo_doc)) = 'FACT'
                     OUTER APPLY (
                         SELECT 
                             SUM(CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN r.reng_neto ELSE 0 END) AS ventas_exentas,
@@ -221,6 +222,12 @@ router.get('/', async (req, res) => {
                     ) ret
                     WHERE CONVERT(VARCHAR(10), f.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), f.fec_emis, 120) <= @endDate
+                      -- Filtro estricto: Solo documentos fiscales (impresos en maquina fiscal o con debito fiscal / IVA)
+                      AND (
+                          (f.impfisfac IS NOT NULL AND LTRIM(RTRIM(f.impfisfac)) <> '')
+                          OR (dv_fac.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_fac.impfisfac)) <> '')
+                          OR ISNULL(f.monto_imp, 0) > 0
+                      )
                 `;
 
                 // --- 2. DEVOLUCIONES / NOTAS DE CRÉDITO ---
@@ -270,6 +277,7 @@ router.get('/', async (req, res) => {
                         0 AS iva_retenido
                     FROM saDevolucionCliente dc
                     LEFT JOIN saCliente c ON dc.co_cli = c.co_cli
+                    LEFT JOIN saDocumentoVenta dv_dev ON LTRIM(RTRIM(dc.doc_num)) = LTRIM(RTRIM(dv_dev.nro_doc)) AND UPPER(RTRIM(dv_dev.co_tipo_doc)) IN ('N/CR', 'NCR')
                     OUTER APPLY (
                         SELECT 
                             SUM(CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN r.reng_neto ELSE 0 END) AS ventas_exentas,
@@ -284,6 +292,12 @@ router.get('/', async (req, res) => {
                     ) reng
                     WHERE CONVERT(VARCHAR(10), dc.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), dc.fec_emis, 120) <= @endDate
+                      -- Filtro estricto: Solo notas de credito fiscales
+                      AND (
+                          (dc.impfisfac IS NOT NULL AND LTRIM(RTRIM(dc.impfisfac)) <> '')
+                          OR (dv_dev.impfisfac IS NOT NULL AND LTRIM(RTRIM(dv_dev.impfisfac)) <> '')
+                          OR ISNULL(dc.monto_imp, 0) > 0
+                      )
                 `;
 
                 // --- 3. NOTAS DE DÉBITO ---
@@ -336,6 +350,11 @@ router.get('/', async (req, res) => {
                     WHERE UPPER(RTRIM(d.co_tipo_doc)) IN ('N/DB', 'NDEB')
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) <= @endDate
+                      -- Filtro estricto: Solo notas de debito fiscales
+                      AND (
+                          (d.impfisfac IS NOT NULL AND LTRIM(RTRIM(d.impfisfac)) <> '')
+                          OR ISNULL(d.monto_imp, 0) > 0
+                      )
                 `;
 
                 // --- 4. RETENCIONES DE IVA REGISTRADAS COMO DOCUMENTO FISCAL INDEPENDIENTE ---
