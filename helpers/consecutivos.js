@@ -257,6 +257,46 @@ const DOC_TYPE_CONFIG = {
         col: 'nro_doc',
         filter_col: 'co_tipo_doc',
         filter_val: 'ISLR'
+    },
+    DOC_COMPRA_FACT: {
+        co_tipo_serie: 'C001',
+        co_consecutivos: ['DOC_COM_FACT', 'C001', 'FCOM_NUM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'FACT'
+    },
+    DOC_COMPRA_NCR: {
+        co_tipo_serie: 'C018',
+        co_consecutivos: ['DOC_COM_N/CR', 'C018', 'NCR_COM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'N/CR'
+    },
+    DOC_COMPRA_NDB: {
+        co_tipo_serie: 'C019',
+        co_consecutivos: ['DOC_COM_N/DB', 'C019', 'NDB_COM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'N/DB'
+    },
+    C018: {
+        co_tipo_serie: 'C018',
+        co_consecutivos: ['DOC_COM_N/CR', 'C018', 'NCR_COM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'N/CR'
+    },
+    C019: {
+        co_tipo_serie: 'C019',
+        co_consecutivos: ['DOC_COM_N/DB', 'C019', 'NDB_COM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'N/DB'
     }
 };
 

@@ -145,6 +145,8 @@ app.use('/api/v1/notas-despacho',  require('./routes/notas_despacho'));
 app.use('/api/v1/dispatches',      require('./routes/notas_despacho'));
 app.use('/api/v1/facturas-compras', require('./routes/facturas_compras'));
 app.use('/api/v1/purchase-invoices', require('./routes/facturas_compras'));
+app.use('/api/v1/documentos-compra', require('./routes/documentos_compra'));
+app.use('/api/v1/purchase-documents', require('./routes/documentos_compra'));
 app.use('/api/v1/cierre-caja',      require('./routes/cierre_caja'));
 app.use('/api/v1/margenes',         require('./routes/margenes'));
 app.use('/api/v1/margins',          require('./routes/margenes'));

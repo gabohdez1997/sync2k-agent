@@ -196,7 +196,7 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Campos obligatorios: co_cli, renglones' });
     }
 
-    if (Array.isArray(data.renglones)) {
+    if (data.is_contribuyente_especial === true && Array.isArray(data.renglones)) {
         const hasFlete = data.renglones.some(r => {
             const co = String(r.co_art || '').trim().toUpperCase();
             const subl = String(r.co_subl || '').trim().toUpperCase();
@@ -216,7 +216,7 @@ router.post('/', async (req, res) => {
         if (hasFlete && hasCorte) {
             return res.status(400).json({
                 success: false,
-                message: 'No se permite mezclar servicios de Flete y Corte en un mismo pedido. Deben facturarse en pedidos separados debido a la retención de ISLR.'
+                message: 'El cliente es Contribuyente Especial y no se permite mezclar servicios de Flete y Corte en un mismo pedido debido a la retención de ISLR.'
             });
         }
     }
@@ -230,7 +230,7 @@ router.post('/', async (req, res) => {
             pool.request().query(`SELECT TOP 1 RTRIM(co_ven)  AS co_ven  FROM saVendedor`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_cond) AS co_cond FROM saCondicionPago`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
-            pool.request().input('co_cli', sql.Char(16), data.co_cli).query(`SELECT RTRIM(co_mone) as co_mone, RTRIM(cond_pag) as cond_pag, RTRIM(co_ven) as co_ven, RTRIM(co_sucu_in) as co_sucu FROM saCliente WHERE co_cli = @co_cli`),
+            pool.request().input('co_cli', sql.Char(16), data.co_cli).query(`SELECT RTRIM(co_mone) as co_mone, RTRIM(cond_pag) as cond_pag, RTRIM(co_ven) as co_ven, RTRIM(co_sucu_in) as co_sucu, RTRIM(rif) as rif, RTRIM(tipo_per) as tipo_per, contribu_e, porc_esp FROM saCliente WHERE co_cli = @co_cli`),
             pool.request().query(`SELECT TOP 1 RTRIM(tax_id) AS tax_id FROM saTax`),
             pool.request().query(`SELECT TOP 1 tasa_v FROM saTasa WHERE LTRIM(RTRIM(co_mone)) IN ('US$','USD','DOL','$','US') ORDER BY fecha DESC`),
             pool.request().query(`SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr FROM saCuentaIngEgr`),
@@ -238,6 +238,37 @@ router.post('/', async (req, res) => {
         ]);
 
         const cli = resCli.recordset[0] || {};
+
+        // Validar que no se mezclen Flete y Corte si el cliente es Contribuyente Especial
+        const cleanRif = String(cli.rif || data.client?.rif || '').toUpperCase().replace(/[\s.-]/g, '');
+        const cleanCoCli = String(data.co_cli || '').toUpperCase().replace(/[\s.-]/g, '');
+        const isNatural = /^[VEP]\d+$/.test(cleanRif) || /^\d+$/.test(cleanRif) || /^[VEP]\d+$/.test(cleanCoCli) || cli.tipo_per === '1' || cli.tipo_per === '2';
+        const hasSpecialFlag = cli.contribu_e === true || cli.contribu_e === 1 || cli.contribu_e === '1' || String(cli.contribu_e).trim().toLowerCase() === 'true';
+        const porcEsp = Number(cli.porc_esp ?? 0);
+        const isSpecialFromDb = !isNatural && hasSpecialFlag && porcEsp > 0;
+        const isContribuyenteEspecial = data.is_contribuyente_especial !== undefined ? Boolean(data.is_contribuyente_especial) : isSpecialFromDb;
+
+        if (isContribuyenteEspecial && Array.isArray(data.renglones)) {
+            const hasFlete = data.renglones.some(r => {
+                const co = String(r.co_art || '').trim().toUpperCase();
+                const subl = String(r.co_subl || '').trim().toUpperCase();
+                const lin = String(r.co_lin || '').trim().toUpperCase();
+                const des = String(r.art_des || r.des_art || '').trim().toUpperCase();
+                return subl === '0901' || co.startsWith('0901') || co.startsWith('901001') || ((co.startsWith('09') || lin === '09') && des.includes('FLETE'));
+            });
+            const hasCorte = data.renglones.some(r => {
+                const co = String(r.co_art || '').trim().toUpperCase();
+                const subl = String(r.co_subl || '').trim().toUpperCase();
+                const lin = String(r.co_lin || '').trim().toUpperCase();
+                const des = String(r.art_des || r.des_art || '').trim().toUpperCase();
+                const isFlete = subl === '0901' || co.startsWith('0901') || co.startsWith('901001') || ((co.startsWith('09') || lin === '09') && des.includes('FLETE'));
+                return !isFlete && (co.startsWith('09') || lin === '09' || subl.startsWith('09') || co.startsWith('902001') || co.startsWith('902002'));
+            });
+
+            if (hasFlete && hasCorte) {
+                throw new Error('El cliente es Contribuyente Especial y no se permite mezclar servicios de Flete y Corte en un mismo pedido debido a la retención de ISLR.');
+            }
+        }
         const usdCode = resUSD.recordset[0]?.co_mone || 'US$';
         const bsCode   = resMoneda.recordset[0]?.g_moneda || 'BS';
         const defVen   = cli.co_ven   || resVen.recordset[0]?.co_ven     || '01';
