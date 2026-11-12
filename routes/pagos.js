@@ -1465,17 +1465,18 @@ router.post('/', async (req, res) => {
                                     .input('monto', sql.Decimal(18, 5), baseIslr)
                                     .input('monto_reten', sql.Decimal(18, 5), montoReten)
                                     .input('monto_obj', sql.Decimal(18, 5), baseIslr)
+                                    .input('sustraendo', sql.Decimal(18, 5), sustraendo)
                                     .input('porc_retn', sql.Decimal(18, 5), porcIslr)
                                     .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                                     .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                                     .query(`
                                         INSERT INTO saPagoRentenReng (
                                             reng_num, rowguid_reng_cob, co_islr, monto, monto_reten, monto_obj,
-                                            porc_retn, automatica, co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                                            sustraendo, porc_retn, automatica, co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
                                             revisado, trasnfe, rowguid, rowguid_fact
                                         ) VALUES (
                                             @reng_num, @rowguid_reng_cob, @co_islr, @monto, @monto_reten, @monto_obj,
-                                            @porc_retn, 0, @co_us_in, @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(),
+                                            @sustraendo, @porc_retn, 0, @co_us_in, @co_sucu_in, GETDATE(), @co_us_in, @co_sucu_in, GETDATE(),
                                             NULL, NULL, NEWID(), NULL
                                         )
                                     `);
@@ -1490,6 +1491,7 @@ router.post('/', async (req, res) => {
                                 .input('monto', sql.Decimal(18, 5), baseIslr)
                                 .input('monto_reten', sql.Decimal(18, 5), adjustedMontoRetencion)
                                 .input('monto_obj', sql.Decimal(18, 5), baseIslr)
+                                .input('sustraendo', sql.Decimal(18, 5), 0)
                                 .input('porc_retn', sql.Decimal(18, 5), 2)
                                 .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                                 .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
@@ -1506,7 +1508,8 @@ router.post('/', async (req, res) => {
                                 `);
                         }
                     } catch (errIslrReng) {
-                        console.warn('[PAGOS] Error insertando saPagoRentenReng:', errIslrReng.message);
+                        console.error('[PAGOS] Error insertando saPagoRentenReng:', errIslrReng);
+                        throw errIslrReng;
                     }
                 }
             }
