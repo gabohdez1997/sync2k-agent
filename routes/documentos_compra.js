@@ -435,17 +435,18 @@ router.get('/:co_tipo_doc/:nro_doc', async (req, res) => {
         const resPagos = await reqPagos.query(`
             SELECT 
                 RTRIM(p.cob_num) AS cob_num,
-                p.fec_cob,
+                p.fecha AS fec_cob,
+                p.fecha,
                 RTRIM(p.descrip) AS descrip,
                 r.mont_cob,
                 r.monto_retencion_iva,
-                r.monto_retencion_islr,
+                r.monto_retencion AS monto_retencion_islr,
                 p.anulado
             FROM saPagoDocReng r
             INNER JOIN saPago p ON r.cob_num = p.cob_num
             WHERE LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(@nro_doc))
-            ORDER BY p.fec_cob DESC
+            ORDER BY p.fecha DESC
         `);
 
         return res.json({
