@@ -396,7 +396,14 @@ router.get('/:co_tipo_doc/:nro_doc', async (req, res) => {
                 d.total_bruto,
                 d.porc_imp,
                 d.monto_imp,
+                RTRIM(d.porc_desc_glob) AS porc_desc_glob,
+                d.monto_desc_glob,
+                RTRIM(d.porc_reca) AS porc_reca,
+                d.monto_reca,
+                d.otros1 AS otros,
                 d.otros1 AS monto_exento,
+                d.otros2,
+                d.otros3,
                 d.total_neto,
                 d.saldo,
                 RTRIM(d.observa) AS observa,
@@ -491,11 +498,17 @@ router.post('/', async (req, res) => {
         const tasaDoc = Math.max(0.00000001, Number(payload.tasa) || 1);
 
         // Montos financieros en moneda del documento
-        const baseGravada = Math.max(0, Number(payload.total_bruto ?? payload.base_imponible) || 0);
-        const montoExento = Math.max(0, Number(payload.otros1 ?? payload.monto_exento) || 0);
+        const baseGravada = Math.max(0, Number(payload.total_bruto ?? payload.base_imponible ?? payload.monto_bruto) || 0);
+        const porcDescGlob = payload.porc_desc_glob ? String(payload.porc_desc_glob).trim() : '0';
+        const montoDescGlob = Math.max(0, Number(payload.monto_desc_glob) || 0);
+        const porcReca = payload.porc_reca ? String(payload.porc_reca).trim() : null;
+        const montoReca = Math.max(0, Number(payload.monto_reca) || 0);
+        const otrosMonto = Number(payload.otros1 ?? payload.otros ?? 0) || 0;
+        const exentoMonto = Number(payload.monto_exento ?? 0) || 0;
+        const otros1 = Math.max(0, otrosMonto + exentoMonto);
         const porcImp = Math.max(0, Number(payload.porc_imp ?? payload.alicuota_iva ?? 16));
-        const montoImp = Math.max(0, Number(payload.monto_imp ?? payload.monto_iva) || (baseGravada * (porcImp / 100)));
-        const totalNeto = Math.max(0, Number(payload.total_neto) || (baseGravada + montoExento + montoImp));
+        const montoImp = Math.max(0, Number(payload.monto_imp ?? payload.monto_iva) || 0);
+        const totalNeto = Math.max(0, Number(payload.total_neto) || Math.max(0, (baseGravada - montoDescGlob + montoReca) + montoImp + otros1));
         const saldo = totalNeto;
 
         if (totalNeto <= 0) {
@@ -571,13 +584,13 @@ router.post('/', async (req, res) => {
             reqDoc.input('sMov_Ban',         sql.Char(20),       null);
             reqDoc.input('sNro_Orig',        sql.Char(20),       null);
             reqDoc.input('sNro_Che',         sql.Char(20),       null);
-            reqDoc.input('sPorc_Reca',       sql.Char(15),       null);
-            reqDoc.input('sPorc_Desc_Glob',  sql.Char(15),       '0');
+            reqDoc.input('sPorc_Reca',       sql.Char(15),       porcReca);
+            reqDoc.input('sPorc_Desc_Glob',  sql.Char(15),       porcDescGlob);
             reqDoc.input('bAnulado',         sql.Bit,            0);
             reqDoc.input('bAut',             sql.Bit,            0);
             reqDoc.input('iPagar',           sql.Int,            0);
             reqDoc.input('sObserva',         sql.VarChar(120),   observa);
-            reqDoc.input('sTipo_Imp',        sql.Char(1),        '1');
+            reqDoc.input('sTipo_Imp',        sql.Char(1),        porcImp > 0 ? '1' : '5');
             reqDoc.input('sTipo_Imp2',       sql.Char(1),        null);
             reqDoc.input('sTipo_Imp3',       sql.Char(1),        null);
             reqDoc.input('sdFec_Reg',        sql.SmallDateTime,  fecReg);
@@ -592,11 +605,11 @@ router.post('/', async (req, res) => {
             reqDoc.input('deMonto_Imp2',     sql.Decimal(18, 2), 0);
             reqDoc.input('deMonto_Imp3',     sql.Decimal(18, 2), 0);
             reqDoc.input('deTotal_Bruto',    sql.Decimal(18, 2), baseGravada);
-            reqDoc.input('deMonto_Desc_Glob',sql.Decimal(18, 2), 0);
-            reqDoc.input('deMonto_Reca',     sql.Decimal(18, 2), 0);
+            reqDoc.input('deMonto_Desc_Glob',sql.Decimal(18, 2), montoDescGlob);
+            reqDoc.input('deMonto_Reca',     sql.Decimal(18, 2), montoReca);
             reqDoc.input('deSaldo',          sql.Decimal(18, 2), saldo);
             reqDoc.input('deAdicional',      sql.Decimal(18, 2), 0);
-            reqDoc.input('deOtros1',         sql.Decimal(18, 2), montoExento);
+            reqDoc.input('deOtros1',         sql.Decimal(18, 2), otros1);
             reqDoc.input('deOtros2',         sql.Decimal(18, 2), 0);
             reqDoc.input('deOtros3',         sql.Decimal(18, 2), 0);
             reqDoc.input('sPro_Pago',        sql.VarChar(sql.MAX), null);
@@ -654,12 +667,14 @@ router.post('/', async (req, res) => {
             directReq.input('total_bruto',    sql.Decimal(18, 2), baseGravada);
             directReq.input('total_neto',     sql.Decimal(18, 2), totalNeto);
             directReq.input('saldo',          sql.Decimal(18, 2), saldo);
-            directReq.input('otros1',         sql.Decimal(18, 2), montoExento);
+            directReq.input('porc_desc_glob', sql.VarChar(15),  porcDescGlob);
+            directReq.input('monto_desc_glob',sql.Decimal(18, 2), montoDescGlob);
+            directReq.input('porc_reca',      sql.VarChar(15),  porcReca);
+            directReq.input('monto_reca',     sql.Decimal(18, 2), montoReca);
+            directReq.input('otros1',         sql.Decimal(18, 2), otros1);
             directReq.input('otros2',         sql.Decimal(18, 2), 0);
             directReq.input('otros3',         sql.Decimal(18, 2), 0);
             directReq.input('adicional',      sql.Decimal(18, 2), 0);
-            directReq.input('monto_desc_glob',sql.Decimal(18, 2), 0);
-            directReq.input('monto_reca',     sql.Decimal(18, 2), 0);
             directReq.input('reng_ter',       sql.Int, 0);
             directReq.input('tipo_origen',    sql.Int, 0);
             directReq.input('n_control',      sql.Char(20), padProfit(nControl, 20));
@@ -670,7 +685,7 @@ router.post('/', async (req, res) => {
             await directReq.query(`
                 INSERT INTO saDocumentoCompra (
                     co_tipo_doc, nro_doc, nro_fact, co_mone, co_prov, co_cta_ingr_egr,
-                    monto_desc_glob, monto_reca, anulado, aut, pagar, observa, tipo_imp,
+                    porc_desc_glob, monto_desc_glob, porc_reca, monto_reca, anulado, aut, pagar, observa, tipo_imp,
                     fec_reg, fec_emis, fec_venc, porc_imp, porc_imp2, porc_imp3,
                     monto_imp, monto_imp2, monto_imp3, tasa, total_bruto, total_neto,
                     saldo, adicional, otros1, otros2, otros3, reng_ter, tipo_origen,
@@ -678,7 +693,7 @@ router.post('/', async (req, res) => {
                     fe_us_mo, nac
                 ) VALUES (
                     @co_tipo_doc, @nro_doc, @nro_fact, @co_mone, @co_prov, @co_cta_ingr_egr,
-                    @monto_desc_glob, @monto_reca, @anulado, @aut, @pagar, @observa, @tipo_imp,
+                    @porc_desc_glob, @monto_desc_glob, @porc_reca, @monto_reca, @anulado, @aut, @pagar, @observa, @tipo_imp,
                     @fec_reg, @fec_emis, @fec_venc, @porc_imp, @porc_imp2, @porc_imp3,
                     @monto_imp, @monto_imp2, @monto_imp3, @tasa, @total_bruto, @total_neto,
                     @saldo, @adicional, @otros1, @otros2, @otros3, @reng_ter, @tipo_origen,
