@@ -158,6 +158,8 @@ app.use('/api/v1/sales-book',            require('./routes/libro_ventas'));
 app.use('/api/v1/libro-compras',             require('./routes/libro_compras'));
 app.use('/api/v1/reportes/libro-compras',    require('./routes/libro_compras'));
 app.use('/api/v1/purchases-book',            require('./routes/libro_compras'));
+app.use('/api/v1/bancos',                    require('./routes/bancos'));
+app.use('/api/v1/banks',                     require('./routes/bancos'));
 // Manejo de rutas no encontradas (404)
 app.use((req, res) => {
     res.status(404).json({ success: false, message: 'Ruta no encontrada.' });

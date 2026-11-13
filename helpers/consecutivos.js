@@ -297,6 +297,30 @@ const DOC_TYPE_CONFIG = {
         col: 'nro_doc',
         filter_col: 'co_tipo_doc',
         filter_val: 'N/DB'
+    },
+    MOVIMIENTO_BANCO: {
+        co_tipo_serie: 'B002',
+        co_consecutivos: ['MOVB_NUM', 'B002'],
+        table: 'saMovimientoBanco',
+        col: 'mov_num'
+    },
+    B002: {
+        co_tipo_serie: 'B002',
+        co_consecutivos: ['MOVB_NUM', 'B002'],
+        table: 'saMovimientoBanco',
+        col: 'mov_num'
+    },
+    TRANSFERENCIA_BANCARIA: {
+        co_tipo_serie: 'B005',
+        co_consecutivos: ['TRENCU_NUM', 'B005'],
+        table: 'saTransferenciaEntreCuentas',
+        col: 'co_trans_ban'
+    },
+    B005: {
+        co_tipo_serie: 'B005',
+        co_consecutivos: ['TRENCU_NUM', 'B005'],
+        table: 'saTransferenciaEntreCuentas',
+        col: 'co_trans_ban'
     }
 };
 
