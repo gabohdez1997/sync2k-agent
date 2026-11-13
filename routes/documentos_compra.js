@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers } = require('../db');
+const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
@@ -10,6 +10,34 @@ function safeDate(val) {
     if (!val) return null;
     if (val instanceof Date) return val.toISOString().split('T')[0];
     return String(val).split('T')[0];
+}
+
+async function resolveCurrencyAndNac(pool, coMoneInput, coProv) {
+    const rawMone = String(coMoneInput || 'BS').trim().toUpperCase();
+    const wantsUSD = rawMone.includes('US') || rawMone.includes('$') || rawMone === 'DOL';
+
+    const req = pool.request();
+    req.input('co_prov', sql.Char(16), padProfit(coProv, 16));
+
+    const [resParEmp, resUSD, resProv] = await Promise.all([
+        pool.request().query(`SELECT TOP 1 RTRIM(g_moneda) AS g_moneda FROM par_emp`),
+        pool.request().query(`
+            SELECT TOP 1 RTRIM(co_mone) AS co_mone
+            FROM saMoneda
+            WHERE LTRIM(RTRIM(co_mone)) IN ('US$', 'USD', 'DOL', '$', 'US')
+               OR mone_des LIKE '%Dolar%'
+            ORDER BY CASE WHEN LTRIM(RTRIM(co_mone)) = 'USD' THEN 0 WHEN LTRIM(RTRIM(co_mone)) = 'US$' THEN 1 ELSE 2 END
+        `),
+        req.query(`SELECT TOP 1 ISNULL(nacional, 1) AS nacional FROM saProveedor WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov))`)
+    ]);
+
+    const bsCode = resParEmp.recordset[0]?.g_moneda || 'BS';
+    const usdCode = resUSD.recordset[0]?.co_mone || 'USD';
+    const coMone = wantsUSD ? usdCode : bsCode;
+    const provNacional = resProv.recordset[0]?.nacional;
+    const bNac = provNacional === undefined || provNacional === null ? 1 : (provNacional ? 1 : 0);
+
+    return { coMone, isUSD: wantsUSD, bNac };
 }
 
 // =========================================================================
@@ -98,16 +126,29 @@ router.get('/', async (req, res) => {
         const pageNum = Math.max(1, parseInt(page) || 1);
         const limitNum = Math.max(1, Math.min(200, parseInt(limit) || 20));
 
-        let sortCol = 'fec_emis';
-        const allowedSort = ['fec_emis', 'fec_venc', 'nro_doc', 'nro_fact', 'total_neto', 'saldo', 'prov_des'];
-        if (allowedSort.includes(order_by)) {
-            sortCol = order_by;
-        }
+        const sortMap = {
+            'fec_emis': 'd.fec_emis',
+            'fec_venc': 'd.fec_venc',
+            'nro_doc': 'd.nro_doc',
+            'doc_num': 'd.nro_doc',
+            'nro_fact': 'd.nro_fact',
+            'co_tipo_doc': 'd.co_tipo_doc',
+            'prov_des': 'p.prov_des',
+            'proveedor': 'p.prov_des',
+            'total_neto': 'd.total_neto',
+            'monto': 'd.total_neto',
+            'saldo': 'd.saldo',
+            'registrado': 'd.co_us_in',
+            'co_us_in': 'd.co_us_in',
+            'estatus': 'd.anulado'
+        };
+        const sortCol = Object.prototype.hasOwnProperty.call(sortMap, order_by) ? order_by : 'fec_emis';
         const sortDir = String(order_dir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
         const allData = await Promise.all(targets.map(async (srv) => {
             try {
                 const pool = await getPool(srv.id, req.sqlAuth);
+                const currentRate = await getExchangeRate(pool).catch(() => 1);
                 const request = pool.request();
                 let whereClauses = ["1 = 1"];
 
@@ -179,13 +220,7 @@ router.get('/', async (req, res) => {
 
                 const whereSQL = whereClauses.join(" AND ");
 
-                let sqlSort = "d.fec_emis";
-                if (sortCol === 'nro_doc') sqlSort = "d.nro_doc";
-                else if (sortCol === 'nro_fact') sqlSort = "d.nro_fact";
-                else if (sortCol === 'total_neto') sqlSort = "d.total_neto";
-                else if (sortCol === 'saldo') sqlSort = "d.saldo";
-                else if (sortCol === 'fec_venc') sqlSort = "d.fec_venc";
-                else if (sortCol === 'prov_des') sqlSort = "p.prov_des";
+                const sqlSort = sortMap[sortCol] || "d.fec_emis";
 
                 const querySQL = `
                     SELECT 
@@ -210,7 +245,8 @@ router.get('/', async (req, res) => {
                         d.total_bruto,
                         d.porc_imp,
                         d.monto_imp,
-                        d.otros1 AS monto_exento,
+                        ISNULL(d.otros1, 0) AS otros,
+                        ISNULL(d.otros2, 0) AS monto_exento,
                         d.total_neto,
                         d.saldo,
                         RTRIM(d.observa) AS observa,
@@ -239,6 +275,7 @@ router.get('/', async (req, res) => {
                 const result = await request.query(querySQL);
                 return result.recordset.map(r => ({
                     ...r,
+                    tasa_actual: currentRate,
                     sede_id: srv.id,
                     sede_nombre: srv.name
                 }));
@@ -259,16 +296,29 @@ router.get('/', async (req, res) => {
                     res = (Number(a.saldo) || 0) - (Number(b.saldo) || 0);
                     break;
                 case 'total_neto':
+                case 'monto':
                     res = (Number(a.total_neto) || 0) - (Number(b.total_neto) || 0);
                     break;
                 case 'nro_doc':
-                    res = String(a.nro_doc).localeCompare(String(b.nro_doc));
+                case 'doc_num':
+                    res = String(a.nro_doc || '').localeCompare(String(b.nro_doc || ''));
                     break;
                 case 'nro_fact':
-                    res = String(a.nro_fact).localeCompare(String(b.nro_fact));
+                    res = String(a.nro_fact || '').localeCompare(String(b.nro_fact || ''));
+                    break;
+                case 'co_tipo_doc':
+                    res = String(a.co_tipo_doc || '').localeCompare(String(b.co_tipo_doc || ''));
                     break;
                 case 'prov_des':
+                case 'proveedor':
                     res = String(a.prov_des || '').localeCompare(String(b.prov_des || ''));
+                    break;
+                case 'registrado':
+                case 'co_us_in':
+                    res = String(a.co_us_in || '').localeCompare(String(b.co_us_in || ''));
+                    break;
+                case 'estatus':
+                    res = (a.anulado ? 1 : 0) - (b.anulado ? 1 : 0);
                     break;
                 case 'fec_venc':
                     res = new Date(a.fec_venc).getTime() - new Date(b.fec_venc).getTime();
@@ -364,6 +414,7 @@ router.get('/:co_tipo_doc/:nro_doc', async (req, res) => {
         if (!target) return res.status(404).json({ success: false, message: 'Sede no encontrada.' });
 
         const pool = await getPool(target.id, req.sqlAuth);
+        const currentRate = await getExchangeRate(pool).catch(() => 1);
         const reqDoc = pool.request();
         reqDoc.input('co_tipo_doc', sql.Char(6), padProfit(co_tipo_doc, 6));
         reqDoc.input('nro_doc', sql.Char(20), padProfit(nro_doc, 20));
@@ -400,10 +451,10 @@ router.get('/:co_tipo_doc/:nro_doc', async (req, res) => {
                 d.monto_desc_glob,
                 RTRIM(d.porc_reca) AS porc_reca,
                 d.monto_reca,
-                d.otros1 AS otros,
-                d.otros1 AS monto_exento,
-                d.otros2,
-                d.otros3,
+                ISNULL(d.otros1, 0) AS otros,
+                ISNULL(d.otros2, 0) AS monto_exento,
+                ISNULL(d.otros2, 0) AS otros2,
+                ISNULL(d.otros3, 0) AS otros3,
                 d.total_neto,
                 d.saldo,
                 RTRIM(d.observa) AS observa,
@@ -453,6 +504,9 @@ router.get('/:co_tipo_doc/:nro_doc', async (req, res) => {
             success: true,
             data: {
                 ...doc,
+                tasa_actual: currentRate,
+                sede_id: target.id,
+                sede_nombre: target.name,
                 pagos: resPagos.recordset
             }
         });
@@ -495,21 +549,22 @@ router.post('/', async (req, res) => {
         const nControl = payload.n_control && String(payload.n_control).trim() 
             ? String(payload.n_control).trim().substring(0, 20) 
             : 'N/A';
-        const coMone = (payload.co_mone || 'BS').trim().toUpperCase();
         const tasaDoc = Math.max(0.00000001, Number(payload.tasa) || 1);
 
-        // Montos financieros en moneda del documento
+        // Montos financieros en moneda base (BS)
         const baseGravada = Math.max(0, Number(payload.total_bruto ?? payload.base_imponible ?? payload.monto_bruto) || 0);
         const porcDescGlob = payload.porc_desc_glob ? String(payload.porc_desc_glob).trim() : '0';
         const montoDescGlob = Math.max(0, Number(payload.monto_desc_glob) || 0);
         const porcReca = payload.porc_reca ? String(payload.porc_reca).trim() : null;
         const montoReca = Math.max(0, Number(payload.monto_reca) || 0);
         const otrosMonto = Number(payload.otros1 ?? payload.otros ?? 0) || 0;
-        const exentoMonto = Number(payload.monto_exento ?? 0) || 0;
-        const otros1 = Math.max(0, otrosMonto + exentoMonto);
+        const exentoMonto = Number(payload.monto_exento ?? payload.otros2 ?? 0) || 0;
+        const otros1 = Math.max(0, otrosMonto);
+        const otros2 = Math.max(0, exentoMonto);
         const porcImp = Math.max(0, Number(payload.porc_imp ?? payload.alicuota_iva ?? 16));
+        const tipoImp = porcImp > 0 ? (Math.abs(porcImp - 8) < 0.01 ? '2' : '1') : '5';
         const montoImp = Math.max(0, Number(payload.monto_imp ?? payload.monto_iva) || 0);
-        const totalNeto = Math.max(0, Number(payload.total_neto) || Math.max(0, (baseGravada - montoDescGlob + montoReca) + montoImp + otros1));
+        const totalNeto = Math.max(0, Number(payload.total_neto) || Math.max(0, (baseGravada - montoDescGlob + montoReca) + otros2 + montoImp + otros1));
         const saldo = totalNeto;
 
         if (totalNeto <= 0) {
@@ -527,6 +582,7 @@ router.post('/', async (req, res) => {
         if (auditUser.length > 6) auditUser = auditUser.substring(0, 6);
 
         pool = await getPool(srv.id, req.sqlAuth);
+        const { coMone, bNac } = await resolveCurrencyAndNac(pool, payload.co_mone, payload.co_prov);
 
         // Verificar si ya existe un documento activo con este mismo nro_fact para este proveedor
         const checkReq = pool.request();
@@ -591,7 +647,7 @@ router.post('/', async (req, res) => {
             reqDoc.input('bAut',             sql.Bit,            0);
             reqDoc.input('iPagar',           sql.Int,            0);
             reqDoc.input('sObserva',         sql.VarChar(120),   observa);
-            reqDoc.input('sTipo_Imp',        sql.Char(1),        porcImp > 0 ? '1' : '5');
+            reqDoc.input('sTipo_Imp',        sql.Char(1),        tipoImp);
             reqDoc.input('sTipo_Imp2',       sql.Char(1),        null);
             reqDoc.input('sTipo_Imp3',       sql.Char(1),        null);
             reqDoc.input('sdFec_Reg',        sql.SmallDateTime,  fecReg);
@@ -611,7 +667,7 @@ router.post('/', async (req, res) => {
             reqDoc.input('deSaldo',          sql.Decimal(18, 2), saldo);
             reqDoc.input('deAdicional',      sql.Decimal(18, 2), 0);
             reqDoc.input('deOtros1',         sql.Decimal(18, 2), otros1);
-            reqDoc.input('deOtros2',         sql.Decimal(18, 2), 0);
+            reqDoc.input('deOtros2',         sql.Decimal(18, 2), otros2);
             reqDoc.input('deOtros3',         sql.Decimal(18, 2), 0);
             reqDoc.input('sPro_Pago',        sql.VarChar(sql.MAX), null);
             reqDoc.input('sSalestax',        sql.Char(8),        null);
@@ -634,7 +690,7 @@ router.post('/', async (req, res) => {
             reqDoc.input('sco_sucu_in',      sql.Char(6),        padProfit(sucuCode, 6));
             reqDoc.input('sco_us_in',        sql.Char(6),        padProfit(auditUser, 6));
             reqDoc.input('sMaquina',         sql.VarChar(60),    'SYNC2K');
-            reqDoc.input('bNac',             sql.Bit,            coMone === 'BS' ? 1 : 0);
+            reqDoc.input('bNac',             sql.Bit,            bNac);
 
             await reqDoc.execute('pInsertarDocumentoCompra');
             inserted = true;
@@ -654,7 +710,7 @@ router.post('/', async (req, res) => {
             directReq.input('aut',            sql.Bit, 0);
             directReq.input('pagar',          sql.Int, 0);
             directReq.input('observa',        sql.VarChar(120), observa);
-            directReq.input('tipo_imp',       sql.Char(1), '1');
+            directReq.input('tipo_imp',       sql.Char(1), tipoImp);
             directReq.input('fec_reg',        sql.SmallDateTime, fecReg);
             directReq.input('fec_emis',       sql.SmallDateTime, fecEmis);
             directReq.input('fec_venc',       sql.SmallDateTime, fecVenc);
@@ -673,7 +729,7 @@ router.post('/', async (req, res) => {
             directReq.input('porc_reca',      sql.VarChar(15),  porcReca);
             directReq.input('monto_reca',     sql.Decimal(18, 2), montoReca);
             directReq.input('otros1',         sql.Decimal(18, 2), otros1);
-            directReq.input('otros2',         sql.Decimal(18, 2), 0);
+            directReq.input('otros2',         sql.Decimal(18, 2), otros2);
             directReq.input('otros3',         sql.Decimal(18, 2), 0);
             directReq.input('adicional',      sql.Decimal(18, 2), 0);
             directReq.input('reng_ter',       sql.Int, 0);
@@ -681,7 +737,7 @@ router.post('/', async (req, res) => {
             directReq.input('n_control',      sql.Char(20), padProfit(nControl, 20));
             directReq.input('co_us_in',       sql.Char(6), padProfit(auditUser, 6));
             directReq.input('co_sucu_in',     sql.Char(6), padProfit(sucuCode, 6));
-            directReq.input('nac',            sql.Bit, coMone === 'BS' ? 1 : 0);
+            directReq.input('nac',            sql.Bit, bNac);
 
             await directReq.query(`
                 INSERT INTO saDocumentoCompra (
@@ -722,6 +778,241 @@ router.post('/', async (req, res) => {
         }
         console.error('[DOCS COMPRA] Error al registrar documento:', e.message);
         return res.status(500).json({ success: false, message: 'Error al registrar documento: ' + e.message });
+    }
+});
+
+// =========================================================================
+// 4.5 EDITAR DOCUMENTO DE COMPRA DIRECTO (saDocumentoCompra)
+// =========================================================================
+router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
+    let pool = null;
+    let transaction = null;
+
+    try {
+        const { co_tipo_doc, nro_doc } = req.params;
+        const { sede } = req.query;
+        const payload = req.body || {};
+
+        const servers = getServers();
+        const srv = sede ? servers.find(s => s.id === sede) : servers[0];
+        if (!srv) {
+            return res.status(404).json({ success: false, message: `Sede "${sede}" no encontrada.` });
+        }
+
+        const coTipoDoc = String(co_tipo_doc || '').trim().toUpperCase();
+        const nroDoc = String(nro_doc || '').trim();
+        if (!coTipoDoc || !nroDoc) {
+            return res.status(400).json({ success: false, message: 'Tipo y número de documento son obligatorios.' });
+        }
+
+        if (!payload.co_prov || !String(payload.co_prov).trim()) {
+            return res.status(400).json({ success: false, message: 'El código de proveedor es obligatorio.' });
+        }
+        if (!payload.nro_fact || !String(payload.nro_fact).trim()) {
+            return res.status(400).json({ success: false, message: 'El número de factura / documento fiscal del proveedor es obligatorio.' });
+        }
+        if (!payload.fec_emis) {
+            return res.status(400).json({ success: false, message: 'La fecha de emisión es obligatoria.' });
+        }
+
+        pool = await getPool(srv.id, req.sqlAuth);
+
+        // 1. Verificar existencia y restricciones de edición
+        const checkDocReq = pool.request();
+        checkDocReq.input('co_tipo_doc', sql.Char(6), padProfit(coTipoDoc, 6));
+        checkDocReq.input('nro_doc', sql.Char(20), padProfit(nroDoc, 20));
+
+        const resExistingDoc = await checkDocReq.query(`
+            SELECT
+                anulado,
+                saldo,
+                total_neto,
+                RTRIM(doc_orig) AS doc_orig,
+                RTRIM(nro_orig) AS nro_orig
+            FROM saDocumentoCompra
+            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+        `);
+
+        if (resExistingDoc.recordset.length === 0) {
+            return res.status(404).json({ success: false, message: 'Documento no encontrado.' });
+        }
+
+        const existingDoc = resExistingDoc.recordset[0];
+        if (existingDoc.anulado) {
+            return res.status(400).json({ success: false, message: 'No se puede editar un documento anulado.' });
+        }
+        if (existingDoc.doc_orig && existingDoc.doc_orig.trim() === 'FACT') {
+            return res.status(400).json({
+                success: false,
+                message: `Este documento proviene de la Factura de Compra ${existingDoc.nro_orig || ''}. Edítelo desde el módulo de Facturas de Compra.`
+            });
+        }
+        if ((existingDoc.doc_orig && existingDoc.doc_orig.trim() === 'PAGO') || ['IVAN', 'ISLR'].includes(coTipoDoc)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Este documento fue generado automáticamente por una retención o pago. Adminístrelo desde el módulo de Pagos a Proveedores.'
+            });
+        }
+
+        // 2. Verificar que no tenga pagos activos asociados
+        const checkPagosReq = pool.request();
+        checkPagosReq.input('co_tipo_doc', sql.Char(6), padProfit(coTipoDoc, 6));
+        checkPagosReq.input('nro_doc', sql.Char(20), padProfit(nroDoc, 20));
+        const resPagos = await checkPagosReq.query(`
+            SELECT TOP 1 p.cob_num
+            FROM saPagoDocReng r
+            INNER JOIN saPago p ON r.cob_num = p.cob_num
+            WHERE p.anulado = 0
+              AND LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+              AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(@nro_doc))
+        `);
+        if (resPagos.recordset.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `No se puede editar el documento porque tiene pagos activos asociados (Ej. Pago N° ${resPagos.recordset[0].cob_num}).`
+            });
+        }
+
+        const nroFact = String(payload.nro_fact).trim().substring(0, 20);
+        const nControl = payload.n_control && String(payload.n_control).trim()
+            ? String(payload.n_control).trim().substring(0, 20)
+            : 'N/A';
+        const { coMone, bNac } = await resolveCurrencyAndNac(pool, payload.co_mone, payload.co_prov);
+        const tasaDoc = Math.max(0.00000001, Number(payload.tasa) || 1);
+
+        const baseGravada = Math.max(0, Number(payload.total_bruto ?? payload.base_imponible ?? payload.monto_bruto) || 0);
+        const porcDescGlob = payload.porc_desc_glob ? String(payload.porc_desc_glob).trim() : '0';
+        const montoDescGlob = Math.max(0, Number(payload.monto_desc_glob) || 0);
+        const porcReca = payload.porc_reca ? String(payload.porc_reca).trim() : null;
+        const montoReca = Math.max(0, Number(payload.monto_reca) || 0);
+        const otrosMonto = Number(payload.otros1 ?? payload.otros ?? 0) || 0;
+        const exentoMonto = Number(payload.monto_exento ?? payload.otros2 ?? 0) || 0;
+        const otros1 = Math.max(0, otrosMonto);
+        const otros2 = Math.max(0, exentoMonto);
+        const porcImp = Math.max(0, Number(payload.porc_imp ?? payload.alicuota_iva ?? 16));
+        const tipoImp = porcImp > 0 ? (Math.abs(porcImp - 8) < 0.01 ? '2' : '1') : '5';
+        const montoImp = Math.max(0, Number(payload.monto_imp ?? payload.monto_iva) || 0);
+        const totalNeto = Math.max(0, Number(payload.total_neto) || Math.max(0, (baseGravada - montoDescGlob + montoReca) + otros2 + montoImp + otros1));
+
+        if (totalNeto <= 0) {
+            return res.status(400).json({ success: false, message: 'El monto total neto del documento debe ser mayor a 0.' });
+        }
+
+        // 3. Validar duplicado de nro_fact en otro documento del mismo proveedor
+        const dupReq = pool.request();
+        dupReq.input('co_prov', sql.Char(16), padProfit(payload.co_prov, 16));
+        dupReq.input('nro_fact', sql.Char(20), padProfit(nroFact, 20));
+        dupReq.input('co_tipo_doc', sql.Char(6), padProfit(coTipoDoc, 6));
+        dupReq.input('nro_doc', sql.Char(20), padProfit(nroDoc, 20));
+        const resDup = await dupReq.query(`
+            SELECT TOP 1 RTRIM(nro_doc) AS nro_doc
+            FROM saDocumentoCompra
+            WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov))
+              AND LTRIM(RTRIM(nro_fact)) = LTRIM(RTRIM(@nro_fact))
+              AND LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+              AND LTRIM(RTRIM(nro_doc)) <> LTRIM(RTRIM(@nro_doc))
+              AND anulado = 0
+        `);
+        if (resDup.recordset.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `El proveedor ya tiene registrado el documento fiscal N° "${nroFact}" con número interno ${resDup.recordset[0].nro_doc}.`
+            });
+        }
+
+        const fecEmis = safeDate(payload.fec_emis);
+        const fecVenc = safeDate(payload.fec_venc || payload.fec_emis);
+        const fecReg = safeDate(payload.fec_reg || payload.fec_emis);
+        const coCtaIngEgr = payload.co_cta_ingr_egr && String(payload.co_cta_ingr_egr).trim()
+            ? padProfit(String(payload.co_cta_ingr_egr).trim(), 20)
+            : null;
+        const observa = (payload.observa || `${coTipoDoc} N° ${nroFact} - PROV ${payload.co_prov}`).substring(0, 120);
+
+        const sucuCode = (payload.co_sucu_mo || payload.co_sucu_in || '01').trim();
+        let auditUser = req.profitUser || payload.co_us_mo || payload.co_us_in || 'PROFIT';
+        if (auditUser.length > 6) auditUser = auditUser.substring(0, 6);
+
+        transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        const updReq = new sql.Request(transaction);
+        updReq.input('co_tipo_doc',     sql.Char(6),        padProfit(coTipoDoc, 6));
+        updReq.input('nro_doc',         sql.Char(20),       padProfit(nroDoc, 20));
+        updReq.input('co_prov',         sql.Char(16),       padProfit(payload.co_prov, 16));
+        updReq.input('nro_fact',        sql.Char(20),       padProfit(nroFact, 20));
+        updReq.input('n_control',       sql.Char(20),       padProfit(nControl, 20));
+        updReq.input('co_mone',         sql.Char(6),        padProfit(coMone, 6));
+        updReq.input('tasa',            sql.Decimal(21, 8), tasaDoc);
+        updReq.input('fec_emis',        sql.SmallDateTime,  fecEmis);
+        updReq.input('fec_venc',        sql.SmallDateTime,  fecVenc);
+        updReq.input('fec_reg',         sql.SmallDateTime,  fecReg);
+        updReq.input('co_cta_ingr_egr', sql.Char(20),       coCtaIngEgr);
+        updReq.input('observa',         sql.VarChar(120),   observa);
+        updReq.input('total_bruto',     sql.Decimal(18, 2), baseGravada);
+        updReq.input('porc_desc_glob',  sql.VarChar(15),    porcDescGlob);
+        updReq.input('monto_desc_glob', sql.Decimal(18, 2), montoDescGlob);
+        updReq.input('porc_reca',       sql.VarChar(15),    porcReca);
+        updReq.input('monto_reca',      sql.Decimal(18, 2), montoReca);
+        updReq.input('tipo_imp',        sql.Char(1),        tipoImp);
+        updReq.input('porc_imp',        sql.Decimal(18, 5), porcImp);
+        updReq.input('monto_imp',       sql.Decimal(18, 2), montoImp);
+        updReq.input('otros1',          sql.Decimal(18, 2), otros1);
+        updReq.input('otros2',          sql.Decimal(18, 2), otros2);
+        updReq.input('total_neto',      sql.Decimal(18, 2), totalNeto);
+        updReq.input('saldo',           sql.Decimal(18, 2), totalNeto);
+        updReq.input('co_us_mo',        sql.Char(6),        padProfit(auditUser, 6));
+        updReq.input('co_sucu_mo',      sql.Char(6),        padProfit(sucuCode, 6));
+        updReq.input('nac',             sql.Bit,            bNac);
+
+        await updReq.query(`
+            UPDATE saDocumentoCompra
+            SET co_prov = @co_prov,
+                nro_fact = @nro_fact,
+                n_control = @n_control,
+                co_mone = @co_mone,
+                tasa = @tasa,
+                fec_emis = @fec_emis,
+                fec_venc = @fec_venc,
+                fec_reg = @fec_reg,
+                co_cta_ingr_egr = @co_cta_ingr_egr,
+                observa = @observa,
+                total_bruto = @total_bruto,
+                porc_desc_glob = @porc_desc_glob,
+                monto_desc_glob = @monto_desc_glob,
+                porc_reca = @porc_reca,
+                monto_reca = @monto_reca,
+                tipo_imp = @tipo_imp,
+                porc_imp = @porc_imp,
+                monto_imp = @monto_imp,
+                otros1 = @otros1,
+                otros2 = @otros2,
+                total_neto = @total_neto,
+                saldo = @saldo,
+                co_us_mo = @co_us_mo,
+                co_sucu_mo = @co_sucu_mo,
+                fe_us_mo = GETDATE(),
+                nac = @nac
+            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+        `);
+
+        await transaction.commit();
+
+        return res.json({
+            success: true,
+            doc_num: nroDoc,
+            nro_doc: nroDoc,
+            co_tipo_doc: coTipoDoc,
+            nro_fact: nroFact,
+            message: `Documento ${coTipoDoc} ${nroDoc} actualizado con éxito.`
+        });
+    } catch (e) {
+        if (transaction) {
+            try { await transaction.rollback(); } catch (_) {}
+        }
+        console.error('[DOCS COMPRA] Error al actualizar documento:', e.message);
+        return res.status(500).json({ success: false, message: 'Error al actualizar documento: ' + e.message });
     }
 });
 

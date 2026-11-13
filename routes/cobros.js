@@ -560,7 +560,15 @@ router.get('/:cob_num', async (req, res) => {
                     `),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT r.reng_num, RTRIM(r.co_tipo_doc) AS co_tipo_doc, RTRIM(r.nro_doc) AS nro_doc,
-                               r.mont_cob, r.monto_retencion_iva, r.monto_retencion,
+                               CASE
+                                   WHEN UPPER(LTRIM(RTRIM(r.co_tipo_doc))) IN ('AJNM', 'ADEL')
+                                    AND UPPER(LTRIM(RTRIM(ISNULL(d.doc_orig, '')))) IN ('COBRO', 'COB')
+                                    AND LTRIM(RTRIM(ISNULL(d.nro_orig, ''))) = LTRIM(RTRIM(r.cob_num))
+                                    AND r.mont_cob = 0
+                                   THEN ISNULL(d.total_neto, 0)
+                                   ELSE r.mont_cob
+                               END AS mont_cob,
+                               r.monto_retencion_iva, r.monto_retencion,
                                r.rowguid, r.rowguid_reng_ori,
                                ISNULL(d.otros1, 0) AS otros1,
                                ISNULL(d.monto_imp, 0) AS monto_imp,
@@ -1892,12 +1900,17 @@ router.post('/', async (req, res) => {
                     const ajRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
                     const ajRengGuid = ajRengGuidResult.recordset[0].guid;
 
+                    // En Profit Plus (pValidarSaldoDocumentoVenta / VALCON), SaldoReal = total_neto - SUM(saCobroDocReng.mont_cob).
+                    // Para anticipos a favor del cliente (AJNM, isNeg = true), el renglón enlace en el cobro de origen
+                    // se registra con mont_cob = 0.00 (igual que ADEL en Profit), evitando que VALCON ponga su saldo en 0.
+                    const ajRengMontCob = isNeg ? 0.00 : ajMontoBs;
+
                     await transaction.request()
                         .input('reng_num', sql.Int, ajRengNum)
                         .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
                         .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
                         .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
-                        .input('mont_cob', sql.Decimal(18, 2), ajMontoBs)
+                        .input('mont_cob', sql.Decimal(18, 2), ajRengMontCob)
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                         .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                         .input('rowguid', sql.UniqueIdentifier, ajRengGuid)
