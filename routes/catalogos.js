@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sql, getPool, getMasterPool, getServers } = require('../db');
 const { aggregateRead, aggregateUnique, paginatedResponse, executeWrite, writeResponse, padProfit, resolveServer } = require('../helpers/multiSede');
+const { fetchBcvUsdRate, syncBcvRateForPool, runBcvAutoSync, getBcvSchedulerStatus } = require('../helpers/bcvSync');
 
 /**
  * @swagger
@@ -790,63 +791,88 @@ router.get('/tasa/history', async (req, res) => {
  */
 router.post('/tasa', async (req, res) => {
     let { tasa } = req.body;
-    if (!tasa || isNaN(tasa)) {
+    if (!tasa || isNaN(tasa) || Number(tasa) <= 0) {
         return res.status(400).json({ success: false, message: 'Tasa inválida.' });
     }
-    
-    // Aplicar redondeo matemático a 2 decimales para Profit Plus
+
     tasa = Math.round(Number(tasa) * 100) / 100;
+    const user = (req.sqlAuth && req.sqlAuth.user) || req.headers['x-profit-user'] || 'PROFIT';
 
     try {
-        const outcome = await executeWrite(null, req.sqlAuth, async (pool) => {
-            // Verificar qué códigos de moneda existen (USD o US$)
-            const moneRes = await pool.request().query("SELECT co_mone FROM saMoneda WHERE LTRIM(RTRIM(co_mone)) IN ('USD', 'US$')");
-            const codes = moneRes.recordset.map(r => r.co_mone.trim());
-
-            if (codes.length === 0) {
-                throw new Error('No se encontró la moneda USD o US$ en la tabla saMoneda.');
-            }
-
-            for (const code of codes) {
-                // Intentar obtener el usuario de las credenciales SQL (x-sql-auth)
-                let user = 'RECON';
-                if (req.sqlAuth && req.sqlAuth.user) {
-                    user = req.sqlAuth.user;
-                } else {
-                    user = req.headers['x-profit-user'] || 'RECON';
-                }
-
-                await pool.request()
-                    .input('tasa', sql.Decimal(18, 6), tasa)
-                    .input('mone', sql.Char(6), code)
-                    .input('user', sql.VarChar, user)
-                    .query(`
-                        DECLARE @today DATETIME = CONVERT(VARCHAR(10), GETDATE(), 120);
-                        DECLARE @finalUser CHAR(10) = ISNULL(NULLIF(RTRIM(@user), ''), 'RECON');
-
-                        IF EXISTS (SELECT 1 FROM saTasa WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today)
-                        BEGIN
-                            UPDATE saTasa 
-                            SET tasa_v = @tasa, 
-                                tasa_c = @tasa,
-                                co_us_mo = @finalUser,
-                                fe_us_mo = GETDATE()
-                            WHERE LTRIM(RTRIM(co_mone)) = LTRIM(RTRIM(@mone)) AND CONVERT(VARCHAR(10), fecha, 120) = @today
-                        END
-                        ELSE
-                        BEGIN
-                            INSERT INTO saTasa (co_mone, tasa_v, tasa_c, fecha, co_us_in, fe_us_in, co_us_mo, fe_us_mo) 
-                            VALUES (@mone, @tasa, @tasa, GETDATE(), @finalUser, GETDATE(), @finalUser, GETDATE())
-                        END
-                    `);
-            }
-            return { message: 'Tasa actualizada correctamente.' };
+        const outcome = await executeWrite(null, req.sqlAuth, async (pool, srv) => {
+            const syncRes = await syncBcvRateForPool(pool, {
+                bcvRate: tasa,
+                user,
+                sedeName: srv?.name
+            });
+            return {
+                message: syncRes.updated
+                    ? `Nueva tasa registrada correctamente (${syncRes.previousRate ?? 'N/A'} -> ${syncRes.newRate}).`
+                    : `La tasa ya coincide con el último registro (${syncRes.previousRate}).`,
+                ...syncRes
+            };
         });
 
         return writeResponse(res, outcome);
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
     }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/tasa/sync-bcv:
+ *   post:
+ *     summary: Consultar tasa actual del BCV y registrar en saTasa si es diferente a la última registrada
+ *     tags: [Catalogos]
+ *     responses:
+ *       200:
+ *         description: Resultado de la sincronización BCV
+ */
+router.post('/tasa/sync-bcv', async (req, res) => {
+    try {
+        const user = (req.sqlAuth && req.sqlAuth.user) || req.headers['x-profit-user'] || 'PROFIT';
+        const dryRun = Boolean(req.body && req.body.dryRun);
+        const result = await runBcvAutoSync({
+            trigger: dryRun ? 'manual-api-dry-run' : 'manual-api',
+            user,
+            sqlAuth: req.sqlAuth,
+            dryRun
+        });
+
+        if (!result.bcv) {
+            return res.status(502).json({
+                ...result,
+                message: result.error || 'No se pudo obtener la tasa oficial del BCV.'
+            });
+        }
+
+        const anyOk = result.results.some(r => r.success);
+        const allOk = result.results.length > 0 && result.results.every(r => r.success);
+        const status = allOk ? 200 : anyOk ? 207 : 500;
+
+        return res.status(status).json(result);
+    } catch (error) {
+        console.error('[TASA SYNC-BCV] Error:', error.message);
+        return res.status(500).json({ success: false, message: 'Error interno.', error: error.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/v1/catalogos/tasa/sync-bcv/status:
+ *   get:
+ *     summary: Estado del programador automático diario BCV (6:00 AM Caracas)
+ *     tags: [Catalogos]
+ *     responses:
+ *       200:
+ *         description: Estado actual y última ejecución
+ */
+router.get('/tasa/sync-bcv/status', (req, res) => {
+    res.status(200).json({
+        success: true,
+        ...getBcvSchedulerStatus()
+    });
 });
 
 // ── Tasa BCV (scraping directo desde bcv.org.ve) ────────────────────────────
@@ -862,87 +888,26 @@ router.post('/tasa', async (req, res) => {
  */
 router.get('/bcv', async (req, res) => {
     try {
-        const https = require('https');
-
-        const html = await new Promise((resolve, reject) => {
-            const options = {
-                hostname: 'www.bcv.org.ve',
-                port: 443,
-                path: '/',
-                method: 'GET',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'es-ES,es;q=0.9'
-                },
-                rejectUnauthorized: false,
-                timeout: 15000
-            };
-
-            const request = https.request(options, (response) => {
-                let data = '';
-                response.on('data', chunk => data += chunk);
-                response.on('end', () => resolve(data));
-            });
-
-            request.on('error', reject);
-            request.on('timeout', () => {
-                request.destroy();
-                reject(new Error('Timeout al conectar con bcv.org.ve'));
-            });
-
-            request.end();
+        const bcv = await fetchBcvUsdRate();
+        console.log(`[BCV] Tasa USD obtenida: ${bcv.rawTasa} (redondeada: ${bcv.tasa}, ${bcv.metodo})`);
+        res.status(200).json({
+            success: true,
+            tasa: bcv.rawTasa,
+            tasa_redondeada: bcv.tasa,
+            moneda: bcv.moneda,
+            fuente: bcv.fuente,
+            metodo: bcv.metodo,
+            fecha_bcv: bcv.fechaBcv,
+            fecha: bcv.fecha
         });
-
-        let tasa = null;
-        let fuente = null;
-
-        // Buscar: <div id="dolar" ...> ... <strong...> 483,86950000 </strong>
-        const dolarMatch = html.match(/id="dolar"[\s\S]*?<strong[^>]*>\s*([\d.,]+)\s*<\/strong>/);
-        if (dolarMatch && dolarMatch[1]) {
-            let val = dolarMatch[1].trim();
-            if (val.includes('.') && val.includes(',')) {
-                val = val.replace(/\./g, '').replace(',', '.');
-            } else {
-                val = val.replace(',', '.');
-            }
-            tasa = parseFloat(val);
-            fuente = 'id=dolar';
-        }
-
-        // Fallback: buscar "USD" seguido de un strong con cifra
-        if (!tasa) {
-            const usdMatch = html.match(/USD[\s\S]*?<strong[^>]*>\s*([\d.,]+)/i);
-            if (usdMatch && usdMatch[1]) {
-                let val = usdMatch[1].trim();
-                if (val.includes('.') && val.includes(',')) {
-                    val = val.replace(/\./g, '').replace(',', '.');
-                } else {
-                    val = val.replace(',', '.');
-                }
-                tasa = parseFloat(val);
-                fuente = 'fallback-USD';
-            }
-        }
-
-        if (tasa && !isNaN(tasa)) {
-            console.log(`[BCV] Tasa USD obtenida: ${tasa} (${fuente})`);
-            res.status(200).json({
-                success: true,
-                tasa,
-                moneda: 'USD',
-                fuente: 'https://www.bcv.org.ve/',
-                metodo: fuente,
-                fecha: new Date().toISOString()
-            });
-        } else {
+    } catch (error) {
+        if (error.code === 'BCV_PARSE_ERROR') {
             console.warn('[BCV] No se pudo extraer la tasa del HTML');
-            res.status(404).json({
+            return res.status(404).json({
                 success: false,
                 message: 'No se pudo extraer la tasa del dólar de bcv.org.ve.'
             });
         }
-    } catch (error) {
         console.error('[BCV] Error al consultar bcv.org.ve:', error.message);
         res.status(502).json({
             success: false,

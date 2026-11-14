@@ -3,8 +3,9 @@ const STARTUP_AT = Date.now(); // Guard against spurious SIGINT from MINGW64 (Gi
 const express = require('express');
 const cors = require('cors');
 
-// Importar módulo de base de datos
+// Importar módulo de base de datos y sincronización BCV
 const { getServers, initServers, closeAllPools } = require('./db');
+const { startBcvDailyScheduler } = require('./helpers/bcvSync');
 let swaggerRouter = null;
 
 // Las rutas se cargarán bajo demanda (lazy loading) en el bloque de endpoints
@@ -224,6 +225,9 @@ boot().then(() => {
         console.log('🔄 Refrescando cache de sedes (auto-sync)...');
         await initServers();
     }, 5 * 60 * 1000);
+
+    // Programador diario de tasa BCV a las 06:00 AM (America/Caracas)
+    startBcvDailyScheduler();
 }).catch(err => {
     console.error('❌ Error fatal al iniciar el Agente:', err);
     process.exit(1);
