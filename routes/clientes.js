@@ -38,6 +38,17 @@ function inferTipoPerFromRif(rif, currentTipoPer = '1') {
     return current;
 }
 
+function inferTipCliFromTaxId(codeOrRif) {
+    const clean = normalizeTaxId(codeOrRif);
+    if (!clean) return null;
+    const first = clean.charAt(0);
+    if (first === 'V' || first === 'E' || first === 'P' || /^\d+$/.test(clean)) return '01';
+    if (first === 'J') return '02';
+    if (first === 'C') return '03';
+    if (first === 'G') return '04';
+    return null;
+}
+
 function normalizeClienteRetentionFields(data, fallbackRow = null) {
     const effectiveRif = data.rif ?? fallbackRow?.rif ?? '';
     const effectiveCoCli = data.co_cli ?? fallbackRow?.co_cli ?? '';
@@ -261,7 +272,7 @@ async function loadDefaults(pool, srv = null) {
 
     const prefCta = srvDefaults.default_cta_ingr_egr || srv?.default_cta_ingr_egr || (isAldanet ? 'I-001' : '01');
     const prefZon = srvDefaults.default_zone || srv?.default_zone || (isAldanet ? '004' : '01');
-    const prefTip = srvDefaults.default_client_type || srv?.default_client_type || (isAldanet ? 'DET' : '01');
+    const prefTip = srvDefaults.default_client_type || srv?.default_client_type || '01';
     const prefSeg = srvDefaults.default_segment || srv?.default_segment || '01';
     const prefVen = srvDefaults.default_seller || srv?.default_seller || '01';
 
@@ -385,9 +396,19 @@ async function resolveValidClientFks(pool, data, defaults, existingRow = null) {
             }
         }
     }
+    const tipRows = tipRes.recordset || [];
+    const reqTipCli = String(data.tip_cli || '').trim().toUpperCase();
+    const explicitStandardTip = ['01', '02', '03', '04'].includes(reqTipCli) ? reqTipCli : null;
+    const inferredTip = inferTipCliFromTaxId(data.co_cli || data.rif || existingRow?.co_cli || existingRow?.rif);
+
     data.co_mone = resolvedMone || findMatch(monRows, existingRow?.co_mone) || defaults.co_mone;
     data.co_zon = findMatch(zonRes.recordset || [], data.co_zon) || findMatch(zonRes.recordset || [], existingRow?.co_zon) || defaults.co_zon;
-    data.tip_cli = findMatch(tipRes.recordset || [], data.tip_cli) || findMatch(tipRes.recordset || [], existingRow?.tip_cli) || defaults.tip_cli;
+    data.tip_cli =
+        findMatch(tipRows, explicitStandardTip) ||
+        findMatch(tipRows, inferredTip) ||
+        findMatch(tipRows, data.tip_cli) ||
+        findMatch(tipRows, existingRow?.tip_cli) ||
+        defaults.tip_cli;
     data.co_seg = findMatch(segRes.recordset || [], data.co_seg) || findMatch(segRes.recordset || [], existingRow?.co_seg) || defaults.co_seg;
     data.cond_pag = findMatch(condRes.recordset || [], data.cond_pag || data.co_cond) || findMatch(condRes.recordset || [], existingRow?.cond_pag) || defaults.co_cond;
     data.co_cta_ingr_egr = findMatch(ctaRes.recordset || [], data.co_cta_ingr_egr || data.co_cta) || findMatch(ctaRes.recordset || [], existingRow?.co_cta_ingr_egr) || defaults.co_cta;
