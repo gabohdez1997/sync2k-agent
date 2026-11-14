@@ -115,6 +115,16 @@ router.get('/', async (req, res) => {
                            f.total_neto, f.monto_imp, f.total_bruto,
                            ISNULL(f.otros1, 0) AS otros1,
                            ISNULL(d.saldo, 0) AS saldo,
+                           RTRIM(ISNULL(f.n_control, '')) AS n_control,
+                           RTRIM(ISNULL(f.campo1, '')) AS campo1,
+                           RTRIM(ISNULL(f.campo2, '')) AS hka_control,
+                           RTRIM(ISNULL(f.campo3, '')) AS hka_doc_num,
+                           CASE
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(f.dir_ent, ''))), 4) = 'http' THEN LTRIM(RTRIM(f.dir_ent))
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(f.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(f.campo4, '')) + RTRIM(ISNULL(f.campo5, '')) + RTRIM(ISNULL(f.campo6, ''))
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(d.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(d.campo4, '')) + RTRIM(ISNULL(d.campo5, '')) + RTRIM(ISNULL(d.campo6, ''))
+                               ELSE ''
+                           END AS hka_url,
                            RTRIM(f.co_ven) AS co_ven, RTRIM(v.ven_des) AS ven_des, RTRIM(f.co_us_in) AS co_us_in, RTRIM(f.co_sucu_in) AS co_sucu_in
                     FROM saFacturaVenta f
                     LEFT JOIN saDocumentoVenta d ON LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(d.nro_doc)) AND LTRIM(RTRIM(d.co_tipo_doc)) = 'FACT'
@@ -215,6 +225,16 @@ router.get('/:doc_num', async (req, res) => {
                                ISNULL(f.otros1, 0) AS otros1,
                                igtf.base_imponible AS igtf_base, igtf.porc_aplic AS igtf_porc,
                                RTRIM(f.comentario) AS comentario,
+                               RTRIM(ISNULL(f.n_control, '')) AS n_control,
+                               RTRIM(ISNULL(f.campo1, '')) AS campo1,
+                               RTRIM(ISNULL(f.campo2, '')) AS hka_control,
+                               RTRIM(ISNULL(f.campo3, '')) AS hka_doc_num,
+                               CASE
+                                   WHEN LEFT(LTRIM(RTRIM(ISNULL(f.dir_ent, ''))), 4) = 'http' THEN LTRIM(RTRIM(f.dir_ent))
+                                   WHEN LEFT(LTRIM(RTRIM(ISNULL(f.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(f.campo4, '')) + RTRIM(ISNULL(f.campo5, '')) + RTRIM(ISNULL(f.campo6, ''))
+                                   WHEN LEFT(LTRIM(RTRIM(ISNULL(d.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(d.campo4, '')) + RTRIM(ISNULL(d.campo5, '')) + RTRIM(ISNULL(d.campo6, ''))
+                                   ELSE ''
+                               END AS hka_url,
                                RTRIM(cl.rif) AS rif, RTRIM(cl.direc1) AS direc1, 
                                RTRIM(cl.telefonos) AS telefonos, RTRIM(cl.email) AS email,
                                RTRIM(cl.co_zon) AS co_zon, RTRIM(z.zon_des) AS zon_des, 

@@ -81,6 +81,15 @@ router.get('/', async (req, res) => {
                                )
                            ) AS nro_doc,
                            RTRIM(d.n_control) AS n_control,
+                           RTRIM(ISNULL(NULLIF(d.campo1, ''), ISNULL(ncr.campo1, ''))) AS campo1,
+                           RTRIM(ISNULL(NULLIF(d.campo2, ''), ISNULL(ncr.campo2, ''))) AS hka_control,
+                           RTRIM(ISNULL(NULLIF(d.campo3, ''), ISNULL(ncr.campo3, ''))) AS hka_doc_num,
+                           CASE
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(d.dir_ent, ''))), 4) = 'http' THEN LTRIM(RTRIM(d.dir_ent))
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(d.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(d.campo4, '')) + RTRIM(ISNULL(d.campo5, '')) + RTRIM(ISNULL(d.campo6, ''))
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(ncr.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(ncr.campo4, '')) + RTRIM(ISNULL(ncr.campo5, '')) + RTRIM(ISNULL(ncr.campo6, ''))
+                               ELSE ''
+                           END AS hka_url,
                            (
                                SELECT TOP 1 RTRIM(r_orig.num_doc)
                                FROM saDevolucionClienteReng r_orig
@@ -111,6 +120,16 @@ router.get('/', async (req, res) => {
                     FROM saDevolucionCliente d
                     LEFT JOIN saCliente cl ON d.co_cli = cl.co_cli
                     LEFT JOIN saVendedor v ON d.co_ven = v.co_ven
+                    OUTER APPLY (
+                        SELECT TOP 1 nc.campo1, nc.campo2, nc.campo3, nc.campo4, nc.campo5, nc.campo6
+                        FROM saDocumentoVenta nc
+                        WHERE LTRIM(RTRIM(nc.co_tipo_doc)) = 'N/CR'
+                          AND (
+                              (LTRIM(RTRIM(nc.doc_orig)) = 'DEVO' AND LTRIM(RTRIM(nc.nro_orig)) = LTRIM(RTRIM(d.doc_num)))
+                              OR (NULLIF(RTRIM(d.nro_doc), '') IS NOT NULL AND LTRIM(RTRIM(nc.nro_doc)) = LTRIM(RTRIM(d.nro_doc)))
+                          )
+                        ORDER BY nc.fec_emis DESC
+                    ) ncr
                     WHERE ${whereSQL}
                     ORDER BY d.fec_emis DESC, d.doc_num DESC
                 `);
@@ -168,6 +187,15 @@ router.get('/:doc_num', async (req, res) => {
                                    )
                                ) AS nro_doc,
                                RTRIM(d.n_control) AS n_control,
+                           RTRIM(ISNULL(NULLIF(d.campo1, ''), ISNULL(ncr.campo1, ''))) AS campo1,
+                           RTRIM(ISNULL(NULLIF(d.campo2, ''), ISNULL(ncr.campo2, ''))) AS hka_control,
+                           RTRIM(ISNULL(NULLIF(d.campo3, ''), ISNULL(ncr.campo3, ''))) AS hka_doc_num,
+                           CASE
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(d.dir_ent, ''))), 4) = 'http' THEN LTRIM(RTRIM(d.dir_ent))
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(d.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(d.campo4, '')) + RTRIM(ISNULL(d.campo5, '')) + RTRIM(ISNULL(d.campo6, ''))
+                               WHEN LEFT(LTRIM(RTRIM(ISNULL(ncr.campo4, ''))), 4) = 'http' THEN RTRIM(ISNULL(ncr.campo4, '')) + RTRIM(ISNULL(ncr.campo5, '')) + RTRIM(ISNULL(ncr.campo6, ''))
+                               ELSE ''
+                           END AS hka_url,
                             (
                                 SELECT TOP 1 RTRIM(r_orig.num_doc)
                                 FROM saDevolucionClienteReng r_orig
@@ -205,6 +233,16 @@ router.get('/:doc_num', async (req, res) => {
                         LEFT JOIN saVendedor     v  ON d.co_ven  = v.co_ven
                         LEFT JOIN saCondicionPago cd ON d.co_cond = cd.co_cond
                         LEFT JOIN saZona         z  ON cl.co_zon = z.co_zon
+                        OUTER APPLY (
+                            SELECT TOP 1 nc.campo1, nc.campo2, nc.campo3, nc.campo4, nc.campo5, nc.campo6
+                            FROM saDocumentoVenta nc
+                            WHERE LTRIM(RTRIM(nc.co_tipo_doc)) = 'N/CR'
+                              AND (
+                                  (LTRIM(RTRIM(nc.doc_orig)) = 'DEVO' AND LTRIM(RTRIM(nc.nro_orig)) = LTRIM(RTRIM(d.doc_num)))
+                                  OR (NULLIF(RTRIM(d.nro_doc), '') IS NOT NULL AND LTRIM(RTRIM(nc.nro_doc)) = LTRIM(RTRIM(d.nro_doc)))
+                              )
+                            ORDER BY nc.fec_emis DESC
+                        ) ncr
                         WHERE LTRIM(RTRIM(d.doc_num)) = LTRIM(RTRIM(@doc_num))
                     `),
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`
