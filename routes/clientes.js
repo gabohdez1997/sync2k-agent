@@ -113,7 +113,7 @@ function bindClienteInsert(r, data, defaults, ts = new Date(), auditUser = '999'
     r.input('iId', sql.Int, 0);
     r.input('deMont_Cre', sql.Decimal(18, 5), 0);
     r.input('sCo_Mone', sql.Char(6), padProfit(data.co_mone || d.co_mone, 6));
-    r.input('sCond_Pag', sql.Char(6), padProfit('01', 6));
+    r.input('sCond_Pag', sql.Char(6), padProfit(data.cond_pag || data.co_cond || d.co_cond || '01', 6));
     r.input('iPlaz_pag', sql.Int, 0);
     r.input('deDesc_ppago', sql.Decimal(18, 5), 0);
     r.input('deDesc_Glob', sql.Decimal(18, 5), 0);
@@ -194,8 +194,8 @@ function bindClienteUpdate(r, data, row, ts = new Date(), auditUser = '999', def
     r.input('iPuntaje', sql.Int, 0);
     r.input('iId', sql.Int, 0);
     r.input('deMont_cre', sql.Decimal(18, 5), 0);
-    r.input('sCo_Mone', sql.Char(6), data.co_mone || row.co_mone);
-    r.input('sCond_Pag', sql.Char(6), '01');
+    r.input('sCo_Mone', sql.Char(6), padProfit(data.co_mone || row.co_mone, 6));
+    r.input('sCond_Pag', sql.Char(6), padProfit(data.cond_pag || data.co_cond || row.cond_pag || defaults?.co_cond || '01', 6));
     r.input('iPlaz_pag', sql.Int, 0);
     r.input('deDesc_ppago', sql.Decimal(18, 5), 0);
     r.input('deDesc_Glob', sql.Decimal(18, 5), 0);
@@ -281,7 +281,7 @@ async function loadDefaults(pool, srv = null) {
         pool.request()
             .input('prefTip', sql.VarChar(6), prefTip)
             .query("SELECT TOP 1 RTRIM(tip_cli) AS id FROM saTipoCliente ORDER BY CASE WHEN RTRIM(tip_cli) = @prefTip THEN 0 WHEN RTRIM(tip_cli) = '01' THEN 1 ELSE 2 END, tip_cli"),
-        pool.request().query("SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN co_mone IN ('BS','VES','BSF') THEN 0 ELSE 1 END, co_mone"),
+        pool.request().query(`SELECT TOP 1 RTRIM(co_mone) AS id FROM saMoneda ORDER BY CASE WHEN RTRIM(co_mone) IN (${isAldanet ? "'USD','US$','BS'" : "'BS','VES','BSF'"}) THEN 0 ELSE 1 END, co_mone`),
         pool.request().query('SELECT TOP 1 RTRIM(co_cond) AS id FROM saCondicionPago'),
         pool.request().query("SELECT TOP 1 RTRIM(co_sucur) AS id FROM saSucursal ORDER BY CASE WHEN RTRIM(co_sucur) = '01' THEN 0 ELSE 1 END, co_sucur")
     ]);
@@ -344,6 +344,53 @@ async function resolveActiveCoVen(pool, requestedVen, defaultVen, auditUser) {
     }
 
     return (auditUser || '01').substring(0, 6);
+}
+
+/**
+ * Valida y resuelve las llaves foráneas del cliente contra los catálogos reales de la sede
+ * (ej. mapeo de alias de moneda US$ <-> USD) para evitar conflictos de FK en Profit Plus.
+ */
+async function resolveValidClientFks(pool, data, defaults, existingRow = null) {
+    const [monRes, zonRes, tipRes, segRes, condRes, ctaRes] = await Promise.all([
+        pool.request().query('SELECT RTRIM(co_mone) AS id FROM saMoneda'),
+        pool.request().query('SELECT RTRIM(co_zon) AS id FROM saZona'),
+        pool.request().query('SELECT RTRIM(tip_cli) AS id FROM saTipoCliente'),
+        pool.request().query('SELECT RTRIM(co_seg) AS id FROM saSegmento'),
+        pool.request().query('SELECT RTRIM(co_cond) AS id FROM saCondicionPago'),
+        pool.request().query('SELECT RTRIM(co_cta_ingr_egr) AS id FROM saCuentaIngEgr')
+    ]);
+
+    const findMatch = (rows, val) => {
+        if (!val) return null;
+        const clean = String(val).trim().toUpperCase();
+        const found = rows.find(r => String(r.id || '').trim().toUpperCase() === clean);
+        return found ? String(found.id).trim() : null;
+    };
+
+    const monRows = monRes.recordset || [];
+    let resolvedMone = findMatch(monRows, data.co_mone);
+    if (!resolvedMone && data.co_mone) {
+        const reqMone = String(data.co_mone).trim().toUpperCase();
+        const usdAliases = ['US$', 'USD', 'DOL', '$', 'US'];
+        const bsAliases = ['BS', 'VES', 'BSF', 'BSS'];
+        if (usdAliases.includes(reqMone)) {
+            for (const alias of usdAliases) {
+                resolvedMone = findMatch(monRows, alias);
+                if (resolvedMone) break;
+            }
+        } else if (bsAliases.includes(reqMone)) {
+            for (const alias of bsAliases) {
+                resolvedMone = findMatch(monRows, alias);
+                if (resolvedMone) break;
+            }
+        }
+    }
+    data.co_mone = resolvedMone || findMatch(monRows, existingRow?.co_mone) || defaults.co_mone;
+    data.co_zon = findMatch(zonRes.recordset || [], data.co_zon) || findMatch(zonRes.recordset || [], existingRow?.co_zon) || defaults.co_zon;
+    data.tip_cli = findMatch(tipRes.recordset || [], data.tip_cli) || findMatch(tipRes.recordset || [], existingRow?.tip_cli) || defaults.tip_cli;
+    data.co_seg = findMatch(segRes.recordset || [], data.co_seg) || findMatch(segRes.recordset || [], existingRow?.co_seg) || defaults.co_seg;
+    data.cond_pag = findMatch(condRes.recordset || [], data.cond_pag || data.co_cond) || findMatch(condRes.recordset || [], existingRow?.cond_pag) || defaults.co_cond;
+    data.co_cta_ingr_egr = findMatch(ctaRes.recordset || [], data.co_cta_ingr_egr || data.co_cta) || findMatch(ctaRes.recordset || [], existingRow?.co_cta_ingr_egr) || defaults.co_cta;
 }
 
 /**
@@ -738,10 +785,13 @@ router.post('/', async (req, res) => {
             const r = new sql.Request(pool);
             let auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
-            // Resolver vendedor activo: prioridad al configurado por sede, fallback a default/'01'
-            data.co_ven = await resolveActiveCoVen(pool, data.co_ven, defaults.co_ven, auditUser);
+            const payload = { ...data };
 
-            bindClienteInsert(r, data, defaults, new Date(), auditUser);
+            // Resolver vendedor activo: prioridad al configurado por sede, fallback a default/'01'
+            payload.co_ven = await resolveActiveCoVen(pool, payload.co_ven, defaults.co_ven, auditUser);
+            await resolveValidClientFks(pool, payload, defaults);
+
+            bindClienteInsert(r, payload, defaults, new Date(), auditUser);
             await r.execute('pInsertarCliente');
         });
 
@@ -799,28 +849,32 @@ router.put('/:co_cli', async (req, res) => {
             const r = new sql.Request(pool);
             const auditUser = (req.profitUser || req.sqlAuth?.user || '01').substring(0, 10).toUpperCase();
 
+            const payload = { ...data };
+
             // Resolver vendedor activo: prioridad al configurado por sede, luego al previo si está activo, fallback a default/'01'
-            data.co_ven = await resolveActiveCoVen(pool, data.co_ven, row.co_ven || defaults.co_ven, auditUser);
+            payload.co_ven = await resolveActiveCoVen(pool, payload.co_ven, row.co_ven || defaults.co_ven, auditUser);
+            await resolveValidClientFks(pool, payload, defaults, row);
 
             // ── DIAGNÓSTICO COMPLETO DEL PAYLOAD ────────────────────────────
             console.log('[PUT DEBUG] ══ INICIO ACTUALIZACIÓN CLIENTE ══');
             console.log('[PUT DEBUG] co_cli:', co_cli);
-            console.log('[PUT DEBUG] row.co_ven:', JSON.stringify(row.co_ven), '| resolved co_ven:', JSON.stringify(data.co_ven));
+            console.log('[PUT DEBUG] row.co_ven:', JSON.stringify(row.co_ven), '| resolved co_ven:', JSON.stringify(payload.co_ven));
             console.log('[PUT DEBUG] validador:', Buffer.isBuffer(row.validador) ? `Buffer(${row.validador.length})` : row.validador);
             console.log('[PUT DEBUG] PAYLOAD COMPLETO (data):', JSON.stringify({
-                cli_des: data.cli_des || data.descripcion,
-                rif: data.rif,
-                telefonos: data.telefonos,
-                email: data.email,
-                direc1: data.direc1,
-                co_zon: data.co_zon,
-                co_ven: data.co_ven,
-                contribuyente: data.contribuyente,
-                contribu_e: data.contribu_e,
-                porc_esp: data.porc_esp
+                cli_des: payload.cli_des || payload.descripcion,
+                rif: payload.rif,
+                telefonos: payload.telefonos,
+                email: payload.email,
+                direc1: payload.direc1,
+                co_zon: payload.co_zon,
+                co_ven: payload.co_ven,
+                co_mone: payload.co_mone,
+                contribuyente: payload.contribuyente,
+                contribu_e: payload.contribu_e,
+                porc_esp: payload.porc_esp
             }));
 
-            bindClienteUpdate(r, data, row, new Date(), auditUser, defaults);
+            bindClienteUpdate(r, payload, row, new Date(), auditUser, defaults);
             await r.execute('pActualizarCliente');
         });
 
