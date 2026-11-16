@@ -94,6 +94,114 @@ router.get('/cuentas', async (req, res) => {
     }
 });
 
+/**
+ * Verifica si un número de documento de proveedor ya existe registrado en CUALQUIER sucursal
+ * para el RIF del proveedor (o por código de proveedor).
+ */
+async function checkDuplicateAcrossBranches({ currentSedeId, coProv, rif, nroFact, excludeNroDoc, sqlAuth }) {
+    const cleanNroFact = String(nroFact || '').trim();
+    if (!cleanNroFact) return null;
+
+    let cleanRif = String(rif || '').toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+    const cleanCoProv = String(coProv || '').trim();
+
+    // Si no tenemos el RIF del proveedor pero sí su código, obtenerlo de la sede actual
+    if (!cleanRif && cleanCoProv && currentSedeId) {
+        try {
+            const currentPool = await getPool(currentSedeId, sqlAuth);
+            const rProv = await currentPool.request()
+                .input('co_prov', sql.Char(16), padProfit(cleanCoProv, 16))
+                .query(`SELECT TOP 1 RTRIM(rif) AS rif FROM saProveedor WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov))`);
+            if (rProv.recordset.length > 0 && rProv.recordset[0].rif) {
+                cleanRif = String(rProv.recordset[0].rif).toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+            }
+        } catch (e) {
+            console.warn('[DOCS COMPRA] No se pudo obtener RIF para checkDuplicate:', e.message);
+        }
+    }
+
+    if (!cleanRif && !cleanCoProv) return null;
+
+    const servers = getServers();
+    for (const srv of servers) {
+        try {
+            const srvPool = await getPool(srv.id, sqlAuth);
+            const isCurrent = currentSedeId && String(srv.id).toLowerCase() === String(currentSedeId).toLowerCase();
+            const excludeDoc = (isCurrent && excludeNroDoc) ? String(excludeNroDoc).trim() : '';
+
+            const reqCheck = srvPool.request();
+            reqCheck.input('nro_fact', sql.Char(20), padProfit(cleanNroFact, 20));
+            reqCheck.input('clean_rif', sql.VarChar(30), cleanRif);
+            reqCheck.input('co_prov', sql.Char(16), padProfit(cleanCoProv, 16));
+            reqCheck.input('is_current_edit', sql.Bit, excludeDoc ? 1 : 0);
+            reqCheck.input('nro_doc_exclude', sql.Char(20), padProfit(excludeDoc, 20));
+
+            const resCheck = await reqCheck.query(`
+                SELECT TOP 1 
+                    RTRIM(d.nro_doc) AS nro_doc,
+                    RTRIM(d.co_tipo_doc) AS co_tipo_doc,
+                    RTRIM(d.nro_fact) AS nro_fact,
+                    RTRIM(d.co_prov) AS co_prov,
+                    RTRIM(p.prov_des) AS prov_des,
+                    RTRIM(p.rif) AS rif,
+                    d.fec_emis,
+                    d.total_neto
+                FROM saDocumentoCompra d
+                LEFT JOIN saProveedor p ON LTRIM(RTRIM(d.co_prov)) = LTRIM(RTRIM(p.co_prov))
+                WHERE LTRIM(RTRIM(d.nro_fact)) = LTRIM(RTRIM(@nro_fact))
+                  AND d.anulado = 0
+                  AND (
+                      (@clean_rif <> '' AND REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(UPPER(ISNULL(p.rif, '')))), '-', ''), '.', ''), ' ', ''), '/', '') = @clean_rif)
+                      OR (@co_prov <> '' AND LTRIM(RTRIM(d.co_prov)) = LTRIM(RTRIM(@co_prov)))
+                  )
+                  AND NOT (@is_current_edit = 1 AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(@nro_doc_exclude)))
+            `);
+
+            if (resCheck.recordset.length > 0) {
+                const match = resCheck.recordset[0];
+                return {
+                    branch_id: srv.id,
+                    branch_name: srv.name || srv.business_name || srv.id,
+                    nro_doc: match.nro_doc,
+                    co_tipo_doc: match.co_tipo_doc,
+                    nro_fact: match.nro_fact,
+                    co_prov: match.co_prov,
+                    prov_des: match.prov_des || match.co_prov,
+                    rif: match.rif || cleanRif,
+                    fec_emis: match.fec_emis ? String(match.fec_emis).split('T')[0] : null,
+                    total_neto: match.total_neto
+                };
+            }
+        } catch (errBranch) {
+            console.warn(`[DOCS COMPRA] Error al verificar duplicados en sede ${srv.name || srv.id}:`, errBranch.message);
+        }
+    }
+
+    return null;
+}
+
+// Endpoint para verificar duplicados entre sucursales
+router.get('/check-duplicate', async (req, res) => {
+    try {
+        const { sede, co_prov, rif, nro_fact, exclude_doc } = req.query;
+        if (!nro_fact || (!co_prov && !rif)) {
+            return res.json({ success: true, duplicate: null });
+        }
+        const duplicate = await checkDuplicateAcrossBranches({
+            currentSedeId: sede,
+            coProv: co_prov,
+            rif: rif,
+            nroFact: nro_fact,
+            excludeNroDoc: exclude_doc,
+            sqlAuth: req.sqlAuth
+        });
+        return res.json({ success: true, duplicate });
+    } catch (e) {
+        console.error('[DOCS COMPRA] Error al consultar duplicados entre sucursales:', e.message);
+        return res.status(500).json({ success: false, message: e.message });
+    }
+});
+
 // =========================================================================
 // 2. LISTAR DOCUMENTOS DE COMPRA (saDocumentoCompra) CON FILTROS Y PERMISOS
 // =========================================================================
@@ -576,6 +684,13 @@ router.post('/', async (req, res) => {
         const fecVenc = safeDate(payload.fec_venc || payload.fec_emis);
         const fecReg = safeDate(payload.fec_reg || payload.fec_emis);
 
+        if (fecReg && fecEmis && fecReg < fecEmis) {
+            return res.status(400).json({ success: false, message: 'La fecha de registro no puede ser menor a la fecha de emisión.' });
+        }
+        if (fecVenc && fecEmis && fecVenc < fecEmis) {
+            return res.status(400).json({ success: false, message: 'La fecha de vencimiento no puede ser menor a la fecha de emisión.' });
+        }
+
         // Sucursal y auditoría
         const sucuCode = (payload.co_sucu_in || '01').trim();
         let auditUser = req.profitUser || payload.co_us_in || 'PROFIT';
@@ -584,25 +699,21 @@ router.post('/', async (req, res) => {
         pool = await getPool(srv.id, req.sqlAuth);
         const { coMone, bNac } = await resolveCurrencyAndNac(pool, payload.co_mone, payload.co_prov);
 
-        // Verificar si ya existe un documento activo con este mismo nro_fact para este proveedor
-        const checkReq = pool.request();
-        checkReq.input('co_prov', sql.Char(16), padProfit(payload.co_prov, 16));
-        checkReq.input('nro_fact', sql.Char(20), padProfit(nroFact, 20));
-        checkReq.input('co_tipo_doc', sql.Char(6), padProfit(coTipoDoc, 6));
+        // Verificar si ya existe un documento activo con este mismo nro_fact para este proveedor en CUALQUIER sucursal
+        const dup = await checkDuplicateAcrossBranches({
+            currentSedeId: srv.id,
+            coProv: payload.co_prov,
+            rif: payload.rif,
+            nroFact: nroFact,
+            excludeNroDoc: null,
+            sqlAuth: req.sqlAuth
+        });
 
-        const existing = await checkReq.query(`
-            SELECT TOP 1 RTRIM(nro_doc) AS nro_doc, anulado 
-            FROM saDocumentoCompra 
-            WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov))
-              AND LTRIM(RTRIM(nro_fact)) = LTRIM(RTRIM(@nro_fact))
-              AND LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-              AND anulado = 0
-        `);
-
-        if (existing.recordset.length > 0) {
+        if (dup) {
+            const sedeText = dup.branch_id === srv.id ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
             return res.status(400).json({
                 success: false,
-                message: `El proveedor ya tiene registrado el documento fiscal N° "${nroFact}" con número interno ${existing.recordset[0].nro_doc}.`
+                message: `El documento fiscal N° "${nroFact}" ya fue registrado en ${sedeText} para el proveedor ${dup.prov_des} (RIF: ${dup.rif || dup.co_prov}) con el documento interno ${dup.co_tipo_doc} #${dup.nro_doc}.`
             });
         }
 
@@ -909,31 +1020,33 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
             return res.status(400).json({ success: false, message: 'El monto total neto del documento debe ser mayor a 0.' });
         }
 
-        // 3. Validar duplicado de nro_fact en otro documento del mismo proveedor
-        const dupReq = pool.request();
-        dupReq.input('co_prov', sql.Char(16), padProfit(payload.co_prov, 16));
-        dupReq.input('nro_fact', sql.Char(20), padProfit(nroFact, 20));
-        dupReq.input('co_tipo_doc', sql.Char(6), padProfit(coTipoDoc, 6));
-        dupReq.input('nro_doc', sql.Char(20), padProfit(nroDoc, 20));
-        const resDup = await dupReq.query(`
-            SELECT TOP 1 RTRIM(nro_doc) AS nro_doc
-            FROM saDocumentoCompra
-            WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov))
-              AND LTRIM(RTRIM(nro_fact)) = LTRIM(RTRIM(@nro_fact))
-              AND LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-              AND LTRIM(RTRIM(nro_doc)) <> LTRIM(RTRIM(@nro_doc))
-              AND anulado = 0
-        `);
-        if (resDup.recordset.length > 0) {
+        // 3. Validar duplicado de nro_fact en todas las sucursales para este proveedor
+        const dup = await checkDuplicateAcrossBranches({
+            currentSedeId: target.id,
+            coProv: payload.co_prov,
+            rif: payload.rif,
+            nroFact: nroFact,
+            excludeNroDoc: nroDoc,
+            sqlAuth: req.sqlAuth
+        });
+        if (dup) {
+            const sedeText = dup.branch_id === target.id ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
             return res.status(400).json({
                 success: false,
-                message: `El proveedor ya tiene registrado el documento fiscal N° "${nroFact}" con número interno ${resDup.recordset[0].nro_doc}.`
+                message: `El documento fiscal N° "${nroFact}" ya fue registrado en ${sedeText} para el proveedor ${dup.prov_des} (RIF: ${dup.rif || dup.co_prov}) con el documento interno ${dup.co_tipo_doc} #${dup.nro_doc}.`
             });
         }
 
         const fecEmis = safeDate(payload.fec_emis);
         const fecVenc = safeDate(payload.fec_venc || payload.fec_emis);
         const fecReg = safeDate(payload.fec_reg || payload.fec_emis);
+
+        if (fecReg && fecEmis && fecReg < fecEmis) {
+            return res.status(400).json({ success: false, message: 'La fecha de registro no puede ser menor a la fecha de emisión.' });
+        }
+        if (fecVenc && fecEmis && fecVenc < fecEmis) {
+            return res.status(400).json({ success: false, message: 'La fecha de vencimiento no puede ser menor a la fecha de emisión.' });
+        }
         const coCtaIngEgr = payload.co_cta_ingr_egr && String(payload.co_cta_ingr_egr).trim()
             ? padProfit(String(payload.co_cta_ingr_egr).trim(), 20)
             : null;
