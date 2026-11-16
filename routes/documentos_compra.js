@@ -625,6 +625,12 @@ router.post('/', async (req, res) => {
         const coCtaIngEgr = payload.co_cta_ingr_egr && String(payload.co_cta_ingr_egr).trim()
             ? padProfit(String(payload.co_cta_ingr_egr).trim(), 20)
             : null;
+        const docOrig = payload.doc_orig && String(payload.doc_orig).trim()
+            ? padProfit(String(payload.doc_orig).trim(), 6)
+            : null;
+        const nroOrig = payload.nro_orig && String(payload.nro_orig).trim()
+            ? padProfit(String(payload.nro_orig).trim(), 20)
+            : null;
         const observa = (payload.observa || `${coTipoDoc} N° ${nroFact} - PROV ${payload.co_prov}`).substring(0, 120);
 
         // 1. Intentar ejecución vía Stored Procedure oficial de Profit
@@ -637,9 +643,9 @@ router.post('/', async (req, res) => {
             reqDoc.input('sCo_Mone',         sql.Char(6),        padProfit(coMone, 6));
             reqDoc.input('sCo_Prov',         sql.Char(16),       padProfit(payload.co_prov, 16));
             reqDoc.input('sCo_Cta_Ingr_Egr', sql.Char(20),       coCtaIngEgr);
-            reqDoc.input('sDoc_Orig',        sql.Char(6),        null);
+            reqDoc.input('sDoc_Orig',        sql.Char(6),        docOrig);
             reqDoc.input('sMov_Ban',         sql.Char(20),       null);
-            reqDoc.input('sNro_Orig',        sql.Char(20),       null);
+            reqDoc.input('sNro_Orig',        sql.Char(20),       nroOrig);
             reqDoc.input('sNro_Che',         sql.Char(20),       null);
             reqDoc.input('sPorc_Reca',       sql.Char(15),       porcReca);
             reqDoc.input('sPorc_Desc_Glob',  sql.Char(15),       porcDescGlob);
@@ -706,6 +712,8 @@ router.post('/', async (req, res) => {
             directReq.input('co_mone',        sql.Char(6), padProfit(coMone, 6));
             directReq.input('co_prov',        sql.Char(16), padProfit(payload.co_prov, 16));
             directReq.input('co_cta_ingr_egr',sql.Char(20), coCtaIngEgr);
+            directReq.input('doc_orig',       sql.Char(6),  docOrig);
+            directReq.input('nro_orig',       sql.Char(20), nroOrig);
             directReq.input('anulado',        sql.Bit, 0);
             directReq.input('aut',            sql.Bit, 0);
             directReq.input('pagar',          sql.Int, 0);
@@ -742,6 +750,7 @@ router.post('/', async (req, res) => {
             await directReq.query(`
                 INSERT INTO saDocumentoCompra (
                     co_tipo_doc, nro_doc, nro_fact, co_mone, co_prov, co_cta_ingr_egr,
+                    doc_orig, nro_orig,
                     porc_desc_glob, monto_desc_glob, porc_reca, monto_reca, anulado, aut, pagar, observa, tipo_imp,
                     fec_reg, fec_emis, fec_venc, porc_imp, porc_imp2, porc_imp3,
                     monto_imp, monto_imp2, monto_imp3, tasa, total_bruto, total_neto,
@@ -750,6 +759,7 @@ router.post('/', async (req, res) => {
                     fe_us_mo, nac
                 ) VALUES (
                     @co_tipo_doc, @nro_doc, @nro_fact, @co_mone, @co_prov, @co_cta_ingr_egr,
+                    @doc_orig, @nro_orig,
                     @porc_desc_glob, @monto_desc_glob, @porc_reca, @monto_reca, @anulado, @aut, @pagar, @observa, @tipo_imp,
                     @fec_reg, @fec_emis, @fec_venc, @porc_imp, @porc_imp2, @porc_imp3,
                     @monto_imp, @monto_imp2, @monto_imp3, @tasa, @total_bruto, @total_neto,
@@ -927,6 +937,12 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
         const coCtaIngEgr = payload.co_cta_ingr_egr && String(payload.co_cta_ingr_egr).trim()
             ? padProfit(String(payload.co_cta_ingr_egr).trim(), 20)
             : null;
+        const docOrig = payload.doc_orig && String(payload.doc_orig).trim()
+            ? padProfit(String(payload.doc_orig).trim(), 6)
+            : null;
+        const nroOrig = payload.nro_orig && String(payload.nro_orig).trim()
+            ? padProfit(String(payload.nro_orig).trim(), 20)
+            : null;
         const observa = (payload.observa || `${coTipoDoc} N° ${nroFact} - PROV ${payload.co_prov}`).substring(0, 120);
 
         const sucuCode = (payload.co_sucu_mo || payload.co_sucu_in || '01').trim();
@@ -942,6 +958,8 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
         updReq.input('co_prov',         sql.Char(16),       padProfit(payload.co_prov, 16));
         updReq.input('nro_fact',        sql.Char(20),       padProfit(nroFact, 20));
         updReq.input('n_control',       sql.Char(20),       padProfit(nControl, 20));
+        updReq.input('doc_orig',        sql.Char(6),        docOrig);
+        updReq.input('nro_orig',        sql.Char(20),       nroOrig);
         updReq.input('co_mone',         sql.Char(6),        padProfit(coMone, 6));
         updReq.input('tasa',            sql.Decimal(21, 8), tasaDoc);
         updReq.input('fec_emis',        sql.SmallDateTime,  fecEmis);
@@ -970,6 +988,8 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
             SET co_prov = @co_prov,
                 nro_fact = @nro_fact,
                 n_control = @n_control,
+                doc_orig = @doc_orig,
+                nro_orig = @nro_orig,
                 co_mone = @co_mone,
                 tasa = @tasa,
                 fec_emis = @fec_emis,
