@@ -981,25 +981,49 @@ router.get('/:cob_num', async (req, res) => {
                 }
 
                 // Normalización de comprobantes ISLR existentes
-                if (finalRetIslr.length > 0 && resReng.recordset) {
+                if (finalRetIslr.length > 0) {
                     finalRetIslr.forEach(r => {
-                        const matchedFact = resReng.recordset.find(f => 
-                            (r.rowguid_reng_cob && f.rowguid === r.rowguid_reng_cob) ||
-                            (f.nro_doc && (f.nro_doc === r.nro_doc || f.nro_fact === r.nro_doc)) ||
-                            (f.nro_fact && (f.nro_fact === r.nro_fact || f.nro_doc === r.nro_fact))
-                        );
-                        if (matchedFact) {
-                            const exentoVal = Number(matchedFact.monto_exento || matchedFact.exento_reng || matchedFact.otros1 || 0);
-                            const retMonto = Number(r.monto_reten || 0);
-                            const isFlete = (r.co_islr === '072') || (exentoVal > 0 && (
-                                Math.abs(retMonto - Number((exentoVal * 0.03).toFixed(2))) <= 0.05 ||
-                                Math.abs((retMonto / exentoVal) - 0.03) <= 0.005
-                            ));
-                            if (isFlete) {
-                                r.co_islr = '072';
-                                r.islr_des = 'FLETES PAGADOS A PERSONAS JURÍDICAS O NATURALES';
-                                r.monto_obj = exentoVal > 0 ? exentoVal : Number(r.monto_obj || (retMonto / 0.03));
-                                r.porc_retn = 3.0;
+                        // Formatear comprobante fiscal SENIAT (14 dígitos: YYYYMM + 8 dígitos)
+                        const rawComp = r.num_comprobante || r.nro_doc_islr || resEnc.recordset[0]?.recibo || resEnc.recordset[0]?.cob_num;
+                        if (rawComp) {
+                            const islrDateVal = r.fec_emis_islr || resEnc.recordset[0]?.fecha || new Date();
+                            const dObj = new Date(islrDateVal);
+                            const pYear = isNaN(dObj.getFullYear()) ? new Date().getFullYear() : dObj.getFullYear();
+                            const pMonth = isNaN(dObj.getMonth()) ? String(new Date().getMonth() + 1).padStart(2, "0") : String(dObj.getMonth() + 1).padStart(2, "0");
+                            const periodStr = `${pYear}${pMonth}`;
+                            const compStr = String(rawComp).trim();
+                            if (/^20\d{12}$/.test(compStr)) {
+                                r.num_comprobante = compStr;
+                            } else {
+                                const digits = compStr.replace(/\D/g, '');
+                                if (digits.length === 14 && /^20\d{12}$/.test(digits)) {
+                                    r.num_comprobante = digits;
+                                } else if (digits.length > 0) {
+                                    const seq8 = digits.length >= 8 ? digits.slice(-8) : digits.padStart(8, '0');
+                                    r.num_comprobante = `${periodStr}${seq8}`;
+                                }
+                            }
+                        }
+
+                        if (resReng.recordset) {
+                            const matchedFact = resReng.recordset.find(f => 
+                                (r.rowguid_reng_cob && f.rowguid === r.rowguid_reng_cob) ||
+                                (f.nro_doc && (f.nro_doc === r.nro_doc || f.nro_fact === r.nro_doc)) ||
+                                (f.nro_fact && (f.nro_fact === r.nro_fact || f.nro_doc === r.nro_fact))
+                            );
+                            if (matchedFact) {
+                                const exentoVal = Number(matchedFact.monto_exento || matchedFact.exento_reng || matchedFact.otros1 || 0);
+                                const retMonto = Number(r.monto_reten || 0);
+                                const isFlete = (r.co_islr === '072') || (exentoVal > 0 && (
+                                    Math.abs(retMonto - Number((exentoVal * 0.03).toFixed(2))) <= 0.05 ||
+                                    Math.abs((retMonto / exentoVal) - 0.03) <= 0.005
+                                ));
+                                if (isFlete) {
+                                    r.co_islr = '072';
+                                    r.islr_des = 'FLETES PAGADOS A PERSONAS JURÍDICAS O NATURALES';
+                                    r.monto_obj = exentoVal > 0 ? exentoVal : Number(r.monto_obj || (retMonto / 0.03));
+                                    r.porc_retn = 3.0;
+                                }
                             }
                         }
                     });
@@ -1953,6 +1977,13 @@ router.post('/', async (req, res) => {
                     });
                     const islrNum = corrIslr.docNum;
 
+                    // Formatear comprobante fiscal SENIAT: YYYYMM + 8 dígitos
+                    const islrYear = tsDate.getFullYear();
+                    const islrMonth = String(tsDate.getMonth() + 1).padStart(2, "0");
+                    const islrPeriodStr = `${islrYear}${islrMonth}`;
+                    const islrComprobanteSeniat = `${islrPeriodStr}${String(corrIslr.proxN).padStart(8, '0')}`;
+                    console.log(`✨ [PAGOS AGENT] Retención ISLR auto-generada: Doc=${islrNum}, Comprobante=${islrComprobanteSeniat}, Periodo=${islrPeriodStr}`);
+
                     await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit('ISLR', 6))
                         .input('nro_doc', sql.Char(20), padProfit(islrNum, 20))
@@ -1966,8 +1997,10 @@ router.post('/', async (req, res) => {
                         .input('total_bruto', sql.Decimal(18, 2), adjustedMontoRetencion)
                         .input('total_neto', sql.Decimal(18, 2), adjustedMontoRetencion)
                         .input('saldo', sql.Decimal(18, 2), 0.00)
+                        .input('fec_doc', sql.SmallDateTime, tsDate)
                         .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .input('num_comprobante', sql.Char(14), islrComprobanteSeniat.substring(0, 14))
                         .query(`
                             INSERT INTO saDocumentoCompra (
                                 co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
@@ -1976,15 +2009,15 @@ router.post('/', async (req, res) => {
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
                                 otros1, otros2, otros3, adicional, co_us_in, co_sucu_in, fe_us_in,
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
-                                monto_desc_glob, monto_reca
+                                monto_desc_glob, monto_reca, num_comprobante, tipo_imp
                             ) VALUES (
                                 @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
-                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
                                 0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
                                 @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
-                                0, 0
+                                0, 0, @num_comprobante, '7'
                             )
                         `);
 
