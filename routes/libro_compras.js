@@ -162,10 +162,14 @@ router.get('/', async (req, res) => {
                             RTRIM(pdr.nro_doc)
                         ) AS doc_num,
                         COALESCE(
+                            NULLIF(RTRIM(CASE WHEN f.nro_fact <> f.doc_num THEN f.nro_fact ELSE NULL END), ''),
+                            NULLIF(RTRIM(CASE WHEN d.nro_fact <> d.nro_doc THEN d.nro_fact ELSE NULL END), ''),
+                            NULLIF(RTRIM(f.nro_fact), ''),
                             NULLIF(RTRIM(d.nro_fact), ''), 
-                            NULLIF(RTRIM(f.nro_fact), ''), 
-                            NULLIF(RTRIM(d.nro_doc), ''),
+                            NULLIF(RTRIM(CASE WHEN pdr.nro_fact <> pdr.nro_doc THEN pdr.nro_fact ELSE NULL END), ''),
                             NULLIF(RTRIM(pdr.nro_fact), ''), 
+                            NULLIF(RTRIM(f.doc_num), ''),
+                            NULLIF(RTRIM(d.nro_doc), ''),
                             RTRIM(pdr.nro_doc)
                         ) AS nro_fact,
                         COALESCE(
@@ -186,7 +190,13 @@ router.get('/', async (req, res) => {
                         ISNULL(d.anulado, ISNULL(f.anulado, 0)) AS anulado,
                         '0' AS status,
                         CASE 
-                            WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE') THEN RTRIM(ISNULL(d.nro_orig, ${riDocAfectado}))
+                            WHEN UPPER(RTRIM(pdr.co_tipo_doc)) IN ('N/CR', 'NCRE', 'N/DB', 'NDEB') THEN 
+                                COALESCE(
+                                    NULLIF(RTRIM(afec.nro_factura_afectada), ''),
+                                    NULLIF(RTRIM(CASE WHEN ${riDocAfectado} <> d.nro_orig THEN ${riDocAfectado} ELSE NULL END), ''),
+                                    NULLIF(RTRIM(${riDocAfectado}), ''),
+                                    RTRIM(ISNULL(d.nro_orig, ''))
+                                )
                             ELSE ''
                         END AS doc_afectado,
                         'FACT' AS tipo_doc_afectado,
@@ -275,10 +285,58 @@ router.get('/', async (req, res) => {
                                                  AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(pdr.nro_doc))
                     LEFT JOIN saFacturaCompra f ON (LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(pdr.nro_doc)) 
                                                 OR (NULLIF(RTRIM(d.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(f.nro_fact)) = LTRIM(RTRIM(d.nro_fact)) AND LTRIM(RTRIM(f.co_prov)) = LTRIM(RTRIM(d.co_prov))))
-                    LEFT JOIN saPagoRetenIvaReng ri ON ri.rowguid_reng_cob = pdr.rowguid
+                    OUTER APPLY (
+                        SELECT TOP 1 ri_sub.*
+                        FROM saPagoRetenIvaReng ri_sub
+                        WHERE ri_sub.rowguid_reng_cob = pdr.rowguid
+                           OR EXISTS (
+                               SELECT 1 FROM saPagoDocReng pdr_iv
+                               WHERE pdr_iv.rowguid = ri_sub.rowguid_reng_cob
+                                 AND pdr_iv.cob_num = pdr.cob_num
+                                 AND UPPER(RTRIM(pdr_iv.co_tipo_doc)) = 'IVAN'
+                                 AND pdr_iv.rowguid_reng_ori = pdr.rowguid
+                           )
+                        ORDER BY CASE WHEN ri_sub.rowguid_reng_cob = pdr.rowguid THEN 0 ELSE 1 END
+                    ) ri
                     LEFT JOIN saDocumentoCompra dc_ret ON dc_ret.doc_orig = 'PAGO' 
                                                       AND LTRIM(RTRIM(dc_ret.nro_orig)) = LTRIM(RTRIM(p.cob_num)) 
                                                       AND UPPER(RTRIM(dc_ret.co_tipo_doc)) = 'IVAN'
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            COALESCE(
+                                -- 1. Factura de compra ff donde nro_fact es distinto de su doc_num correlativo
+                                NULLIF(RTRIM(CASE WHEN ff.nro_fact <> ff.doc_num THEN ff.nro_fact ELSE NULL END), ''),
+                                -- 2. Factura de compra ff_dev a través de renglones de devolución
+                                NULLIF(RTRIM(CASE WHEN ff_dev.nro_fact <> ff_dev.doc_num THEN ff_dev.nro_fact ELSE NULL END), ''),
+                                NULLIF(RTRIM(ff_dev.nro_fact), ''),
+                                -- 3. Documento de compra df donde nro_fact es distinto de nro_doc
+                                NULLIF(RTRIM(CASE WHEN df.nro_fact <> df.nro_doc THEN df.nro_fact ELSE NULL END), ''),
+                                -- 4. Documento de compra df_dev a través de devolución
+                                NULLIF(RTRIM(CASE WHEN df_dev.nro_fact <> df_dev.nro_doc THEN df_dev.nro_fact ELSE NULL END), ''),
+                                -- 5. nro_fact directo de ff
+                                NULLIF(RTRIM(ff.nro_fact), ''),
+                                -- 6. nro_fact directo de df
+                                NULLIF(RTRIM(df.nro_fact), ''),
+                                NULLIF(RTRIM(df_dev.nro_fact), '')
+                            ) AS nro_factura_afectada
+                        FROM (SELECT 1 AS _dummy) _x
+                        LEFT JOIN saFacturaCompra ff ON (
+                            LTRIM(RTRIM(ff.doc_num)) = LTRIM(RTRIM(COALESCE(NULLIF(RTRIM(d.nro_orig), ''), NULLIF(${riDocAfectado}, ''))))
+                        )
+                        LEFT JOIN saDocumentoCompra df ON (
+                            LTRIM(RTRIM(df.nro_doc)) = LTRIM(RTRIM(COALESCE(NULLIF(RTRIM(d.nro_orig), ''), NULLIF(${riDocAfectado}, ''))))
+                        )
+                        LEFT JOIN saDevolucionProveedorReng dpr ON (
+                            LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(COALESCE(NULLIF(RTRIM(d.nro_orig), ''), NULLIF(${riDocAfectado}, ''))))
+                            OR LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                        )
+                        LEFT JOIN saFacturaCompra ff_dev ON (
+                            LTRIM(RTRIM(ff_dev.doc_num)) = LTRIM(RTRIM(dpr.num_doc))
+                        )
+                        LEFT JOIN saDocumentoCompra df_dev ON (
+                            LTRIM(RTRIM(df_dev.nro_doc)) = LTRIM(RTRIM(dpr.num_doc))
+                        )
+                    ) afec
                     OUTER APPLY (
                         SELECT 
                             SUM(CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN r.reng_neto ELSE 0 END) AS compras_exentas,

@@ -202,10 +202,12 @@ router.get('/', async (req, res) => {
                         ${facNroZ} AS reporte_z,
                         CASE 
                             WHEN ${facImpfisfac} <> '' THEN ${facImpfisfac}
+                            WHEN LTRIM(RTRIM(ISNULL(f.campo3, ''))) <> '' THEN RTRIM(f.campo3)
                             ELSE RTRIM(f.doc_num)
                         END AS comp_fiscal_desde,
                         CASE 
                             WHEN ${facImpfisfac} <> '' THEN ${facImpfisfac}
+                            WHEN LTRIM(RTRIM(ISNULL(f.campo3, ''))) <> '' THEN RTRIM(f.campo3)
                             ELSE RTRIM(f.doc_num)
                         END AS comp_fiscal_hasta,
                         '' AS doc_afectado,
@@ -287,13 +289,15 @@ router.get('/', async (req, res) => {
                         ${devNroZ} AS reporte_z,
                         CASE 
                             WHEN ${devImpfisfac} <> '' THEN ${devImpfisfac}
+                            WHEN LTRIM(RTRIM(ISNULL(dc.campo3, ''))) <> '' THEN RTRIM(dc.campo3)
                             ELSE RTRIM(dc.doc_num)
                         END AS comp_fiscal_desde,
                         CASE 
                             WHEN ${devImpfisfac} <> '' THEN ${devImpfisfac}
+                            WHEN LTRIM(RTRIM(ISNULL(dc.campo3, ''))) <> '' THEN RTRIM(dc.campo3)
                             ELSE RTRIM(dc.doc_num)
                         END AS comp_fiscal_hasta,
-                        RTRIM(ISNULL(dc.nro_doc, '')) AS doc_afectado,
+                        RTRIM(ISNULL(afec_dev.nro_factura_afectada, dc.nro_doc)) AS doc_afectado,
                         'FACT' AS tipo_doc_afectado,
                         CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dc.total_bruto, 0)) END AS total_bruto,
                         CASE WHEN dc.anulado = 1 OR RTRIM(ISNULL(dc.status, '0')) = '3' THEN 0 ELSE -ABS(ISNULL(dc.monto_imp, 0)) END AS monto_imp,
@@ -314,6 +318,30 @@ router.get('/', async (req, res) => {
                         0 AS iva_retenido
                     FROM saDevolucionCliente dc
                     LEFT JOIN saCliente c ON dc.co_cli = c.co_cli
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            COALESCE(
+                                NULLIF(RTRIM(f_orig.impfisfac), ''),
+                                NULLIF(RTRIM(f_orig.campo3), ''),
+                                NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                                NULLIF(RTRIM(dv_orig.campo3), ''),
+                                NULLIF(RTRIM(f_orig.doc_num), ''),
+                                NULLIF(RTRIM(dv_orig.nro_doc), ''),
+                                RTRIM(dc.nro_doc)
+                            ) AS nro_factura_afectada
+                        FROM (SELECT 1 AS _dummy) _x
+                        LEFT JOIN saDevolucionClienteReng dcr ON (
+                            LTRIM(RTRIM(dcr.doc_num)) = LTRIM(RTRIM(dc.doc_num))
+                            AND dcr.num_doc IS NOT NULL AND LTRIM(RTRIM(dcr.num_doc)) <> ''
+                        )
+                        LEFT JOIN saFacturaVenta f_orig ON (
+                            LTRIM(RTRIM(f_orig.doc_num)) = LTRIM(RTRIM(COALESCE(NULLIF(RTRIM(dc.nro_doc), ''), dcr.num_doc)))
+                        )
+                        LEFT JOIN saDocumentoVenta dv_orig ON (
+                            UPPER(RTRIM(dv_orig.co_tipo_doc)) = 'FACT'
+                            AND LTRIM(RTRIM(dv_orig.nro_doc)) = LTRIM(RTRIM(COALESCE(NULLIF(RTRIM(dc.nro_doc), ''), dcr.num_doc)))
+                        )
+                    ) afec_dev
                     OUTER APPLY (
                         SELECT 
                             SUM(CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN r.reng_neto ELSE 0 END) AS ventas_exentas,
@@ -359,7 +387,7 @@ router.get('/', async (req, res) => {
                             WHEN ${docImpfisfac} <> '' THEN ${docImpfisfac}
                             ELSE RTRIM(d.nro_doc)
                         END AS comp_fiscal_hasta,
-                        RTRIM(ISNULL(d.nro_orig, '')) AS doc_afectado,
+                        RTRIM(ISNULL(afec_nd.nro_factura_afectada, d.nro_orig)) AS doc_afectado,
                         'FACT' AS tipo_doc_afectado,
                         CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.total_bruto, 0) END AS total_bruto,
                         CASE WHEN d.anulado = 1 THEN 0 ELSE ISNULL(d.monto_imp, 0) END AS monto_imp,
@@ -380,6 +408,26 @@ router.get('/', async (req, res) => {
                         0 AS iva_retenido
                     FROM saDocumentoVenta d
                     LEFT JOIN saCliente c ON d.co_cli = c.co_cli
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            COALESCE(
+                                NULLIF(RTRIM(f_orig.impfisfac), ''),
+                                NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                                NULLIF(RTRIM(f_orig.doc_num), ''),
+                                NULLIF(RTRIM(dv_orig.nro_doc), ''),
+                                RTRIM(d.nro_orig)
+                            ) AS nro_factura_afectada
+                        FROM (SELECT 1 AS _dummy) _x
+                        LEFT JOIN saFacturaVenta f_orig ON (
+                            LTRIM(RTRIM(f_orig.doc_num)) = LTRIM(RTRIM(d.nro_orig))
+                            AND LTRIM(RTRIM(f_orig.co_cli)) = LTRIM(RTRIM(d.co_cli))
+                        )
+                        LEFT JOIN saDocumentoVenta dv_orig ON (
+                            UPPER(RTRIM(dv_orig.co_tipo_doc)) = 'FACT'
+                            AND LTRIM(RTRIM(dv_orig.nro_doc)) = LTRIM(RTRIM(d.nro_orig))
+                            AND LTRIM(RTRIM(dv_orig.co_cli)) = LTRIM(RTRIM(d.co_cli))
+                        )
+                    ) afec_nd
                     WHERE UPPER(RTRIM(d.co_tipo_doc)) IN ('N/DB', 'NDEB')
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) >= @startDate
                       AND CONVERT(VARCHAR(10), d.fec_emis, 120) <= @endDate
@@ -405,7 +453,7 @@ router.get('/', async (req, res) => {
                         '' AS reporte_z,
                         '' AS comp_fiscal_desde,
                         '' AS comp_fiscal_hasta,
-                        COALESCE(NULLIF(${riAfec}, ''), RTRIM(dv.nro_orig), RTRIM(cdr.nro_doc)) AS doc_afectado,
+                        COALESCE(NULLIF(RTRIM(afec_ret.nro_factura_afectada), ''), NULLIF(${riAfec}, ''), RTRIM(dv.nro_orig), RTRIM(cdr.nro_doc)) AS doc_afectado,
                         'FACT' AS tipo_doc_afectado,
                         0 AS total_bruto,
                         0 AS monto_imp,
@@ -429,6 +477,28 @@ router.get('/', async (req, res) => {
                     LEFT JOIN saCobroRetenIvaReng ri ON ri.rowguid_reng_cob = cdr.rowguid
                     LEFT JOIN saDocumentoVenta dv ON dv.doc_orig = 'COBRO' AND dv.nro_orig = cb.cob_num AND UPPER(RTRIM(dv.co_tipo_doc)) IN ('IVAN', 'IVAP')
                     LEFT JOIN saCliente c ON cb.co_cli = c.co_cli
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            COALESCE(
+                                NULLIF(RTRIM(f_orig.impfisfac), ''),
+                                NULLIF(RTRIM(dv_orig.impfisfac), ''),
+                                NULLIF(RTRIM(f_orig.doc_num), ''),
+                                NULLIF(RTRIM(dv_orig.nro_doc), ''),
+                                NULLIF(${riAfec}, ''),
+                                RTRIM(dv.nro_orig),
+                                RTRIM(cdr.nro_doc)
+                            ) AS nro_factura_afectada
+                        FROM (SELECT 1 AS _dummy) _x
+                        LEFT JOIN saFacturaVenta f_orig ON (
+                            (LTRIM(RTRIM(f_orig.doc_num)) = LTRIM(RTRIM(cdr.nro_doc)) OR LTRIM(RTRIM(f_orig.doc_num)) = LTRIM(RTRIM(dv.nro_orig)))
+                            AND LTRIM(RTRIM(f_orig.co_cli)) = LTRIM(RTRIM(cb.co_cli))
+                        )
+                        LEFT JOIN saDocumentoVenta dv_orig ON (
+                            UPPER(RTRIM(dv_orig.co_tipo_doc)) = 'FACT'
+                            AND (LTRIM(RTRIM(dv_orig.nro_doc)) = LTRIM(RTRIM(cdr.nro_doc)) OR LTRIM(RTRIM(dv_orig.nro_doc)) = LTRIM(RTRIM(dv.nro_orig)))
+                            AND LTRIM(RTRIM(dv_orig.co_cli)) = LTRIM(RTRIM(cb.co_cli))
+                        )
+                    ) afec_ret
                     WHERE UPPER(RTRIM(cdr.co_tipo_doc)) IN ('IVAN', 'IVAP')
                       AND CONVERT(VARCHAR(10), COALESCE(${riFecha}, cb.fecha, dv.fec_emis), 120) >= @startDate
                       AND CONVERT(VARCHAR(10), COALESCE(${riFecha}, cb.fecha, dv.fec_emis), 120) <= @endDate

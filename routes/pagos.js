@@ -166,8 +166,37 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(ISNULL(pr.tipo_per, '3')) AS tipo_per,
                            ISNULL(pr.sujeto_obj_retenISLR_auto, 0) AS sujeto_obj_retenISLR_auto,
                            RTRIM(d.co_us_in) AS co_us_in,
+                           RTRIM(ISNULL(d.doc_orig, '')) AS doc_orig,
+                           RTRIM(ISNULL(d.nro_orig, '')) AS nro_orig,
+                           CASE 
+                               WHEN UPPER(RTRIM(d.co_tipo_doc)) IN ('N/CR', 'NCR', 'N/DB', 'NDEB') THEN
+                                   COALESCE(
+                                       NULLIF(RTRIM(afec.nro_fact_origen), ''),
+                                       NULLIF(RTRIM(d.nro_orig), ''),
+                                       '0'
+                                   )
+                               ELSE '0'
+                           END AS nro_fact_afectado,
                            ISNULL(d.otros1, 0) AS otros1,
-                           ISNULL(CASE WHEN d.porc_imp > 0 THEN (d.total_neto - d.monto_imp) ELSE 0 END, 0) AS base_imponible,
+                           ISNULL(d.otros2, 0) AS otros2,
+                           ISNULL(CASE
+                               WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.exento_reng, 0)
+                               WHEN ISNULL(d.monto_imp, 0) = 0 THEN ISNULL(NULLIF(d.otros2, 0), ISNULL(NULLIF(d.total_bruto, 0), d.total_neto))
+                               ELSE ISNULL(d.otros2, 0)
+                           END, 0) AS monto_exento,
+                           ISNULL(CASE
+                               WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.base_gravada_reng, 0)
+                               WHEN ISNULL(d.monto_imp, 0) = 0 THEN 0
+                               ELSE (d.total_neto - d.monto_imp - ISNULL(d.otros1, 0) - ISNULL(d.otros2, 0) - ISNULL(d.otros3, 0))
+                           END, 0) AS base_imponible,
+                           COALESCE(
+                               NULLIF(reng_calc.alicuota_reng, 0),
+                               CASE 
+                                   WHEN d.porc_imp IN (8, 16, 31) THEN d.porc_imp
+                                   WHEN ISNULL(d.monto_imp, 0) > 0 THEN 16
+                                   ELSE 0
+                               END
+                           ) AS porc_imp,
                            ISNULL((SELECT SUM(pdr.monto_retencion_iva) 
                                    FROM saPagoDocReng pdr 
                                    INNER JOIN saPago p ON pdr.cob_num = p.cob_num 
@@ -197,6 +226,65 @@ router.get('/facturas/pendientes', async (req, res) => {
                     FROM saDocumentoCompra d
                     INNER JOIN saProveedor pr ON d.co_prov = pr.co_prov
                     LEFT JOIN saTabuladorIslr t ON LTRIM(RTRIM(pr.co_tab)) = LTRIM(RTRIM(t.co_tab))
+                    OUTER APPLY (
+                        SELECT
+                            MAX(src.has_reng) AS has_reng,
+                            SUM(src.exento_reng) AS exento_reng,
+                            SUM(src.base_gravada_reng) AS base_gravada_reng,
+                            MAX(src.alicuota_reng) AS alicuota_reng
+                        FROM (
+                            SELECT
+                                1 AS has_reng,
+                                CASE WHEN ISNULL(r.porc_imp, 0) = 0 THEN ISNULL(r.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                CASE WHEN ISNULL(r.porc_imp, 0) > 0 THEN ISNULL(r.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                CASE WHEN ISNULL(r.porc_imp, 0) > 0 THEN r.porc_imp ELSE NULL END AS alicuota_reng
+                            FROM saFacturaCompraReng r
+                            WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) = 'FACT'
+                              AND (
+                                  LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                  OR (UPPER(LTRIM(RTRIM(ISNULL(d.doc_orig, '')))) IN ('FACT', 'COMP') AND NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(r.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                              )
+                            UNION ALL
+                            SELECT
+                                1 AS has_reng,
+                                CASE WHEN ISNULL(dr.porc_imp, 0) = 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN dr.porc_imp ELSE NULL END AS alicuota_reng
+                            FROM saDevolucionProveedorReng dr
+                            WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                              AND (
+                                  (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                  OR LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                              )
+                        ) src
+                    ) reng_calc
+                    OUTER APPLY (
+                        SELECT TOP 1
+                            COALESCE(
+                                NULLIF(RTRIM(d_afec.nro_fact), ''),
+                                NULLIF(RTRIM(d_dev.nro_fact), ''),
+                                NULLIF(RTRIM(d_afec.nro_doc), '')
+                            ) AS nro_fact_origen
+                        FROM (SELECT 1 AS _x) _dummy
+                        LEFT JOIN saDocumentoCompra d_afec ON (
+                            UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB')
+                            AND NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL
+                            AND LTRIM(RTRIM(d_afec.nro_doc)) = LTRIM(RTRIM(d.nro_orig))
+                            AND UPPER(LTRIM(RTRIM(d_afec.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'N/CR', 'NCR')
+                        )
+                        LEFT JOIN saDevolucionProveedorReng dpr ON (
+                            UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                            AND d_afec.nro_doc IS NULL
+                            AND (
+                                (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                OR LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                            )
+                        )
+                        LEFT JOIN saDocumentoCompra d_dev ON (
+                            LTRIM(RTRIM(d_dev.nro_doc)) = LTRIM(RTRIM(dpr.num_doc))
+                            AND UPPER(LTRIM(RTRIM(d_dev.co_tipo_doc))) IN ('FACT', 'N/DB', 'NDEB')
+                        )
+                    ) afec
                     WHERE ${whereSQL}
                     ORDER BY d.fec_emis DESC
                 `);
@@ -326,14 +414,109 @@ router.get('/:cob_num', async (req, res) => {
                 const [resReng, resTP, resIva, resIslr] = await Promise.all([
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
                         SELECT r.reng_num, RTRIM(r.co_tipo_doc) AS co_tipo_doc, RTRIM(r.nro_doc) AS nro_doc,
-                               RTRIM(r.nro_fact) AS nro_fact,
+                               COALESCE(NULLIF(RTRIM(f.nro_fact), ''), NULLIF(RTRIM(d.nro_fact), ''), NULLIF(RTRIM(r.nro_fact), ''), '') AS nro_fact,
                                r.mont_cob, r.monto_retencion_iva, r.monto_retencion,
                                r.rowguid, r.rowguid_reng_ori,
-                               ISNULL(d.monto_imp, 0) AS monto_imp,
-                               ISNULL(d.total_neto, 0) AS total_neto
+                               COALESCE(f.fec_emis, d.fec_emis) AS fec_emis,
+                               COALESCE(NULLIF(RTRIM(f.n_control), ''), NULLIF(RTRIM(d.n_control), ''), '') AS n_control,
+                               RTRIM(ISNULL(d.nro_orig, '')) AS nro_orig,
+                               COALESCE(NULLIF(f.total_bruto, 0), NULLIF(d.total_bruto, 0), 0) AS total_bruto,
+                               COALESCE(NULLIF(f.monto_imp, 0), NULLIF(d.monto_imp, 0), 0) AS monto_imp,
+                               COALESCE(NULLIF(f.total_neto, 0), NULLIF(d.total_neto, 0), 0) AS total_neto,
+                               ISNULL(CASE
+                                   WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.exento_reng, 0)
+                                   WHEN COALESCE(NULLIF(f.total_neto, 0), NULLIF(d.total_neto, 0), 0) > 0 AND (COALESCE(NULLIF(f.total_neto, 0), NULLIF(d.total_neto, 0), 0) - COALESCE(NULLIF(f.monto_imp, 0), NULLIF(d.monto_imp, 0), 0) - ISNULL(reng_calc.base_gravada_reng, 0)) > 1 THEN
+                                       (COALESCE(NULLIF(f.total_neto, 0), NULLIF(d.total_neto, 0), 0) - COALESCE(NULLIF(f.monto_imp, 0), NULLIF(d.monto_imp, 0), 0) - ISNULL(reng_calc.base_gravada_reng, 0))
+                                   WHEN ISNULL(COALESCE(f.monto_imp, d.monto_imp, 0), 0) = 0 THEN ISNULL(NULLIF(d.otros2, 0), ISNULL(NULLIF(f.total_bruto, d.total_bruto), d.total_neto))
+                                   ELSE ISNULL(d.otros2, 0)
+                               END, 0) AS monto_exento,
+                               ISNULL(CASE
+                                   WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.base_gravada_reng, 0)
+                                   WHEN ISNULL(COALESCE(f.monto_imp, d.monto_imp, 0), 0) = 0 THEN 0
+                                   ELSE (COALESCE(NULLIF(f.total_neto, 0), d.total_neto) - COALESCE(NULLIF(f.monto_imp, 0), d.monto_imp) - ISNULL(d.otros1, 0) - ISNULL(d.otros2, 0) - ISNULL(d.otros3, 0))
+                               END, 0) AS base_imponible,
+                               COALESCE(
+                                   NULLIF(reng_calc.alicuota_reng, 0),
+                                   CASE 
+                                       WHEN d.porc_imp IN (8, 16, 31) THEN d.porc_imp
+                                       WHEN ISNULL(COALESCE(f.monto_imp, d.monto_imp, 0), 0) > 0 THEN 16
+                                       ELSE 0
+                                   END
+                               ) AS porc_imp,
+                               CASE 
+                                   WHEN UPPER(RTRIM(r.co_tipo_doc)) IN ('N/CR', 'NCR', 'N/DB', 'NDEB') THEN
+                                       COALESCE(NULLIF(RTRIM(afec.nro_fact_origen), ''), NULLIF(RTRIM(d.nro_orig), ''), '0')
+                                   ELSE '0'
+                               END AS nro_fact_afectado
                         FROM saPagoDocReng r
                         LEFT JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                      AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                        LEFT JOIN saFacturaCompra f ON (
+                            LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(r.nro_doc))
+                            OR (NULLIF(RTRIM(d.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(f.nro_fact)) = LTRIM(RTRIM(d.nro_fact)))
+                            OR (NULLIF(RTRIM(r.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(f.nro_fact)) = LTRIM(RTRIM(r.nro_fact)))
+                            OR (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                        )
+                        OUTER APPLY (
+                            SELECT
+                                MAX(src.has_reng) AS has_reng,
+                                SUM(src.exento_reng) AS exento_reng,
+                                SUM(src.base_gravada_reng) AS base_gravada_reng,
+                                MAX(src.alicuota_reng) AS alicuota_reng
+                            FROM (
+                                SELECT
+                                    1 AS has_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) = 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN fr.porc_imp ELSE NULL END AS alicuota_reng
+                                FROM saFacturaCompraReng fr
+                                WHERE (
+                                    (f.doc_num IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(f.doc_num)))
+                                    OR LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(r.nro_doc))
+                                    OR (d.nro_doc IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(d.nro_doc)))
+                                    OR (UPPER(LTRIM(RTRIM(ISNULL(d.doc_orig, '')))) IN ('FACT', 'COMP') AND NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                )
+                                UNION ALL
+                                SELECT
+                                    1 AS has_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) = 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN dr.porc_imp ELSE NULL END AS alicuota_reng
+                                FROM saDevolucionProveedorReng dr
+                                WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                  AND (
+                                      (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                      OR LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                  )
+                            ) src
+                        ) reng_calc
+                        OUTER APPLY (
+                            SELECT TOP 1
+                                COALESCE(
+                                    NULLIF(RTRIM(d_afec.nro_fact), ''),
+                                    NULLIF(RTRIM(d_dev.nro_fact), ''),
+                                    NULLIF(RTRIM(d_afec.nro_doc), '')
+                                ) AS nro_fact_origen
+                            FROM (SELECT 1 AS _x) _dummy
+                            LEFT JOIN saDocumentoCompra d_afec ON (
+                                UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB')
+                                AND NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL
+                                AND LTRIM(RTRIM(d_afec.nro_doc)) = LTRIM(RTRIM(d.nro_orig))
+                                AND UPPER(LTRIM(RTRIM(d_afec.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'N/CR', 'NCR')
+                            )
+                            LEFT JOIN saDevolucionProveedorReng dpr ON (
+                                UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                AND d_afec.nro_doc IS NULL
+                                AND (
+                                    (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                    OR LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                )
+                            )
+                            LEFT JOIN saDocumentoCompra d_dev ON (
+                                LTRIM(RTRIM(d_dev.nro_doc)) = LTRIM(RTRIM(dpr.num_doc))
+                                AND UPPER(LTRIM(RTRIM(d_dev.co_tipo_doc))) IN ('FACT', 'N/DB', 'NDEB')
+                            )
+                        ) afec
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                         ORDER BY r.reng_num
                     `),
@@ -352,71 +535,277 @@ router.get('/:cob_num', async (req, res) => {
                         ORDER BY tp.reng_num
                     `),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
-                        SELECT ri.reng_num, ri.rowguid_reng_cob, RTRIM(ri.num_comprobante) AS num_comprobante,
-                               ri.monto_documento, ri.base_imponible, ri.monto_ret_imp, ri.alicuota,
-                               ISNULL(ri.monto_excento, 0) AS monto_excento,
+                        SELECT ri.reng_num,
+                               COALESCE(doc_reng.rowguid, ri.rowguid_reng_cob) AS rowguid_reng_cob,
+                               COALESCE(NULLIF(RTRIM(ri.num_comprobante), ''), NULLIF(RTRIM(ivan_doc.num_comprobante), ''), RTRIM(ivan_doc.nro_doc), '') AS num_comprobante,
+                               ISNULL(ivan_doc.fec_emis, p.fecha) AS fec_emis_ivan,
+                               COALESCE(NULLIF(orig.total_neto, 0), NULLIF(ri.monto_documento, 0), 0) AS monto_documento,
+                               CASE
+                                   WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.base_gravada_reng, 0)
+                                   WHEN ISNULL(orig.monto_imp, 0) = 0 AND orig.nro_doc IS NOT NULL THEN 0
+                                   WHEN orig.nro_doc IS NOT NULL AND ISNULL(orig.monto_imp, 0) > 0 THEN
+                                       (orig.total_neto - orig.monto_imp - ISNULL(orig.otros1, 0) - ISNULL(orig.otros2, 0) - ISNULL(orig.otros3, 0))
+                                   ELSE ISNULL(ri.base_imponible, 0)
+                               END AS base_imponible,
+                               ri.monto_ret_imp,
+                               COALESCE(
+                                   NULLIF(reng_calc.alicuota_reng, 0),
+                                   CASE
+                                       WHEN orig.porc_imp IN (8, 16, 31) THEN orig.porc_imp
+                                       WHEN ISNULL(orig.monto_imp, 0) > 0 THEN 16.0
+                                       WHEN ri.alicuota > 0 THEN ri.alicuota
+                                       ELSE 0.0
+                                   END
+                               ) AS alicuota,
+                               ISNULL(orig.monto_imp, ROUND(ISNULL(ri.base_imponible, 0) * (ISNULL(ri.alicuota, 16.0) / 100.0), 2)) AS monto_imp_causado,
+                               CASE
+                                   WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.exento_reng, 0)
+                                   WHEN ISNULL(orig.monto_imp, 0) = 0 AND orig.nro_doc IS NOT NULL THEN ISNULL(NULLIF(orig.otros2, 0), ISNULL(NULLIF(orig.total_bruto, 0), orig.total_neto))
+                                   WHEN ISNULL(orig.otros2, 0) > 0 THEN orig.otros2
+                                   ELSE ISNULL(ri.monto_excento, 0)
+                               END AS monto_excento,
                                RTRIM(ri.periodo_impositivo) AS periodo_impositivo,
-                               ISNULL(ri.fecha_documento, ISNULL(orig.fec_emis, p.fecha)) AS fecha_documento,
-                               ISNULL(NULLIF(RTRIM(ri.numero_control_documento), ''), ISNULL(RTRIM(orig.n_control), '---')) AS numero_control_documento,
-                               ISNULL(NULLIF(RTRIM(ri.tipo_documento), ''), RTRIM(pdr.co_tipo_doc)) AS tipo_documento,
+                               COALESCE(fact_orig.fec_emis, orig.fec_emis, ri.fecha_documento, p.fecha) AS fecha_documento,
+                               COALESCE(NULLIF(RTRIM(fact_orig.n_control), ''), NULLIF(RTRIM(orig.n_control), ''), NULLIF(RTRIM(ri.numero_control_documento), ''), '---') AS numero_control_documento,
+                               COALESCE(NULLIF(RTRIM(orig.co_tipo_doc), ''), NULLIF(RTRIM(doc_reng.co_tipo_doc), ''), NULLIF(RTRIM(ri.tipo_documento), ''), 'FACT') AS tipo_documento,
                                ISNULL(RTRIM(ri.tipo_operacion), 'C') AS tipo_operacion,
-                               CASE 
-                                   WHEN NULLIF(RTRIM(ri.numero_documento_afectado), '0') IS NOT NULL AND RTRIM(ri.numero_documento_afectado) <> '' 
-                                   THEN RTRIM(ri.numero_documento_afectado)
-                                   WHEN NULLIF(RTRIM(pdr.nro_fact), '') IS NOT NULL 
-                                   THEN RTRIM(pdr.nro_fact)
-                                   ELSE RTRIM(pdr.nro_doc)
+                               CASE
+                                   WHEN UPPER(LTRIM(RTRIM(COALESCE(orig.co_tipo_doc, doc_reng.co_tipo_doc, ri.tipo_documento)))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB') THEN
+                                       COALESCE(
+                                           NULLIF(RTRIM(afec.nro_fact_origen), ''),
+                                           NULLIF(RTRIM(orig.nro_orig), ''),
+                                           NULLIF(RTRIM(CASE WHEN RTRIM(ri.numero_documento_afectado) <> RTRIM(COALESCE(orig.nro_fact, '')) THEN ri.numero_documento_afectado ELSE NULL END), ''),
+                                           '0'
+                                       )
+                                   ELSE '0'
                                END AS numero_documento_afectado,
-                               RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact,
-                               RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
-                               CASE 
-                                   WHEN ri.base_imponible * (ri.alicuota / 100.0) > 0 
-                                   THEN ROUND((ri.monto_ret_imp / (ri.base_imponible * (ri.alicuota / 100.0))) * 100, 0)
-                                   WHEN ISNULL(pr.porc_esp, 0) > 0 THEN pr.porc_esp
-                                   ELSE 75 
+                               RTRIM(COALESCE(doc_reng.nro_doc, orig.nro_doc, '')) AS nro_doc,
+                               RTRIM(COALESCE(NULLIF(RTRIM(fact_orig.nro_fact), ''), NULLIF(RTRIM(orig.nro_fact), ''), NULLIF(RTRIM(doc_reng.nro_fact), ''), NULLIF(RTRIM(ri.numero_documento), ''), RTRIM(orig.nro_doc), RTRIM(doc_reng.nro_doc), '')) AS nro_fact,
+                               RTRIM(COALESCE(NULLIF(RTRIM(orig.nro_fact), ''), NULLIF(RTRIM(doc_reng.nro_fact), ''), NULLIF(RTRIM(ri.numero_documento), ''), RTRIM(orig.nro_doc), RTRIM(doc_reng.nro_doc), '')) AS numero_documento,
+                               RTRIM(COALESCE(orig.co_tipo_doc, doc_reng.co_tipo_doc, ri.tipo_documento, 'FACT')) AS co_tipo_doc,
+                               CASE
+                                   WHEN ISNULL(pr.porc_esp, 0) >= 88 THEN 100
+                                   WHEN ISNULL(pr.porc_esp, 0) > 0 THEN 75
+                                   WHEN ISNULL(orig.monto_imp, 0) > 0 AND (ri.monto_ret_imp / orig.monto_imp) >= 0.88 THEN 100
+                                   ELSE 75
                                END AS porc_ret
                         FROM saPagoRetenIvaReng ri
                         INNER JOIN saPagoDocReng pdr ON ri.rowguid_reng_cob = pdr.rowguid
                         INNER JOIN saPago p ON pdr.cob_num = p.cob_num
                         LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
-                        LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
-                                                        AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
+                        OUTER APPLY (
+                            SELECT TOP 1 r_doc.*
+                            FROM saPagoDocReng r_doc
+                            WHERE (
+                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                                AND r_doc.rowguid = pdr.rowguid
+                            )
+                            OR (
+                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'IVAN'
+                                AND r_doc.cob_num = pdr.cob_num
+                                AND UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                            )
+                            ORDER BY 
+                                CASE 
+                                    WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA') AND r_doc.rowguid = pdr.rowguid THEN 0
+                                    WHEN pdr.rowguid_reng_ori IS NOT NULL AND r_doc.rowguid = pdr.rowguid_reng_ori THEN 1
+                                    WHEN NULLIF(RTRIM(ri.numero_documento), '') IS NOT NULL AND LTRIM(RTRIM(r_doc.nro_fact)) = LTRIM(RTRIM(ri.numero_documento)) THEN 2
+                                    WHEN NULLIF(RTRIM(ri.numero_documento), '') IS NOT NULL AND LTRIM(RTRIM(r_doc.nro_doc)) = LTRIM(RTRIM(ri.numero_documento)) THEN 3
+                                    WHEN UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) = 'FACT' THEN 4
+                                    ELSE 5
+                                END,
+                                r_doc.reng_num
+                        ) doc_reng
+                        LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(doc_reng.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
+                                                        AND LTRIM(RTRIM(doc_reng.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
+                        LEFT JOIN saFacturaCompra fact_orig ON (
+                            LTRIM(RTRIM(fact_orig.doc_num)) = LTRIM(RTRIM(doc_reng.nro_doc))
+                            OR (NULLIF(RTRIM(orig.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(fact_orig.nro_fact)) = LTRIM(RTRIM(orig.nro_fact)))
+                            OR (NULLIF(RTRIM(doc_reng.nro_fact), '') IS NOT NULL AND LTRIM(RTRIM(fact_orig.nro_fact)) = LTRIM(RTRIM(doc_reng.nro_fact)))
+                            OR (NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(fact_orig.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                        )
+                        OUTER APPLY (
+                            SELECT TOP 1 dc_iv.fec_emis, dc_iv.num_comprobante, dc_iv.nro_doc
+                            FROM saDocumentoCompra dc_iv
+                            WHERE UPPER(RTRIM(dc_iv.co_tipo_doc)) = 'IVAN'
+                              AND (
+                                  (UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'IVAN' AND LTRIM(RTRIM(dc_iv.nro_doc)) = LTRIM(RTRIM(pdr.nro_doc)))
+                                  OR (dc_iv.doc_orig = 'PAGO' AND LTRIM(RTRIM(dc_iv.nro_orig)) = LTRIM(RTRIM(p.cob_num)))
+                              )
+                            ORDER BY CASE WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'IVAN' AND LTRIM(RTRIM(dc_iv.nro_doc)) = LTRIM(RTRIM(pdr.nro_doc)) THEN 0 ELSE 1 END
+                        ) ivan_doc
+                        OUTER APPLY (
+                            SELECT
+                                MAX(src.has_reng) AS has_reng,
+                                SUM(src.exento_reng) AS exento_reng,
+                                SUM(src.base_gravada_reng) AS base_gravada_reng,
+                                MAX(src.alicuota_reng) AS alicuota_reng
+                            FROM (
+                                SELECT
+                                    1 AS has_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) = 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN fr.porc_imp ELSE NULL END AS alicuota_reng
+                                FROM saFacturaCompraReng fr
+                                WHERE (
+                                    (fact_orig.doc_num IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(fact_orig.doc_num)))
+                                    OR LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(doc_reng.nro_doc))
+                                    OR (orig.nro_doc IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(orig.nro_doc)))
+                                    OR (UPPER(LTRIM(RTRIM(ISNULL(orig.doc_orig, '')))) IN ('FACT', 'COMP') AND NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                                )
+                                UNION ALL
+                                SELECT
+                                    1 AS has_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) = 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN dr.porc_imp ELSE NULL END AS alicuota_reng
+                                FROM saDevolucionProveedorReng dr
+                                WHERE UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                  AND (
+                                      (NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                                      OR LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(orig.nro_doc))
+                                  )
+                            ) src
+                        ) reng_calc
+                        OUTER APPLY (
+                            SELECT TOP 1
+                                COALESCE(
+                                    NULLIF(RTRIM(d_afec.nro_fact), ''),
+                                    NULLIF(RTRIM(d_dev.nro_fact), ''),
+                                    NULLIF(RTRIM(d_afec.nro_doc), '')
+                                ) AS nro_fact_origen
+                            FROM (SELECT 1 AS _x) _dummy
+                            LEFT JOIN saDocumentoCompra d_afec ON (
+                                UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB')
+                                AND NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL
+                                AND LTRIM(RTRIM(d_afec.nro_doc)) = LTRIM(RTRIM(orig.nro_orig))
+                                AND UPPER(LTRIM(RTRIM(d_afec.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'N/CR', 'NCR')
+                            )
+                            LEFT JOIN saDevolucionProveedorReng dpr ON (
+                                UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                AND d_afec.nro_doc IS NULL
+                                AND (
+                                    (NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                                    OR LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(orig.nro_doc))
+                                )
+                            )
+                            LEFT JOIN saDocumentoCompra d_dev ON (
+                                LTRIM(RTRIM(d_dev.nro_doc)) = LTRIM(RTRIM(dpr.num_doc))
+                                AND UPPER(LTRIM(RTRIM(d_dev.co_tipo_doc))) IN ('FACT', 'N/DB', 'NDEB')
+                            )
+                        ) afec
                         WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
                         UNION ALL
-                        SELECT r.reng_num, r.rowguid_reng_ori AS rowguid_reng_cob, RTRIM(d.num_comprobante) AS num_comprobante,
-                               orig.total_bruto AS monto_documento, 
-                               orig.total_bruto - orig.otros1 AS base_imponible, 
+                        SELECT r.reng_num, r.rowguid_reng_ori AS rowguid_reng_cob, RTRIM(COALESCE(NULLIF(RTRIM(d.num_comprobante), ''), RTRIM(d.nro_doc), '')) AS num_comprobante,
+                               ISNULL(d.fec_emis, p.fecha) AS fec_emis_ivan,
+                               ISNULL(orig.total_neto, orig.total_bruto) AS monto_documento, 
+                               CASE
+                                   WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.base_gravada_reng, 0)
+                                   WHEN ISNULL(orig.monto_imp, 0) = 0 THEN 0
+                                   ELSE (orig.total_neto - orig.monto_imp - ISNULL(orig.otros1, 0) - ISNULL(orig.otros2, 0) - ISNULL(orig.otros3, 0))
+                               END AS base_imponible, 
                                d.total_neto AS monto_ret_imp, 
-                               orig.porc_imp AS alicuota,
-                               ISNULL(orig.otros1, 0) AS monto_excento,
-                               CONVERT(VARCHAR(6), ISNULL(orig.fec_emis, p.fecha), 112) AS periodo_impositivo,
+                               COALESCE(
+                                   NULLIF(reng_calc.alicuota_reng, 0),
+                                   CASE
+                                       WHEN orig.porc_imp IN (8, 16, 31) THEN orig.porc_imp
+                                       WHEN ISNULL(orig.monto_imp, 0) > 0 THEN 16.0
+                                       ELSE 0.0
+                                   END
+                               ) AS alicuota,
+                               ISNULL(orig.monto_imp, 0) AS monto_imp_causado,
+                               CASE
+                                   WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.exento_reng, 0)
+                                   WHEN ISNULL(orig.monto_imp, 0) = 0 THEN ISNULL(NULLIF(orig.otros2, 0), ISNULL(NULLIF(orig.total_bruto, 0), orig.total_neto))
+                                   ELSE ISNULL(orig.otros2, 0)
+                               END AS monto_excento,
+                               CONVERT(VARCHAR(6), ISNULL(d.fec_emis, p.fecha), 112) AS periodo_impositivo,
                                ISNULL(orig.fec_emis, p.fecha) AS fecha_documento,
-                               ISNULL(RTRIM(orig.n_control), '---') AS numero_control_documento,
+                               ISNULL(NULLIF(RTRIM(orig.n_control), ''), '---') AS numero_control_documento,
                                RTRIM(orig.co_tipo_doc) AS tipo_documento,
                                'C' AS tipo_operacion,
-                               CASE 
-                                   WHEN NULLIF(RTRIM(pdr.nro_fact), '') IS NOT NULL 
-                                   THEN RTRIM(pdr.nro_fact)
-                                   ELSE RTRIM(pdr.nro_doc)
+                               CASE
+                                   WHEN UPPER(LTRIM(RTRIM(COALESCE(orig.co_tipo_doc, pdr.co_tipo_doc)))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB') THEN
+                                       COALESCE(NULLIF(RTRIM(afec.nro_fact_origen), ''), NULLIF(RTRIM(orig.nro_orig), ''), '0')
+                                   ELSE '0'
                                END AS numero_documento_afectado,
                                RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact,
+                               RTRIM(COALESCE(NULLIF(RTRIM(orig.nro_fact), ''), NULLIF(RTRIM(pdr.nro_fact), ''), RTRIM(pdr.nro_doc))) AS nro_fact,
+                               RTRIM(COALESCE(NULLIF(RTRIM(orig.nro_fact), ''), NULLIF(RTRIM(pdr.nro_fact), ''), RTRIM(pdr.nro_doc))) AS numero_documento,
                                RTRIM(orig.co_tipo_doc) AS co_tipo_doc,
                                CASE 
-                                   WHEN (orig.total_bruto - orig.otros1) * (orig.porc_imp / 100.0) > 0 
-                                   THEN ROUND((d.total_neto / ((orig.total_bruto - orig.otros1) * (orig.porc_imp / 100.0))) * 100, 0)
-                                   WHEN ISNULL(pr.porc_esp, 0) > 0 THEN pr.porc_esp
-                                   ELSE 75 
+                                   WHEN ISNULL(pr.porc_esp, 0) >= 88 THEN 100
+                                   WHEN ISNULL(pr.porc_esp, 0) > 0 THEN 75
+                                   WHEN ISNULL(orig.monto_imp, 0) > 0 AND (d.total_neto / orig.monto_imp) >= 0.88 THEN 100
+                                   ELSE 75
                                END AS porc_ret
                         FROM saPagoDocReng r
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         INNER JOIN saPago p ON r.cob_num = p.cob_num
                         LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
-                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND pdr.co_tipo_doc NOT IN ('IVAN', 'ISLR') AND pdr.monto_retencion_iva > 0))
+                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')))
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
+                        OUTER APPLY (
+                            SELECT
+                                MAX(src.has_reng) AS has_reng,
+                                SUM(src.exento_reng) AS exento_reng,
+                                SUM(src.base_gravada_reng) AS base_gravada_reng,
+                                MAX(src.alicuota_reng) AS alicuota_reng
+                            FROM (
+                                SELECT
+                                    1 AS has_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) = 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                    CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN fr.porc_imp ELSE NULL END AS alicuota_reng
+                                FROM saFacturaCompraReng fr
+                                WHERE UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) = 'FACT'
+                                  AND (
+                                      LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(orig.nro_doc))
+                                      OR (UPPER(LTRIM(RTRIM(ISNULL(orig.doc_orig, '')))) IN ('FACT', 'COMP') AND NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                                  )
+                                UNION ALL
+                                SELECT
+                                    1 AS has_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) = 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                    CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN dr.porc_imp ELSE NULL END AS alicuota_reng
+                                FROM saDevolucionProveedorReng dr
+                                WHERE UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                  AND (
+                                      (NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                                      OR LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(orig.nro_doc))
+                                  )
+                            ) src
+                        ) reng_calc
+                        OUTER APPLY (
+                            SELECT TOP 1
+                                COALESCE(
+                                    NULLIF(RTRIM(d_afec.nro_fact), ''),
+                                    NULLIF(RTRIM(d_dev.nro_fact), ''),
+                                    NULLIF(RTRIM(d_afec.nro_doc), '')
+                                ) AS nro_fact_origen
+                            FROM (SELECT 1 AS _x) _dummy
+                            LEFT JOIN saDocumentoCompra d_afec ON (
+                                UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB')
+                                AND NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL
+                                AND LTRIM(RTRIM(d_afec.nro_doc)) = LTRIM(RTRIM(orig.nro_orig))
+                                AND UPPER(LTRIM(RTRIM(d_afec.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'N/CR', 'NCR')
+                            )
+                            LEFT JOIN saDevolucionProveedorReng dpr ON (
+                                UPPER(LTRIM(RTRIM(orig.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                AND d_afec.nro_doc IS NULL
+                                AND (
+                                    (NULLIF(RTRIM(orig.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(orig.nro_orig)))
+                                    OR LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(orig.nro_doc))
+                                )
+                            )
+                            LEFT JOIN saDocumentoCompra d_dev ON (
+                                LTRIM(RTRIM(d_dev.nro_doc)) = LTRIM(RTRIM(dpr.num_doc))
+                                AND UPPER(LTRIM(RTRIM(d_dev.co_tipo_doc))) IN ('FACT', 'N/DB', 'NDEB')
+                            )
+                        ) afec
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
                           AND LTRIM(RTRIM(r.co_tipo_doc)) = 'IVAN'
                           AND NOT EXISTS (
@@ -429,49 +818,81 @@ router.get('/:cob_num', async (req, res) => {
                         return { recordset: [] };
                     }),
                     pool.request().input('cob_num', sql.VarChar, cob_num).query(`
-                        SELECT rn.reng_num, rn.rowguid_reng_cob, RTRIM(rn.co_islr) AS co_islr,
+                        SELECT rn.reng_num,
+                               COALESCE(doc_reng.rowguid, rn.rowguid_reng_cob) AS rowguid_reng_cob,
+                               RTRIM(rn.co_islr) AS co_islr,
                                rn.monto, rn.monto_reten, rn.monto_obj, rn.porc_retn, CASE WHEN rn.monto_obj * (rn.porc_retn / 100.0) > rn.monto_reten THEN ROUND(rn.monto_obj * (rn.porc_retn / 100.0) - rn.monto_reten, 2) ELSE 0.0 END AS sustraendo,
-                               RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact,
-                               RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
+                               RTRIM(COALESCE(doc_reng.nro_doc, orig.nro_doc, '')) AS nro_doc,
+                               RTRIM(COALESCE(NULLIF(RTRIM(orig.nro_fact), ''), NULLIF(RTRIM(doc_reng.nro_fact), ''), RTRIM(doc_reng.nro_doc), '')) AS nro_fact,
+                               RTRIM(COALESCE(orig.co_tipo_doc, doc_reng.co_tipo_doc, 'FACT')) AS co_tipo_doc,
                                ISNULL(RTRIM(d.nro_doc), '') AS nro_doc_islr,
                                ISNULL(RTRIM(d.num_comprobante), '') AS num_comprobante,
+                               ISNULL(d.fec_emis, p.fecha) AS fec_emis_islr,
                                ISNULL(orig.fec_emis, p.fecha) AS fecha_documento,
                                ISNULL(NULLIF(RTRIM(orig.n_control), ''), '---') AS numero_control_documento,
-                               ISNULL(orig.total_bruto, rn.monto) AS monto_documento,
-                               ISNULL(RTRIM(orig.descrip), RTRIM(p.descrip)) AS doc_descrip,
+                               ISNULL(orig.total_neto, ISNULL(orig.total_bruto, rn.monto)) AS monto_documento,
+                               ISNULL(NULLIF(RTRIM(orig.observa), ''), RTRIM(p.descrip)) AS doc_descrip,
                                ISNULL((SELECT TOP 1 RTRIM(islr_des) FROM saConISLR WHERE LTRIM(RTRIM(co_islr)) = LTRIM(RTRIM(rn.co_islr))), 'Retención de ISLR') AS islr_des
                         FROM saPagoRentenReng rn
                         INNER JOIN saPagoDocReng pdr ON rn.rowguid_reng_cob = pdr.rowguid
                         INNER JOIN saPago p ON pdr.cob_num = p.cob_num
-                        LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
-                                                        AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
-                        LEFT JOIN saPagoDocReng islrPdr ON islrPdr.cob_num = p.cob_num AND LTRIM(RTRIM(islrPdr.co_tipo_doc)) = 'ISLR'
-                        LEFT JOIN saDocumentoCompra d ON LTRIM(RTRIM(islrPdr.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
-                                                      AND LTRIM(RTRIM(islrPdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
+                        OUTER APPLY (
+                            SELECT TOP 1 r_doc.*
+                            FROM saPagoDocReng r_doc
+                            WHERE (
+                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                                AND r_doc.rowguid = pdr.rowguid
+                            )
+                            OR (
+                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'ISLR'
+                                AND r_doc.cob_num = pdr.cob_num
+                                AND UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                            )
+                            ORDER BY 
+                                CASE 
+                                    WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA') AND r_doc.rowguid = pdr.rowguid THEN 0
+                                    WHEN pdr.rowguid_reng_ori IS NOT NULL AND r_doc.rowguid = pdr.rowguid_reng_ori THEN 1
+                                    WHEN UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) = 'FACT' THEN 2
+                                    ELSE 3
+                                END,
+                                r_doc.reng_num
+                        ) doc_reng
+                        LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(doc_reng.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
+                                                        AND LTRIM(RTRIM(doc_reng.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
+                        OUTER APPLY (
+                            SELECT TOP 1 dc_is.nro_doc, dc_is.num_comprobante, dc_is.fec_emis
+                            FROM saDocumentoCompra dc_is
+                            WHERE UPPER(RTRIM(dc_is.co_tipo_doc)) = 'ISLR'
+                              AND (
+                                  (UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'ISLR' AND LTRIM(RTRIM(dc_is.nro_doc)) = LTRIM(RTRIM(pdr.nro_doc)))
+                                  OR (dc_is.doc_orig = 'PAGO' AND LTRIM(RTRIM(dc_is.nro_orig)) = LTRIM(RTRIM(p.cob_num)))
+                              )
+                            ORDER BY CASE WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'ISLR' AND LTRIM(RTRIM(dc_is.nro_doc)) = LTRIM(RTRIM(pdr.nro_doc)) THEN 0 ELSE 1 END
+                        ) d
                         WHERE LTRIM(RTRIM(pdr.cob_num)) = LTRIM(RTRIM(@cob_num))
                         UNION ALL
                         SELECT r.reng_num, r.rowguid_reng_ori AS rowguid_reng_cob, '055' AS co_islr,
                                orig.total_bruto AS monto, 
                                d.total_neto AS monto_reten, 
-                               orig.total_bruto - orig.otros1 AS monto_obj,
-                               CASE WHEN orig.total_bruto - orig.otros1 > 0 THEN ROUND((d.total_neto / (orig.total_bruto - orig.otros1)) * 100, 2) ELSE 2.00 END AS porc_retn,
+                               orig.total_bruto - ISNULL(orig.otros1, 0) AS monto_obj,
+                               CASE WHEN orig.total_bruto - ISNULL(orig.otros1, 0) > 0 THEN ROUND((d.total_neto / (orig.total_bruto - ISNULL(orig.otros1, 0))) * 100, 2) ELSE 2.00 END AS porc_retn,
                                0 AS sustraendo,
                                RTRIM(pdr.nro_doc) AS nro_doc,
-                               RTRIM(pdr.nro_fact) AS nro_fact,
+                               RTRIM(COALESCE(NULLIF(RTRIM(orig.nro_fact), ''), NULLIF(RTRIM(pdr.nro_fact), ''), RTRIM(pdr.nro_doc))) AS nro_fact,
                                RTRIM(pdr.co_tipo_doc) AS co_tipo_doc,
                                ISNULL(RTRIM(d.nro_doc), '') AS nro_doc_islr,
                                ISNULL(RTRIM(d.num_comprobante), '') AS num_comprobante,
+                               ISNULL(d.fec_emis, p.fecha) AS fec_emis_islr,
                                ISNULL(orig.fec_emis, p.fecha) AS fecha_documento,
                                ISNULL(NULLIF(RTRIM(orig.n_control), ''), '---') AS numero_control_documento,
-                               ISNULL(orig.total_bruto, d.total_bruto) AS monto_documento,
-                               ISNULL(RTRIM(orig.descrip), RTRIM(p.descrip)) AS doc_descrip,
+                               ISNULL(orig.total_neto, ISNULL(orig.total_bruto, d.total_bruto)) AS monto_documento,
+                               ISNULL(NULLIF(RTRIM(orig.observa), ''), RTRIM(p.descrip)) AS doc_descrip,
                                'Pagos a Empresas Contratistas o Subcontratistas' AS islr_des
                         FROM saPagoDocReng r
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         INNER JOIN saPago p ON r.cob_num = p.cob_num
-                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND pdr.co_tipo_doc NOT IN ('IVAN', 'ISLR') AND pdr.monto_retencion > 0))
+                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')))
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -500,13 +921,24 @@ router.get('/:cob_num', async (req, res) => {
                         finalRetIslr = facturasConIslr.map((f, idx) => {
                             const docBruto = Number(f.total_neto || f.mont_cob || 0);
                             const retIslr = Number(f.monto_retencion || 0);
-                            const base = Number(f.total_bruto || (docBruto - (Number(f.monto_imp) || 0)) || docBruto);
-                            const porc = base > 0 ? Number(((retIslr / base) * 100).toFixed(2)) : 5.0;
+                            const exentoVal = Number(f.monto_exento || f.exento_reng || f.otros1 || 0);
+                            const gravadoBase = Number(f.base_imponible || f.base_gravada_reng || (docBruto - (Number(f.monto_imp) || 0) - exentoVal) || docBruto);
+
+                            // Detectar si la retención fue por Flete (Concepto 072 al 3% sobre el monto exento/flete)
+                            const isFlete = exentoVal > 0 && (
+                                Math.abs(retIslr - Number((exentoVal * 0.03).toFixed(2))) <= 0.05 ||
+                                Math.abs((retIslr / exentoVal) - 0.03) <= 0.005
+                            );
+
+                            const coIslr = isFlete ? '072' : '055';
+                            const islrDes = isFlete ? 'FLETES PAGADOS A PERSONAS JURÍDICAS O NATURALES' : 'Pagos a Empresas Contratistas o Subcontratistas';
+                            const base = isFlete ? exentoVal : (gravadoBase > 0 ? gravadoBase : docBruto);
+                            const porc = isFlete ? 3.0 : (base > 0 ? Number(((retIslr / base) * 100).toFixed(2)) : 2.0);
 
                             return {
                                 reng_num: idx + 1,
-                                co_islr: '084',
-                                islr_des: 'Pagos a Empresas Contratistas o Subcontratistas',
+                                co_islr: coIslr,
+                                islr_des: islrDes,
                                 monto: docBruto,
                                 monto_obj: base,
                                 monto_reten: retIslr,
@@ -514,6 +946,7 @@ router.get('/:cob_num', async (req, res) => {
                                 sustraendo: 0,
                                 num_comprobante: islrDoc?.nro_doc || resEnc.recordset[0]?.recibo || resEnc.recordset[0]?.cob_num,
                                 nro_doc_islr: islrDoc?.nro_doc || '',
+                                fec_emis_islr: islrDoc?.fec_emis || resEnc.recordset[0]?.fecha,
                                 fecha_documento: f.fec_emis || resEnc.recordset[0]?.fecha,
                                 numero_control_documento: f.n_control || '---',
                                 nro_doc: f.nro_doc,
@@ -527,12 +960,12 @@ router.get('/:cob_num', async (req, res) => {
                         const retIslr = Number(islrDoc.mont_cob || 0);
                         finalRetIslr = [{
                             reng_num: 1,
-                            co_islr: '084',
+                            co_islr: '055',
                             islr_des: 'Pagos a Empresas Contratistas o Subcontratistas',
                             monto: retIslr,
                             monto_obj: retIslr,
                             monto_reten: retIslr,
-                            porc_retn: 5.0,
+                            porc_retn: 2.0,
                             sustraendo: 0,
                             num_comprobante: islrDoc.nro_doc,
                             nro_doc_islr: islrDoc.nro_doc,
@@ -545,6 +978,31 @@ router.get('/:cob_num', async (req, res) => {
                             doc_descrip: 'Retención de ISLR'
                         }];
                     }
+                }
+
+                // Normalización de comprobantes ISLR existentes
+                if (finalRetIslr.length > 0 && resReng.recordset) {
+                    finalRetIslr.forEach(r => {
+                        const matchedFact = resReng.recordset.find(f => 
+                            (r.rowguid_reng_cob && f.rowguid === r.rowguid_reng_cob) ||
+                            (f.nro_doc && (f.nro_doc === r.nro_doc || f.nro_fact === r.nro_doc)) ||
+                            (f.nro_fact && (f.nro_fact === r.nro_fact || f.nro_doc === r.nro_fact))
+                        );
+                        if (matchedFact) {
+                            const exentoVal = Number(matchedFact.monto_exento || matchedFact.exento_reng || matchedFact.otros1 || 0);
+                            const retMonto = Number(r.monto_reten || 0);
+                            const isFlete = (r.co_islr === '072') || (exentoVal > 0 && (
+                                Math.abs(retMonto - Number((exentoVal * 0.03).toFixed(2))) <= 0.05 ||
+                                Math.abs((retMonto / exentoVal) - 0.03) <= 0.005
+                            ));
+                            if (isFlete) {
+                                r.co_islr = '072';
+                                r.islr_des = 'FLETES PAGADOS A PERSONAS JURÍDICAS O NATURALES';
+                                r.monto_obj = exentoVal > 0 ? exentoVal : Number(r.monto_obj || (retMonto / 0.03));
+                                r.porc_retn = 3.0;
+                            }
+                        }
+                    });
                 }
 
                 return {
@@ -1065,33 +1523,137 @@ router.post('/', async (req, res) => {
                 let docNroFact = line.nro_fact || line.nro_doc;
                 let docNControl = '';
                 let docNroOrig = '';
+                let docFecEmis = tsDate;
+                let docTotalNeto = 0;
+                let docBaseImponible = 0;
+                let docMontoExento = 0;
+                let docAlicuota = 16;
+                let docNroFactOrigen = '0';
 
                 const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR', 'AJNA'];
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR', 'NCR', 'AJNA'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
                         .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
                         .query(`
-                            SELECT RTRIM(co_mone) AS co_mone, tasa, saldo, 
-                                   RTRIM(ISNULL(nro_fact, nro_doc)) AS nro_fact,
-                                   RTRIM(ISNULL(n_control, '')) AS n_control,
-                                   RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
-                                   CONVERT(VARCHAR(10), fec_emis, 120) AS fec_emis_str
-                            FROM saDocumentoCompra
-                            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-                              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                            SELECT RTRIM(d.co_mone) AS co_mone, d.tasa, d.saldo, 
+                                   RTRIM(ISNULL(d.nro_fact, d.nro_doc)) AS nro_fact,
+                                   RTRIM(ISNULL(d.n_control, '')) AS n_control,
+                                   RTRIM(ISNULL(d.nro_orig, '')) AS nro_orig,
+                                   RTRIM(ISNULL(d.doc_orig, '')) AS doc_orig,
+                                   d.fec_emis,
+                                   CONVERT(VARCHAR(10), d.fec_emis, 120) AS fec_emis_str,
+                                   ISNULL(d.total_bruto, 0) AS total_bruto,
+                                   ISNULL(d.total_neto, 0) AS total_neto,
+                                   ISNULL(d.monto_imp, 0) AS monto_imp,
+                                   ISNULL(d.porc_imp, 0) AS porc_imp,
+                                   ISNULL(d.otros1, 0) AS otros1,
+                                   ISNULL(d.otros2, 0) AS otros2,
+                                   ISNULL(d.otros3, 0) AS otros3,
+                                   ISNULL(CASE
+                                       WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.exento_reng, 0)
+                                       WHEN ISNULL(d.monto_imp, 0) = 0 THEN ISNULL(NULLIF(d.otros2, 0), ISNULL(NULLIF(d.total_bruto, 0), d.total_neto))
+                                       ELSE ISNULL(d.otros2, 0)
+                                   END, 0) AS monto_exento_calc,
+                                   ISNULL(CASE
+                                       WHEN reng_calc.has_reng = 1 THEN ISNULL(reng_calc.base_gravada_reng, 0)
+                                       WHEN ISNULL(d.monto_imp, 0) = 0 THEN 0
+                                       ELSE (d.total_neto - d.monto_imp - ISNULL(d.otros1, 0) - ISNULL(d.otros2, 0) - ISNULL(d.otros3, 0))
+                                   END, 0) AS base_imponible_calc,
+                                   COALESCE(
+                                       NULLIF(reng_calc.alicuota_reng, 0),
+                                       CASE 
+                                           WHEN d.porc_imp IN (8, 16, 31) THEN d.porc_imp
+                                           WHEN ISNULL(d.monto_imp, 0) > 0 THEN 16
+                                           ELSE 0
+                                       END
+                                   ) AS alicuota_calc,
+                                   CASE 
+                                       WHEN UPPER(RTRIM(d.co_tipo_doc)) IN ('N/CR', 'NCR', 'N/DB', 'NDEB') THEN
+                                           COALESCE(NULLIF(RTRIM(afec.nro_fact_origen), ''), NULLIF(RTRIM(d.nro_orig), ''), '0')
+                                       ELSE '0'
+                                   END AS nro_fact_afectado_calc
+                            FROM saDocumentoCompra d
+                            OUTER APPLY (
+                                SELECT
+                                    MAX(src.has_reng) AS has_reng,
+                                    SUM(src.exento_reng) AS exento_reng,
+                                    SUM(src.base_gravada_reng) AS base_gravada_reng,
+                                    MAX(src.alicuota_reng) AS alicuota_reng
+                                FROM (
+                                    SELECT
+                                        1 AS has_reng,
+                                        CASE WHEN ISNULL(fr.porc_imp, 0) = 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                        CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN ISNULL(fr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                        CASE WHEN ISNULL(fr.porc_imp, 0) > 0 THEN fr.porc_imp ELSE NULL END AS alicuota_reng
+                                    FROM saFacturaCompraReng fr
+                                    WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) = 'FACT'
+                                      AND (
+                                          LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                          OR (UPPER(LTRIM(RTRIM(ISNULL(d.doc_orig, '')))) IN ('FACT', 'COMP') AND NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(fr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                      )
+                                    UNION ALL
+                                    SELECT
+                                        1 AS has_reng,
+                                        CASE WHEN ISNULL(dr.porc_imp, 0) = 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS exento_reng,
+                                        CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN ISNULL(dr.reng_neto, 0) ELSE 0 END AS base_gravada_reng,
+                                        CASE WHEN ISNULL(dr.porc_imp, 0) > 0 THEN dr.porc_imp ELSE NULL END AS alicuota_reng
+                                    FROM saDevolucionProveedorReng dr
+                                    WHERE UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                      AND (
+                                          (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                          OR LTRIM(RTRIM(dr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                      )
+                                ) src
+                            ) reng_calc
+                            OUTER APPLY (
+                                SELECT TOP 1
+                                    COALESCE(
+                                        NULLIF(RTRIM(d_afec.nro_fact), ''),
+                                        NULLIF(RTRIM(d_dev.nro_fact), ''),
+                                        NULLIF(RTRIM(d_afec.nro_doc), '')
+                                    ) AS nro_fact_origen
+                                FROM (SELECT 1 AS _x) _dummy
+                                LEFT JOIN saDocumentoCompra d_afec ON (
+                                    UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR', 'N/DB', 'NDEB')
+                                    AND NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL
+                                    AND LTRIM(RTRIM(d_afec.nro_doc)) = LTRIM(RTRIM(d.nro_orig))
+                                    AND UPPER(LTRIM(RTRIM(d_afec.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'N/CR', 'NCR')
+                                )
+                                LEFT JOIN saDevolucionProveedorReng dpr ON (
+                                    UPPER(LTRIM(RTRIM(d.co_tipo_doc))) IN ('N/CR', 'NCR')
+                                    AND d_afec.nro_doc IS NULL
+                                    AND (
+                                        (NULLIF(RTRIM(d.nro_orig), '') IS NOT NULL AND LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_orig)))
+                                        OR LTRIM(RTRIM(dpr.doc_num)) = LTRIM(RTRIM(d.nro_doc))
+                                    )
+                                )
+                                LEFT JOIN saDocumentoCompra d_dev ON (
+                                    LTRIM(RTRIM(d_dev.nro_doc)) = LTRIM(RTRIM(dpr.num_doc))
+                                    AND UPPER(LTRIM(RTRIM(d_dev.co_tipo_doc))) IN ('FACT', 'N/DB', 'NDEB')
+                                )
+                            ) afec
+                            WHERE LTRIM(RTRIM(d.co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                              AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(@nro_doc))
                         `);
                     if (docInfo.recordset.length > 0) {
-                        docSaldo = Number(docInfo.recordset[0].saldo || 0);
-                        docTasa = Number(docInfo.recordset[0].tasa || 1);
+                        const di = docInfo.recordset[0];
+                        docSaldo = Number(di.saldo || 0);
+                        docTasa = Number(di.tasa || 1);
                         if (docTasa <= 1.000001 && Number(data.tasa || 1) > 1) {
                             docTasa = Number(data.tasa);
                         }
-                        docMone = docInfo.recordset[0].co_mone || 'BS';
-                        docNroFact = docInfo.recordset[0].nro_fact || docNroFact;
-                        docNControl = docInfo.recordset[0].n_control || '';
-                        docNroOrig = docInfo.recordset[0].nro_orig || '';
+                        docMone = di.co_mone || 'BS';
+                        docNroFact = di.nro_fact || docNroFact;
+                        docNControl = di.n_control || '';
+                        docNroOrig = di.nro_orig || '';
+                        if (di.fec_emis) docFecEmis = new Date(di.fec_emis);
+                        docTotalNeto = Number(di.total_neto || 0);
+                        docBaseImponible = Number(di.base_imponible_calc || 0);
+                        docMontoExento = Number(di.monto_exento_calc || 0);
+                        docAlicuota = Number(di.alicuota_calc ?? 16);
+                        docNroFactOrigen = di.nro_fact_afectado_calc || '0';
                     }
                 }
 
@@ -1324,19 +1886,26 @@ router.post('/', async (req, res) => {
 
                     // Insertar en saPagoRetenIvaReng
                     const rifComprador = retIvaMatch?.rif_comprador || data.co_prov;
-                    const baseImponible = Number(retIvaMatch?.base_imponible || 0);
-                    const montoDoc = Number(retIvaMatch?.monto_documento || totalRebaje);
-                    const alicuota = Number(retIvaMatch?.alicuota || 16);
-                    const isNcLine = ['N/CR', 'NCR'].includes(line.co_tipo_doc.trim().toUpperCase());
-                    const retDocType = isNcLine ? 'N/CR' : 'FACT';
-                    const retDocAfectado = retIvaMatch?.numero_documento_afectado || retIvaMatch?.nro_doc_afectado || docNroOrig || '0';
+                    const hasDbBreakdown = docBaseImponible > 0 || docMontoExento > 0;
+                    const baseImponible = hasDbBreakdown ? docBaseImponible : Number(retIvaMatch?.base_imponible || 0);
+                    const montoExcentoVal = hasDbBreakdown ? docMontoExento : Number(retIvaMatch?.monto_excento || 0);
+                    const montoDoc = docTotalNeto > 0 ? docTotalNeto : Number(retIvaMatch?.monto_documento || totalRebaje);
+                    const alicuota = docAlicuota > 0 ? docAlicuota : Number(retIvaMatch?.alicuota || 16);
+                    const isNcLine = ['N/CR', 'NCR'].includes(docTypeUpper);
+                    const isNdLine = ['N/DB', 'NDEB'].includes(docTypeUpper);
+                    const retDocType = isNcLine ? 'N/CR' : (isNdLine ? 'N/DB' : 'FACT');
+                    const retDocAfectado = (isNcLine || isNdLine)
+                        ? (docNroFactOrigen && docNroFactOrigen !== '0'
+                            ? docNroFactOrigen
+                            : (retIvaMatch?.numero_documento_afectado || retIvaMatch?.nro_doc_afectado || docNroOrig || '0'))
+                        : '0';
 
                     await transaction.request()
                         .input('reng_num', sql.Int, 1)
                         .input('rowguid_reng_cob', sql.UniqueIdentifier, ivanRengGuid)
                         .input('rif_contribuyente', sql.Char(10), (srv.rif || 'J401750354').substring(0, 10))
                         .input('periodo_impositivo', sql.Decimal(6), Number(periodStr))
-                        .input('fecha_documento', sql.SmallDateTime, tsDate)
+                        .input('fecha_documento', sql.SmallDateTime, docFecEmis)
                         .input('tipo_documento', sql.Char(4), padProfit(retDocType, 4))
                         .input('rif_comprador', sql.Char(10), rifComprador.substring(0, 10))
                         .input('numero_documento', sql.Char(20), padProfit(docNroFact, 20))
@@ -1346,7 +1915,7 @@ router.post('/', async (req, res) => {
                         .input('monto_ret_imp', sql.Decimal(15, 2), adjustedMontoRetencionIva)
                         .input('numero_documento_afectado', sql.Char(20), padProfit(retDocAfectado, 20))
                         .input('num_comprobante', sql.Char(14), comprobanteSeniat.substring(0, 14))
-                        .input('monto_excento', sql.Decimal(15, 2), Number(retIvaMatch?.monto_excento || 0))
+                        .input('monto_excento', sql.Decimal(15, 2), montoExcentoVal)
                         .input('alicuota', sql.Decimal(5, 2), alicuota)
                         .input('reten_tercero', sql.Bit, 0)
                         .input('numero_expediente', sql.Char(15), '0              ')

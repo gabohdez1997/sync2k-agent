@@ -1,7 +1,10 @@
 const https = require('https');
 const path = require('path');
 const { execFile } = require('child_process');
-const { sql, getPool, getServers } = require('../db');
+const { sql, getPool, getServers, pgPool } = require('../db');
+
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL || 'https://rwblykcpnduniexbivra.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3Ymx5a2NwbmR1bmlleGJpdnJhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTUxNzI0NCwiZXhwIjoyMDk3MDkzMjQ0fQ.Q04ibUleUEFCPcOsQ73qJI4W8nwDupfwACDeIczFAnw';
 
 const BCV_URL = 'https://www.bcv.org.ve/';
 const CARACAS_TIMEZONE = 'America/Caracas';
@@ -314,6 +317,87 @@ async function syncBcvRateForPool(pool, options = {}) {
 }
 
 /**
+ * Valida si un string tiene formato UUID estándar.
+ */
+function isValidUuid(id) {
+    return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id.trim());
+}
+
+/**
+ * Registra un evento de cambio de tasa en la auditoría de Supabase Cloud (tabla audit_log)
+ * y en PostgreSQL Local como respaldo / réplica offline.
+ */
+async function logAuditRecordToSupabase(entry = {}) {
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.PUBLIC_SUPABASE_URL || SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_KEY;
+
+    const branchId = isValidUuid(entry.branch_id) ? entry.branch_id.trim() : null;
+    const payload = {
+        action: entry.action || 'UPDATE',
+        module: entry.module || 'cash_exchange',
+        record_id: entry.record_id || 'BCV_RATE',
+        user_email: entry.user_email || 'sistema@sync2k.local',
+        branch_id: branchId,
+        old_data: entry.old_data || null,
+        new_data: entry.new_data || null,
+        metadata: entry.metadata || null,
+        source: entry.source || 'agent'
+    };
+
+    let cloudSaved = false;
+
+    // 1. Guardado en Supabase Cloud vía REST API
+    try {
+        const res = await fetch(`${supabaseUrl}/rest/v1/audit_log`, {
+            method: 'POST',
+            headers: {
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`,
+                'Content-Type': 'application/json',
+                'Prefer': 'return=minimal'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (res.ok) {
+            cloudSaved = true;
+            console.log(`☁️ [AUDIT BCV] Registro de auditoría guardado en Supabase Cloud (${entry.branchName || branchId || 'Global'}).`);
+        } else {
+            const errBody = await res.text().catch(() => '');
+            console.warn(`⚠️ [AUDIT BCV] Supabase Cloud retornó HTTP ${res.status}: ${errBody}`);
+        }
+    } catch (cloudErr) {
+        console.warn(`⚠️ [AUDIT BCV] Error al conectar con Supabase Cloud: ${cloudErr.message}`);
+    }
+
+    // 2. Guardado en PostgreSQL Local (sync2k local)
+    try {
+        if (pgPool) {
+            await pgPool.query(
+                `INSERT INTO audit_log (action, module, record_id, user_email, branch_id, old_data, new_data, metadata, source)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                [
+                    payload.action,
+                    payload.module,
+                    payload.record_id,
+                    payload.user_email,
+                    payload.branch_id,
+                    payload.old_data ? JSON.stringify(payload.old_data) : null,
+                    payload.new_data ? JSON.stringify(payload.new_data) : null,
+                    payload.metadata ? JSON.stringify(payload.metadata) : null,
+                    payload.source
+                ]
+            );
+            console.log(`💾 [AUDIT BCV] Registro de auditoría guardado en PostgreSQL Local (${entry.branchName || branchId || 'Global'}).`);
+        }
+    } catch (pgErr) {
+        if (!cloudSaved) {
+            console.warn(`⚠️ [AUDIT BCV] Error al guardar auditoría en PG Local: ${pgErr.message}`);
+        }
+    }
+}
+
+/**
  * Ejecuta la sincronización BCV -> saTasa en todas las sedes configuradas.
  */
 async function executeBcvAutoSync(options = {}) {
@@ -358,6 +442,38 @@ async function executeBcvAutoSync(options = {}) {
 
             if (syncResult.action === 'inserted') {
                 console.log(`[BCV SYNC] ✅ Sede "${srv.name}": Nueva tasa registrada (${syncResult.previousRate ?? 'N/A'} -> ${syncResult.newRate}) @ ${syncResult.insertedFecha}`);
+
+                if (!dryRun) {
+                    await logAuditRecordToSupabase({
+                        action: 'UPDATE',
+                        module: 'cash_exchange',
+                        record_id: 'BCV_RATE',
+                        user_email: user === 'PROFIT' ? 'sistema@sync2k.local' : user,
+                        branch_id: srv.id,
+                        branchName: srv.name,
+                        old_data: {
+                            tasa: syncResult.previousRate,
+                            fecha_anterior: syncResult.lastFecha
+                        },
+                        new_data: {
+                            tasa: syncResult.newRate,
+                            fuente: bcvInfo.fuente || BCV_URL,
+                            fecha_bcv: bcvInfo.fechaBcv || null,
+                            raw_tasa: bcvInfo.rawTasa || null,
+                            metodo: bcvInfo.metodo || null,
+                            fecha_insercion: syncResult.insertedFecha,
+                            moneda: 'USD',
+                            trigger
+                        },
+                        metadata: {
+                            message: `Tasa BCV sincronizada automáticamente a ${syncResult.newRate} Bs/$ para sede ${srv.name}`,
+                            sede_nombre: srv.name,
+                            trigger,
+                            executed_at_caracas: executedAtCaracas
+                        },
+                        source: 'agent'
+                    });
+                }
             } else if (syncResult.action === 'would_insert') {
                 console.log(`[BCV SYNC] 🔍 Sede "${srv.name}" [DRY-RUN]: Insertaría nueva tasa (${syncResult.previousRate ?? 'N/A'} -> ${syncResult.newRate})`);
             } else {
@@ -521,6 +637,7 @@ module.exports = {
     startBcvDailyScheduler,
     getBcvSchedulerStatus,
     getCaracasDateTimeParts,
-    ensureWindowsScheduledTask
+    ensureWindowsScheduledTask,
+    logAuditRecordToSupabase
 };
 
