@@ -415,7 +415,14 @@ async function getProximoConsecutivo(params) {
                     ISNULL(st.longitud, 10) AS longitud
                 FROM saSerie s
                 INNER JOIN saSerieTipo st ON s.co_tipo_serie = st.co_tipo_serie
-                WHERE UPPER(RTRIM(s.co_tipo_serie)) = '${co_tipo_serie.toUpperCase()}'
+                WHERE s.co_serie = (
+                    SELECT TOP 1 s2.co_serie
+                    FROM saSerie s2
+                    WHERE UPPER(RTRIM(s2.co_tipo_serie)) = '${co_tipo_serie.toUpperCase()}'
+                      AND (s2.prox_n + 1) >= s2.desde_n
+                      AND (s2.prox_n + 1) <= s2.hasta_n
+                    ORDER BY s2.desde_n ASC
+                )
             `;
             const res = await runner.request().query(querySerieDirect);
             if (res.recordset && res.recordset.length > 0) {
@@ -497,6 +504,8 @@ async function getProximoConsecutivo(params) {
                     UPDATE saSerie
                     SET prox_n = ${nextN}, fe_us_mo = GETDATE()
                     WHERE UPPER(RTRIM(co_tipo_serie)) = '${co_tipo_serie.toUpperCase()}'
+                      AND ${nextN} >= desde_n
+                      AND ${nextN} <= hasta_n
                 `);
             }
         } catch (eSync) {

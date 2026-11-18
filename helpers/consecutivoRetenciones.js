@@ -135,7 +135,7 @@ async function getProximoConsecutivoRetencion(params) {
 
     const profitSerieCode = conf.co_tipo_serie;
     const docTypeProfit = typeKey === 'IVAN_COMPRA' || profitSerieCode === 'C016' ? 'IVAN' : 'ISLR';
-    
+
     // Obtener TODAS las sedes activas (consulta Supabase Cloud primero)
     const allServers = await getAllActiveServers();
 
@@ -312,6 +312,7 @@ async function getProximoConsecutivoRetencion(params) {
         UPDATE saSerie
         SET prox_n = ${nextN}, fe_us_mo = GETDATE()
         WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
+          AND ${nextN} >= desde_n AND ${nextN} <= hasta_n
     `);
 
     // ── 7. Actualizar Supabase Cloud de inmediato como puntero principal ──
@@ -338,6 +339,7 @@ async function getProximoConsecutivoRetencion(params) {
                     UPDATE saSerie
                     SET prox_n = ${nextN}, fe_us_mo = GETDATE()
                     WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
+                      AND ${nextN} >= desde_n AND ${nextN} <= hasta_n
                       AND prox_n < ${nextN}
                 `);
                 console.log(`📡 [RETENCIONES] Sede remota ${otherSrv.id} sincronizada: prox_n=${nextN} para ${profitSerieCode}`);
@@ -543,7 +545,7 @@ async function revertirConsecutivoRetencionIfLast(params) {
                 const omIslr = Number(oIslr.recordset[0]?.max_n || 0);
                 if (omIslr > 0) maxIssuedNumbers.push(omIslr);
             }
-        } catch (e) {}
+        } catch (e) { }
     }));
 
     const currentMaxPhysical = maxIssuedNumbers.length > 0 ? Math.max(...maxIssuedNumbers) : 0;
@@ -564,13 +566,14 @@ async function revertirConsecutivoRetencionIfLast(params) {
                 ON CONFLICT (tipo)
                 DO UPDATE SET prox_n = EXCLUDED.prox_n, updated_at = NOW()
             `, [profitSerieCode, newNextN]);
-        } catch (ePg) {}
+        } catch (ePg) { }
 
         // C) Actualizar saSerie en la sede actual
         await runner.request().query(`
             UPDATE saSerie
             SET prox_n = ${newNextN}, fe_us_mo = GETDATE()
             WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
+              AND ${newNextN} >= desde_n AND ${newNextN} <= hasta_n
         `);
 
         // D) Replicar a sedes remotas en segundo plano
@@ -581,9 +584,10 @@ async function revertirConsecutivoRetencionIfLast(params) {
                     UPDATE saSerie
                     SET prox_n = ${newNextN}, fe_us_mo = GETDATE()
                     WHERE UPPER(RTRIM(co_tipo_serie)) = '${profitSerieCode.toUpperCase()}'
+                      AND ${newNextN} >= desde_n AND ${newNextN} <= hasta_n
                 `);
-            } catch (e) {}
-        })).catch(() => {});
+            } catch (e) { }
+        })).catch(() => { });
 
         return { reverted: true, newNextN, currentMax: currentMaxPhysical, delCorrelativo };
     } else {
