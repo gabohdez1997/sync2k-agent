@@ -3,6 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
+const { checkDuplicateAcrossBranches } = require('./documentos_compra');
 
 console.log("🧾 [AGENT] Iniciando Módulo de Facturas de Compra (saFacturaCompra)");
 
@@ -473,6 +474,25 @@ router.post('/', async (req, res) => {
             success: false,
             message: 'Campos obligatorios: co_prov, nro_fact (N° Factura del Proveedor) y renglones.'
         });
+    }
+
+    // Verificar si ya existe un documento/factura activa con este mismo nro_fact para este proveedor en CUALQUIER sucursal
+    if (typeof checkDuplicateAcrossBranches === 'function') {
+        const dup = await checkDuplicateAcrossBranches({
+            currentSedeId: req.query.sede || null,
+            coProv: payload.co_prov,
+            rif: payload.rif,
+            nroFact: payload.nro_fact,
+            excludeNroDoc: null,
+            sqlAuth: req.sqlAuth
+        });
+        if (dup) {
+            const sedeText = dup.branch_id === (req.query.sede || null) ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
+            return res.status(400).json({
+                success: false,
+                message: `El documento fiscal N° "${payload.nro_fact}" ya fue registrado en ${sedeText} para el proveedor ${dup.prov_des} (RIF: ${dup.rif || dup.co_prov}) con el documento interno ${dup.co_tipo_doc} #${dup.nro_doc}.`
+            });
+        }
     }
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sql, getPool, getServers, getExchangeRate } = require('../db');
+const { sql, getPool, getServers, getAllActiveServers, getExchangeRate } = require('../db');
 const { padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
 
@@ -105,6 +105,11 @@ async function checkDuplicateAcrossBranches({ currentSedeId, coProv, rif, nroFac
     let cleanRif = String(rif || '').toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
     const cleanCoProv = String(coProv || '').trim();
 
+    // Si cleanCoProv tiene formato de RIF (ej. J-40443570-0 o J404435700), extraer cleanRif también
+    if (!cleanRif && cleanCoProv && /^[VvJjGgEePp]\d+/.test(cleanCoProv.replace(/[^A-Za-z0-9]/g, ''))) {
+        cleanRif = cleanCoProv.toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+    }
+
     // Si no tenemos el RIF del proveedor pero sí su código, obtenerlo de la sede actual
     if (!cleanRif && cleanCoProv && currentSedeId) {
         try {
@@ -122,7 +127,25 @@ async function checkDuplicateAcrossBranches({ currentSedeId, coProv, rif, nroFac
 
     if (!cleanRif && !cleanCoProv) return null;
 
-    const servers = getServers();
+    let servers = [];
+    try {
+        if (typeof getAllActiveServers === 'function') {
+            servers = await getAllActiveServers();
+        }
+    } catch (e) {
+        servers = [];
+    }
+    if (!servers || servers.length === 0) {
+        servers = getServers();
+    }
+
+    // Asegurarse de incluir siempre la sede actual si no está en la lista de getAllActiveServers
+    if (currentSedeId && !servers.some(s => String(s.id).toLowerCase() === String(currentSedeId).toLowerCase())) {
+        const localSrvs = getServers();
+        const foundLocal = localSrvs.find(s => String(s.id).toLowerCase() === String(currentSedeId).toLowerCase());
+        if (foundLocal) servers.push(foundLocal);
+    }
+
     for (const srv of servers) {
         try {
             const srvPool = await getPool(srv.id, sqlAuth);
@@ -130,31 +153,69 @@ async function checkDuplicateAcrossBranches({ currentSedeId, coProv, rif, nroFac
             const excludeDoc = (isCurrent && excludeNroDoc) ? String(excludeNroDoc).trim() : '';
 
             const reqCheck = srvPool.request();
-            reqCheck.input('nro_fact', sql.Char(20), padProfit(cleanNroFact, 20));
+            reqCheck.input('clean_nro_fact', sql.VarChar(50), cleanNroFact);
             reqCheck.input('clean_rif', sql.VarChar(30), cleanRif);
             reqCheck.input('co_prov', sql.Char(16), padProfit(cleanCoProv, 16));
             reqCheck.input('is_current_edit', sql.Bit, excludeDoc ? 1 : 0);
             reqCheck.input('nro_doc_exclude', sql.Char(20), padProfit(excludeDoc, 20));
 
             const resCheck = await reqCheck.query(`
-                SELECT TOP 1 
-                    RTRIM(d.nro_doc) AS nro_doc,
-                    RTRIM(d.co_tipo_doc) AS co_tipo_doc,
-                    RTRIM(d.nro_fact) AS nro_fact,
-                    RTRIM(d.co_prov) AS co_prov,
-                    RTRIM(p.prov_des) AS prov_des,
-                    RTRIM(p.rif) AS rif,
-                    d.fec_emis,
-                    d.total_neto
-                FROM saDocumentoCompra d
-                LEFT JOIN saProveedor p ON LTRIM(RTRIM(d.co_prov)) = LTRIM(RTRIM(p.co_prov))
-                WHERE LTRIM(RTRIM(d.nro_fact)) = LTRIM(RTRIM(@nro_fact))
-                  AND d.anulado = 0
-                  AND (
-                      (@clean_rif <> '' AND REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(UPPER(ISNULL(p.rif, '')))), '-', ''), '.', ''), ' ', ''), '/', '') = @clean_rif)
-                      OR (@co_prov <> '' AND LTRIM(RTRIM(d.co_prov)) = LTRIM(RTRIM(@co_prov)))
-                  )
-                  AND NOT (@is_current_edit = 1 AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(@nro_doc_exclude)))
+                SELECT TOP 1 * FROM (
+                    -- Documentos de compra (saDocumentoCompra)
+                    SELECT 
+                        RTRIM(d.nro_doc) AS nro_doc,
+                        RTRIM(d.co_tipo_doc) AS co_tipo_doc,
+                        RTRIM(d.nro_fact) AS nro_fact,
+                        RTRIM(ISNULL(d.n_control, 'N/A')) AS n_control,
+                        RTRIM(d.co_prov) AS co_prov,
+                        RTRIM(p.prov_des) AS prov_des,
+                        RTRIM(p.rif) AS rif,
+                        d.fec_emis,
+                        d.total_neto,
+                        'DOCUMENTO' AS fuente
+                    FROM saDocumentoCompra d
+                    LEFT JOIN saProveedor p ON LTRIM(RTRIM(d.co_prov)) = LTRIM(RTRIM(p.co_prov))
+                    WHERE d.anulado = 0
+                      AND NOT (@is_current_edit = 1 AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(@nro_doc_exclude)))
+
+                    UNION ALL
+
+                    -- Facturas de compra de mercancía / inventario (saFacturaCompra)
+                    SELECT 
+                        RTRIM(f.doc_num) AS nro_doc,
+                        'FACT' AS co_tipo_doc,
+                        RTRIM(f.nro_fact) AS nro_fact,
+                        RTRIM(ISNULL(f.n_control, 'N/A')) AS n_control,
+                        RTRIM(f.co_prov) AS co_prov,
+                        RTRIM(p.prov_des) AS prov_des,
+                        RTRIM(p.rif) AS rif,
+                        f.fec_emis,
+                        f.total_neto,
+                        'FACTURA_COMPRA' AS fuente
+                    FROM saFacturaCompra f
+                    LEFT JOIN saProveedor p ON LTRIM(RTRIM(f.co_prov)) = LTRIM(RTRIM(p.co_prov))
+                    WHERE f.anulado = 0
+                      AND NOT (@is_current_edit = 1 AND LTRIM(RTRIM(f.doc_num)) = LTRIM(RTRIM(@nro_doc_exclude)))
+                ) doc
+                WHERE 
+                    -- Validación de Proveedor: coincide RIF o co_prov
+                    (
+                        (@clean_rif <> '' AND (
+                            REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(UPPER(ISNULL(doc.rif, '')))), '-', ''), '.', ''), ' ', ''), '/', '') = @clean_rif
+                            OR REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(UPPER(ISNULL(doc.co_prov, '')))), '-', ''), '.', ''), ' ', ''), '/', '') = @clean_rif
+                        ))
+                        OR (@co_prov <> '' AND LTRIM(RTRIM(doc.co_prov)) = LTRIM(RTRIM(@co_prov)))
+                    )
+                    AND 
+                    -- Validación de Factura Proveedor: coincidencia exacta o numérica (omitiendo ceros a la izquierda)
+                    (
+                        LTRIM(RTRIM(doc.nro_fact)) = LTRIM(RTRIM(@clean_nro_fact))
+                        OR (
+                            TRY_CAST(LTRIM(RTRIM(doc.nro_fact)) AS BIGINT) IS NOT NULL 
+                            AND TRY_CAST(LTRIM(RTRIM(@clean_nro_fact)) AS BIGINT) IS NOT NULL 
+                            AND TRY_CAST(LTRIM(RTRIM(doc.nro_fact)) AS BIGINT) = TRY_CAST(LTRIM(RTRIM(@clean_nro_fact)) AS BIGINT)
+                        )
+                    )
             `);
 
             if (resCheck.recordset.length > 0) {
@@ -165,11 +226,13 @@ async function checkDuplicateAcrossBranches({ currentSedeId, coProv, rif, nroFac
                     nro_doc: match.nro_doc,
                     co_tipo_doc: match.co_tipo_doc,
                     nro_fact: match.nro_fact,
+                    n_control: match.n_control,
                     co_prov: match.co_prov,
                     prov_des: match.prov_des || match.co_prov,
                     rif: match.rif || cleanRif,
                     fec_emis: match.fec_emis ? String(match.fec_emis).split('T')[0] : null,
-                    total_neto: match.total_neto
+                    total_neto: match.total_neto,
+                    fuente: match.fuente
                 };
             }
         } catch (errBranch) {
@@ -1363,5 +1426,8 @@ router.delete('/:co_tipo_doc/:nro_doc', async (req, res) => {
     }
 });
 
+router.checkDuplicateAcrossBranches = checkDuplicateAcrossBranches;
+
 module.exports = router;
+module.exports.checkDuplicateAcrossBranches = checkDuplicateAcrossBranches;
 
