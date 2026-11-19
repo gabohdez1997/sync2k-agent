@@ -1977,4 +1977,395 @@ router.post('/conciliacion/guardar', async (req, res) => {
     });
 });
 
+// ============================================================================
+// 5. GESTIÓN CRUD DE CUENTAS DE INGRESOS Y EGRESOS (saCuentaIngEgr)
+// ============================================================================
+function buildCuentaIngEgrUsageSql(alias = 'c') {
+    return `
+        (SELECT COUNT(*) FROM saMovimientoBanco mb WHERE mb.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) AS mov_banco,
+        (SELECT COUNT(*) FROM saMovimientoCaja mc WHERE mc.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) AS mov_caja,
+        (SELECT COUNT(*) FROM saTransferenciaEntreCuentas tr WHERE tr.cta_ingr_egr_origen = ${alias}.co_cta_ingr_egr OR tr.cta_ingr_egr_destino = ${alias}.co_cta_ingr_egr OR tr.cta_ingr_egr_comision = ${alias}.co_cta_ingr_egr) AS transf_banco,
+        (SELECT COUNT(*) FROM saDepositoBanco db WHERE db.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) AS dep_banco,
+        (SELECT COUNT(*) FROM saOrdenPagoReng op WHERE op.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) AS ord_pago,
+        (
+            (SELECT COUNT(*) FROM saFacturaVenta fv WHERE fv.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saFacturaCompra fc WHERE fc.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saDocumentoVenta dv WHERE dv.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saDocumentoCompra dc WHERE dc.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saCliente cl WHERE cl.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saProveedor pr WHERE pr.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM par_emp pe WHERE pe.v_cta_ing_egr = ${alias}.co_cta_ingr_egr OR pe.c_cta_ing_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saCotizacionCliente cc WHERE cc.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saPedidoVenta pv WHERE pv.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saNotaDespachoVenta nd WHERE nd.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saNotaEntregaVenta ne WHERE ne.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saPlantillaVenta plv WHERE plv.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saDevolucionCliente dcl WHERE dcl.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saOrdenCompra oc WHERE oc.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saNotaRecepcionCompra nrc WHERE nrc.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM saDevolucionProveedor dpr WHERE dpr.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr) +
+            (SELECT COUNT(*) FROM pvParEmp pve WHERE
+                pve.co_cta_ingr_egr = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_FacDev = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_moneda2 = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_facdev_moneda2 = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_banco_moneda2 = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_moneda3 = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_facdev_moneda3 = ${alias}.co_cta_ingr_egr OR
+                pve.co_cta_ingr_egr_banco_moneda3 = ${alias}.co_cta_ingr_egr
+            )
+        ) AS otras_refs
+    `;
+}
+
+function enrichCuentaIngEgrRow(row) {
+    const movBanco = Number(row.mov_banco || 0);
+    const movCaja = Number(row.mov_caja || 0);
+    const transfBanco = Number(row.transf_banco || 0);
+    const depBanco = Number(row.dep_banco || 0);
+    const ordPago = Number(row.ord_pago || 0);
+    const otrasRefs = Number(row.otras_refs || 0);
+    const totalMovimientos = movBanco + movCaja + transfBanco + depBanco + ordPago;
+
+    return {
+        ...row,
+        mov_banco: movBanco,
+        mov_caja: movCaja,
+        transf_banco: transfBanco,
+        dep_banco: depBanco,
+        ord_pago: ordPago,
+        otras_refs: otrasRefs,
+        total_movimientos: totalMovimientos,
+        tiene_movimientos: totalMovimientos > 0,
+        editable: totalMovimientos === 0,
+        eliminable: totalMovimientos === 0 && otrasRefs === 0
+    };
+}
+
+async function resolveCoIslrPadded(runner, coIslrRaw) {
+    if (!coIslrRaw) return null;
+    const chkIslr = new sql.Request(runner);
+    chkIslr.input('CoIslr', sql.VarChar(6), coIslrRaw);
+    const islrFound = await chkIslr.query(`SELECT co_islr FROM saConISLR WHERE UPPER(RTRIM(co_islr)) = UPPER(@CoIslr)`);
+    if (islrFound.recordset.length === 0) {
+        throw new Error(`El concepto ISLR "${coIslrRaw}" no existe en saConISLR.`);
+    }
+    return islrFound.recordset[0].co_islr;
+}
+
+async function getCuentaIngEgrByCode(runner, codigo) {
+    const req = new sql.Request(runner);
+    req.input('Codigo', sql.VarChar(20), String(codigo || '').trim());
+    const res = await req.query(`
+        SELECT
+            RTRIM(c.co_cta_ingr_egr) AS co_cta_ingr_egr,
+            RTRIM(c.descrip) AS descrip,
+            RTRIM(ISNULL(c.co_islr, '')) AS co_islr,
+            RTRIM(ISNULL(i.islr_des, '')) AS islr_des,
+            RTRIM(ISNULL(c.campo1, '')) AS campo1,
+            RTRIM(c.co_us_in) AS co_us_in,
+            c.fe_us_in,
+            RTRIM(c.co_us_mo) AS co_us_mo,
+            c.fe_us_mo,
+            c.rowguid,
+            ${buildCuentaIngEgrUsageSql('c')}
+        FROM saCuentaIngEgr c
+        LEFT JOIN saConISLR i ON c.co_islr = i.co_islr
+        WHERE UPPER(LTRIM(RTRIM(c.co_cta_ingr_egr))) = UPPER(LTRIM(RTRIM(@Codigo)))
+    `);
+    return res.recordset[0] ? enrichCuentaIngEgrRow(res.recordset[0]) : null;
+}
+
+router.get('/cuentas-ingr-egr', async (req, res) => {
+    try {
+        const ctx = await resolvePool(req, res);
+        if (!ctx) return;
+        const { srv, pool } = ctx;
+
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 20));
+        const offset = (page - 1) * limit;
+        const search = req.query.search ? String(req.query.search).trim() : '';
+        const filter = req.query.filter ? String(req.query.filter).trim().toLowerCase() : 'all';
+
+        const cteWhereParts = ['1=1'];
+        const outerWhereParts = ['1=1'];
+
+        if (search) {
+            cteWhereParts.push(`(
+                RTRIM(c.co_cta_ingr_egr) LIKE @Search
+                OR RTRIM(c.descrip) LIKE @Search
+                OR RTRIM(ISNULL(c.co_islr, '')) LIKE @Search
+                OR RTRIM(ISNULL(i.islr_des, '')) LIKE @Search
+            )`);
+        }
+
+        if (filter === 'sin_movimientos') {
+            outerWhereParts.push('(mov_banco + mov_caja + transf_banco + dep_banco + ord_pago) = 0');
+        } else if (filter === 'con_movimientos') {
+            outerWhereParts.push('(mov_banco + mov_caja + transf_banco + dep_banco + ord_pago) > 0');
+        }
+
+        const cteQuery = `
+            WITH CuentasCTE AS (
+                SELECT
+                    RTRIM(c.co_cta_ingr_egr) AS co_cta_ingr_egr,
+                    RTRIM(c.descrip) AS descrip,
+                    RTRIM(ISNULL(c.co_islr, '')) AS co_islr,
+                    RTRIM(ISNULL(i.islr_des, '')) AS islr_des,
+                    RTRIM(ISNULL(c.campo1, '')) AS campo1,
+                    RTRIM(c.co_us_in) AS co_us_in,
+                    c.fe_us_in,
+                    RTRIM(c.co_us_mo) AS co_us_mo,
+                    c.fe_us_mo,
+                    ${buildCuentaIngEgrUsageSql('c')}
+                FROM saCuentaIngEgr c
+                LEFT JOIN saConISLR i ON c.co_islr = i.co_islr
+                WHERE ${cteWhereParts.join(' AND ')}
+            )
+        `;
+
+        const countReq = pool.request();
+        if (search) countReq.input('Search', sql.VarChar(120), `%${search}%`);
+        const metricsRes = await countReq.query(`
+            ${cteQuery}
+            SELECT
+                COUNT(*) AS total_all,
+                SUM(CASE WHEN (mov_banco + mov_caja + transf_banco + dep_banco + ord_pago) > 0 THEN 1 ELSE 0 END) AS total_con_movimientos,
+                SUM(CASE WHEN (mov_banco + mov_caja + transf_banco + dep_banco + ord_pago) = 0 THEN 1 ELSE 0 END) AS total_sin_movimientos,
+                SUM(CASE WHEN ${outerWhereParts.join(' AND ')} THEN 1 ELSE 0 END) AS total_filtered
+            FROM CuentasCTE
+        `);
+
+        const mRow = metricsRes.recordset[0] || {};
+        const totalItems = Number(mRow.total_filtered || 0);
+        const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+
+        const listReq = pool.request();
+        if (search) listReq.input('Search', sql.VarChar(120), `%${search}%`);
+        listReq.input('Offset', sql.Int, offset);
+        listReq.input('Limit', sql.Int, limit);
+
+        const [listRes, islrRes] = await Promise.all([
+            listReq.query(`
+                ${cteQuery}
+                SELECT *
+                FROM CuentasCTE
+                WHERE ${outerWhereParts.join(' AND ')}
+                ORDER BY co_cta_ingr_egr ASC
+                OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
+            `),
+            pool.request().query(`
+                SELECT
+                    RTRIM(co_islr) AS co_islr,
+                    RTRIM(islr_des) AS islr_des
+                FROM saConISLR
+                ORDER BY co_islr ASC
+            `)
+        ]);
+
+        const data = listRes.recordset.map(enrichCuentaIngEgrRow);
+
+        res.json({
+            success: true,
+            sede: srv.name,
+            data,
+            conceptos_islr: islrRes.recordset,
+            metrics: {
+                total_cuentas: Number(mRow.total_all || 0),
+                con_movimientos: Number(mRow.total_con_movimientos || 0),
+                sin_movimientos: Number(mRow.total_sin_movimientos || 0)
+            },
+            pagination: {
+                page,
+                limit,
+                total_items: totalItems,
+                total_pages: totalPages
+            }
+        });
+    } catch (err) {
+        console.error('❌ [BANCOS] Error en GET /cuentas-ingr-egr:', err.message);
+        res.status(500).json({ success: false, message: 'Error consultando cuentas de ingresos y egresos: ' + err.message });
+    }
+});
+
+router.post('/cuentas-ingr-egr', async (req, res) => {
+    const payload = req.body || {};
+    const codigoRaw = String(payload.co_cta_ingr_egr || '').trim().toUpperCase();
+    const descripRaw = String(payload.descrip || '').trim();
+    const coIslrRaw = String(payload.co_islr || '').trim().toUpperCase();
+    const campo1Raw = payload.campo1 ? String(payload.campo1).trim().substring(0, 60) : null;
+    const profitUser = getProfitUser(req, payload.co_us_in);
+
+    if (!codigoRaw) return res.status(400).json({ success: false, message: 'El código de cuenta es obligatorio.' });
+    if (codigoRaw.length > 20) return res.status(400).json({ success: false, message: 'El código no puede exceder 20 caracteres.' });
+    if (!descripRaw) return res.status(400).json({ success: false, message: 'La descripción es obligatoria.' });
+    if (descripRaw.length > 60) return res.status(400).json({ success: false, message: 'La descripción no puede exceder 60 caracteres.' });
+
+    await withTransaction(req, res, async (transaction, srv) => {
+        const sucuCode = getSucuCode(srv, payload.co_sucu_in);
+
+        const existing = await getCuentaIngEgrByCode(transaction, codigoRaw);
+        if (existing) {
+            throw new Error(`Ya existe una cuenta de ingresos/egresos con el código "${existing.co_cta_ingr_egr}".`);
+        }
+
+        const coIslrPadded = await resolveCoIslrPadded(transaction, coIslrRaw);
+
+        const ins = new sql.Request(transaction);
+        ins.input('Codigo', sql.Char(20), padProfit(codigoRaw, 20));
+        ins.input('Descrip', sql.VarChar(60), descripRaw);
+        ins.input('CoIslr', sql.Char(6), coIslrPadded);
+        ins.input('Campo1', sql.VarChar(60), campo1Raw);
+        ins.input('User', sql.Char(6), padProfit(profitUser, 6));
+        ins.input('Sucu', sql.Char(6), padProfit(sucuCode, 6));
+
+        const insRes = await ins.query(`
+            INSERT INTO saCuentaIngEgr (
+                co_cta_ingr_egr, descrip, co_islr, numcom, feccom, dis_cen,
+                campo1, campo2, campo3, campo4, campo5, campo6, campo7, campo8,
+                co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
+                revisado, trasnfe, rowguid
+            )
+            OUTPUT inserted.rowguid, inserted.fe_us_in
+            VALUES (
+                @Codigo, @Descrip, @CoIslr, NULL, NULL, NULL,
+                @Campo1, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                @User, @Sucu, GETDATE(), @User, @Sucu, GETDATE(),
+                NULL, NULL, NEWID()
+            )
+        `);
+
+        await insertPista(transaction, {
+            user: profitUser,
+            fecha: insRes.recordset[0].fe_us_in,
+            sucu: sucuCode,
+            tabla: 'saCuentaIngEgr',
+            rowguid: insRes.recordset[0].rowguid,
+            tipoOp: 'I',
+            campos: `${codigoRaw} - ${descripRaw}`
+        });
+
+        const created = await getCuentaIngEgrByCode(transaction, codigoRaw);
+        return {
+            data: created,
+            message: `Cuenta de Ingresos/Egresos "${codigoRaw}" creada con éxito.`
+        };
+    }, 201);
+});
+
+router.put('/cuentas-ingr-egr/:codigo', async (req, res) => {
+    const codigoParam = decodeURIComponent(req.params.codigo || '').trim();
+    const payload = req.body || {};
+    const descripRaw = String(payload.descrip || '').trim();
+    const coIslrRaw = String(payload.co_islr || '').trim().toUpperCase();
+    const campo1Raw = payload.campo1 !== undefined
+        ? (payload.campo1 ? String(payload.campo1).trim().substring(0, 60) : null)
+        : undefined;
+    const profitUser = getProfitUser(req, payload.co_us_mo);
+
+    if (!codigoParam) return res.status(400).json({ success: false, message: 'El código de cuenta es obligatorio.' });
+    if (!descripRaw) return res.status(400).json({ success: false, message: 'La descripción es obligatoria.' });
+    if (descripRaw.length > 60) return res.status(400).json({ success: false, message: 'La descripción no puede exceder 60 caracteres.' });
+
+    await withTransaction(req, res, async (transaction, srv) => {
+        const sucuCode = getSucuCode(srv, payload.co_sucu_mo);
+        const existing = await getCuentaIngEgrByCode(transaction, codigoParam);
+        if (!existing) {
+            throw new Error(`La cuenta "${codigoParam}" no existe.`);
+        }
+
+        if (existing.total_movimientos > 0) {
+            throw new Error(
+                `No se puede editar la cuenta "${existing.co_cta_ingr_egr}" porque tiene ${existing.total_movimientos} movimiento(s) asociado(s).`
+            );
+        }
+
+        const coIslrPadded = await resolveCoIslrPadded(transaction, coIslrRaw);
+
+        const upd = new sql.Request(transaction);
+        upd.input('Codigo', sql.Char(20), padProfit(existing.co_cta_ingr_egr, 20));
+        upd.input('Descrip', sql.VarChar(60), descripRaw);
+        upd.input('CoIslr', sql.Char(6), coIslrPadded);
+        upd.input('Campo1', sql.VarChar(60), campo1Raw !== undefined ? campo1Raw : (existing.campo1 || null));
+        upd.input('User', sql.Char(6), padProfit(profitUser, 6));
+        upd.input('Sucu', sql.Char(6), padProfit(sucuCode, 6));
+
+        const updRes = await upd.query(`
+            UPDATE saCuentaIngEgr
+            SET
+                descrip = @Descrip,
+                co_islr = @CoIslr,
+                campo1 = @Campo1,
+                co_us_mo = @User,
+                co_sucu_mo = @Sucu,
+                fe_us_mo = GETDATE()
+            OUTPUT inserted.rowguid, inserted.fe_us_mo
+            WHERE co_cta_ingr_egr = @Codigo
+        `);
+
+        await insertPista(transaction, {
+            user: profitUser,
+            fecha: updRes.recordset[0].fe_us_mo,
+            sucu: sucuCode,
+            tabla: 'saCuentaIngEgr',
+            rowguid: updRes.recordset[0].rowguid,
+            tipoOp: 'M',
+            campos: `${existing.co_cta_ingr_egr}: "${existing.descrip}" -> "${descripRaw}"`
+        });
+
+        const updated = await getCuentaIngEgrByCode(transaction, existing.co_cta_ingr_egr);
+        return {
+            data: updated,
+            message: `Cuenta "${existing.co_cta_ingr_egr}" actualizada con éxito.`
+        };
+    });
+});
+
+router.delete('/cuentas-ingr-egr/:codigo', async (req, res) => {
+    const codigoParam = decodeURIComponent(req.params.codigo || '').trim();
+    if (!codigoParam) return res.status(400).json({ success: false, message: 'El código de cuenta es obligatorio.' });
+
+    const profitUser = getProfitUser(req);
+
+    await withTransaction(req, res, async (transaction, srv) => {
+        const sucuCode = getSucuCode(srv);
+        const existing = await getCuentaIngEgrByCode(transaction, codigoParam);
+        if (!existing) {
+            throw new Error(`La cuenta "${codigoParam}" no existe.`);
+        }
+
+        if (existing.total_movimientos > 0) {
+            throw new Error(
+                `No se puede eliminar la cuenta "${existing.co_cta_ingr_egr}" porque tiene ${existing.total_movimientos} movimiento(s) asociado(s).`
+            );
+        }
+
+        if (existing.otras_refs > 0) {
+            throw new Error(
+                `No se puede eliminar la cuenta "${existing.co_cta_ingr_egr}" porque está referenciada en otros documentos o maestros de Profit Plus.`
+            );
+        }
+
+        const del = new sql.Request(transaction);
+        del.input('Codigo', sql.Char(20), padProfit(existing.co_cta_ingr_egr, 20));
+        await del.query(`DELETE FROM saCuentaIngEgr WHERE co_cta_ingr_egr = @Codigo`);
+
+        await insertPista(transaction, {
+            user: profitUser,
+            fecha: new Date(),
+            sucu: sucuCode,
+            tabla: 'saCuentaIngEgr',
+            rowguid: existing.rowguid,
+            tipoOp: 'E',
+            campos: `ELIMINADA ${existing.co_cta_ingr_egr} - ${existing.descrip}`
+        });
+
+        return {
+            co_cta_ingr_egr: existing.co_cta_ingr_egr,
+            message: `Cuenta "${existing.co_cta_ingr_egr}" eliminada definitivamente.`
+        };
+    });
+});
+
 module.exports = router;
