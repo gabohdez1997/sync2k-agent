@@ -912,7 +912,7 @@ router.get('/:cob_num', async (req, res) => {
 
                 let finalRetIslr = resIslr.recordset || [];
                 if (finalRetIslr.length === 0 && resReng.recordset && resReng.recordset.length > 0) {
-                    const facturasConIslr = resReng.recordset.filter(r => 
+                    const facturasConIslr = resReng.recordset.filter(r =>
                         Number(r.monto_retencion || 0) > 0 && r.co_tipo_doc !== 'IVAN' && r.co_tipo_doc !== 'ISLR'
                     );
                     const islrDoc = resReng.recordset.find(r => r.co_tipo_doc === 'ISLR');
@@ -1006,7 +1006,7 @@ router.get('/:cob_num', async (req, res) => {
                         }
 
                         if (resReng.recordset) {
-                            const matchedFact = resReng.recordset.find(f => 
+                            const matchedFact = resReng.recordset.find(f =>
                                 (r.rowguid_reng_cob && f.rowguid === r.rowguid_reng_cob) ||
                                 (f.nro_doc && (f.nro_doc === r.nro_doc || f.nro_fact === r.nro_doc)) ||
                                 (f.nro_fact && (f.nro_fact === r.nro_fact || f.nro_doc === r.nro_fact))
@@ -1065,6 +1065,47 @@ router.get('/:cob_num', async (req, res) => {
     }
 });
 
+// Helper compartido para revertir saldo de documentos pagados al anular o eliminar un pago
+async function revertirSaldosDocumentosPago({ transaction, renglones, cobNum, auditUser }) {
+    for (const line of renglones) {
+        const totalRebaje = Number(line.mont_cob || 0);
+        const tipoDoc = line.co_tipo_doc.trim().toUpperCase();
+        if (tipoDoc === 'IVAN' || tipoDoc === 'ISLR') continue;
+
+        if (totalRebaje > 0) {
+            await transaction.request()
+                .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
+                .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
+                .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                .query(`
+                    UPDATE saDocumentoCompra
+                    SET saldo = CASE WHEN saldo + @rebaje > total_neto THEN total_neto ELSE saldo + @rebaje END,
+                        fe_us_mo = GETDATE(),
+                        co_us_mo = @auditUser
+                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                      AND NOT (UPPER(LTRIM(RTRIM(ISNULL(doc_orig, '')))) = 'PAGO' AND LTRIM(RTRIM(ISNULL(nro_orig, ''))) = LTRIM(RTRIM(@cob_num)))
+                `);
+
+            if (tipoDoc === 'FACT') {
+                await transaction.request()
+                    .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
+                    .input('rebaje', sql.Decimal(18, 2), totalRebaje)
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saFacturaCompra
+                        SET saldo = CASE WHEN saldo + @rebaje > total_neto THEN total_neto ELSE saldo + @rebaje END,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
+                    `);
+            }
+        }
+    }
+}
+
 // --- ANULAR PAGO ---
 router.post('/:cob_num/anular', async (req, res) => {
     try {
@@ -1114,55 +1155,26 @@ router.post('/:cob_num/anular', async (req, res) => {
                         WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
                     `);
 
-                // 2. Anular documentos de retención creados por este pago (IVAN, ISLR)
+                // 2. Anular documentos generados por este pago (IVAN, ISLR, AJPA, AJNA)
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
                         UPDATE saDocumentoCompra
                         SET anulado = 1,
+                            saldo = 0,
                             fe_us_mo = GETDATE(),
                             co_us_mo = @auditUser
                         WHERE DOC_ORIG = 'PAGO' AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
                     `);
 
-                // 3. Revertir saldo de los documentos de compra pagados (omitir retenciones generadas)
-                for (const line of resReng.recordset) {
-                    const totalRebaje = Number(line.mont_cob || 0);
-                    const tipoDoc = line.co_tipo_doc.trim().toUpperCase();
-                    if (tipoDoc === 'IVAN' || tipoDoc === 'ISLR') continue;
-
-                    if (totalRebaje > 0) {
-                        await transaction.request()
-                            .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
-                            .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
-                            .input('rebaje', sql.Decimal(18, 2), totalRebaje)
-                            .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                            .query(`
-                                UPDATE saDocumentoCompra
-                                SET saldo = saldo + @rebaje,
-                                    fe_us_mo = GETDATE(),
-                                    co_us_mo = @auditUser
-                                WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-                                  AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
-                            `);
-
-                        // Si es factura de compra (FACT), revertir saldo también en saFacturaCompra
-                        if (tipoDoc === 'FACT') {
-                            await transaction.request()
-                                .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
-                                .input('rebaje', sql.Decimal(18, 2), totalRebaje)
-                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                                .query(`
-                                    UPDATE saFacturaCompra
-                                    SET saldo = saldo + @rebaje,
-                                        fe_us_mo = GETDATE(),
-                                        co_us_mo = @auditUser
-                                    WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
-                                `);
-                        }
-                    }
-                }
+                // 3. Revertir saldo de los documentos de compra pagados (excluye docs originados por este pago)
+                await revertirSaldosDocumentosPago({
+                    transaction,
+                    renglones: resReng.recordset,
+                    cobNum: cob_num,
+                    auditUser
+                });
 
                 // 4. Anular movimientos de caja asociados
                 await transaction.request()
@@ -1263,43 +1275,14 @@ const eliminarPagoHandler = async (req, res) => {
                 const auditUser = (req.profitUser || 'API').substring(0, 10).toUpperCase();
 
                 // 3. Si el pago NO estaba anulado, revertir el saldo de las facturas / documentos de compra
-                // (Omitiendo los documentos de retención propios del pago)
+                // (Omitiendo documentos de retención/ajuste propios del pago)
                 if (!pago.anulado) {
-                    for (const line of resReng.recordset) {
-                        const totalRebaje = Number(line.mont_cob || 0);
-                        const tipoDoc = line.co_tipo_doc.trim().toUpperCase();
-                        if (tipoDoc === 'IVAN' || tipoDoc === 'ISLR') continue;
-
-                        if (totalRebaje > 0) {
-                            await transaction.request()
-                                .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
-                                .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
-                                .input('rebaje', sql.Decimal(18, 2), totalRebaje)
-                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                                .query(`
-                                    UPDATE saDocumentoCompra
-                                    SET saldo = saldo + @rebaje,
-                                        fe_us_mo = GETDATE(),
-                                        co_us_mo = @auditUser
-                                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
-                                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
-                                `);
-
-                            if (tipoDoc === 'FACT') {
-                                await transaction.request()
-                                    .input('nro_doc', sql.Char(20), padProfit(line.nro_doc, 20))
-                                    .input('rebaje', sql.Decimal(18, 2), totalRebaje)
-                                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                                    .query(`
-                                        UPDATE saFacturaCompra
-                                        SET saldo = saldo + @rebaje,
-                                            fe_us_mo = GETDATE(),
-                                            co_us_mo = @auditUser
-                                        WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@nro_doc))
-                                    `);
-                            }
-                        }
-                    }
+                    await revertirSaldosDocumentosPago({
+                        transaction,
+                        renglones: resReng.recordset,
+                        cobNum: cob_num,
+                        auditUser
+                    });
                 }
 
                 // 4. Eliminar movimientos de caja y banco creados por este pago
@@ -1444,8 +1427,8 @@ router.post('/', async (req, res) => {
         const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'P-001';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
-        const pagoFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/)) 
-            ? String(data.fecha).trim() 
+        const pagoFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/))
+            ? String(data.fecha).trim()
             : new Date().toISOString().split('T')[0];
         const tsDate = new Date(`${pagoFechaStr}T12:00:00`);
 
@@ -1486,8 +1469,8 @@ router.post('/', async (req, res) => {
 
             let finalMontoHeader = 0;
             if (data.formas_pago && data.formas_pago.length > 0) {
-                finalMontoHeader = paymentMone === 'USD' 
-                    ? Math.round((totalFormasPagoBs / Number(data.tasa || 1)) * 100) / 100 
+                finalMontoHeader = paymentMone === 'USD'
+                    ? Math.round((totalFormasPagoBs / Number(data.tasa || 1)) * 100) / 100
                     : totalFormasPagoBs;
             } else {
                 finalMontoHeader = 0;
@@ -2120,7 +2103,7 @@ router.post('/', async (req, res) => {
             if (data.ajuste_diferencia && (data.ajuste_diferencia.tipo === 'AJPA' || data.ajuste_diferencia.tipo === 'AJNA')) {
                 const ajTipo = data.ajuste_diferencia.tipo === 'AJNA' ? 'AJNA' : 'AJPA';
                 const coTipoSerie = ajTipo === 'AJNA' ? 'C008' : 'C010';
-                const coConsecutivos = ajTipo === 'AJNA' 
+                const coConsecutivos = ajTipo === 'AJNA'
                     ? ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA']
                     : ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'];
 
@@ -2212,7 +2195,7 @@ router.post('/', async (req, res) => {
                     num_doc: null,
                     mont_doc: 0,
                     fecha_che: null
-                  }];
+                }];
 
             for (let i = 0; i < activeFormasPago.length; i++) {
                 const tp = activeFormasPago[i];
