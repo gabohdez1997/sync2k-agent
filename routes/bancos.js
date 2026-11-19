@@ -350,7 +350,7 @@ router.get('/movimientos', async (req, res) => {
         const { pool } = ctx;
 
         const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 15));
+        const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit, 10) || 15));
         const offset = (page - 1) * limit;
 
         const search = req.query.search ? String(req.query.search).trim() : '';
