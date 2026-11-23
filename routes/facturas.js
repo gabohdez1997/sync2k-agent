@@ -818,11 +818,14 @@ router.post('/', async (req, res) => {
             rDoc.input('deMonto_Imp2', sql.Decimal(18, 2), 0);
             rDoc.input('deMonto_Imp3', sql.Decimal(18, 2), 0);
             
-            const tipoImp = data.renglones[0]?.tipo_imp || '1';
+            const hasTax = totalImpBs > 0;
+            const firstExempt = data.renglones.find(r => Number(r.porc_imp || 0) === 0);
+            const rawExemptCode = String(firstExempt?.tipo_imp || '').trim();
+            const tipoImp = hasTax ? '1' : (['4', '5', '6', '7'].includes(rawExemptCode) ? rawExemptCode : '5');
             rDoc.input('sTipo_Imp', sql.Char(1), tipoImp);
             rDoc.input('iTipo_Origen', sql.Int, null);
             
-            const porcImp = data.renglones[0]?.porc_imp || 16;
+            const porcImp = hasTax ? 16 : 0;
             rDoc.input('dePorc_Imp', sql.Decimal(18, 5), porcImp);
             rDoc.input('dePorc_Imp2', sql.Decimal(18, 5), 0);
             rDoc.input('dePorc_Imp3', sql.Decimal(18, 5), 0);

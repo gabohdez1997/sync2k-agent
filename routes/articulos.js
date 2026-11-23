@@ -267,8 +267,7 @@ router.get('/', async (req, res) => {
 
                 // LÓGICA DE STOCK ROBUSTA: Usar ISNULL para evitar que valores nulos oculten artículos
                 const stockCondition = in_stock_all ? "" : ` AND (
-                    LTRIM(RTRIM(a.co_lin)) = '09' OR 
-                    RTRIM(a.tipo) IN ('S', '2') OR 
+                    RTRIM(a.tipo) = 'S' OR 
                     EXISTS (
                         SELECT 1 FROM saStockAlmacen st 
                         WHERE st.co_art = a.co_art 
@@ -482,7 +481,7 @@ router.get('/search', async (req, res) => {
             whereClause += " AND LTRIM(RTRIM(ISNULL(a.campo7, ''))) != '' ";
         }
         if (!in_stock_all) {
-            whereClause += ` AND (LTRIM(RTRIM(a.co_lin)) = '09' OR RTRIM(a.tipo) IN ('S','2') OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art ${authStockFilter} GROUP BY st.co_art HAVING SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='ACT' THEN st.stock ELSE 0 END, 0)) - SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='COM' THEN st.stock ELSE 0 END, 0)) > 0)) `;
+            whereClause += ` AND (RTRIM(a.tipo) = 'S' OR EXISTS (SELECT 1 FROM saStockAlmacen st WHERE st.co_art = a.co_art ${authStockFilter} GROUP BY st.co_art HAVING SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='ACT' THEN st.stock ELSE 0 END, 0)) - SUM(ISNULL(CASE WHEN RTRIM(st.tipo)='COM' THEN st.stock ELSE 0 END, 0)) > 0)) `;
         }
 
         if (normalFilters.length > 0) {
@@ -534,7 +533,7 @@ router.get('/search', async (req, res) => {
 
                 const resData = await r.query(
                     `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
-                            RTRIM(a.tipo) AS tipo, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
+                            RTRIM(a.tipo) AS tipo, RTRIM(a.tipo_imp) AS tipo_imp, RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                             RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl,
                             RTRIM(l.lin_des) AS linea, RTRIM(sl.subl_des) AS sublinea, RTRIM(c.cat_des) AS categoria,
                             RTRIM(au.co_ubicacion) AS co_ubicacion, RTRIM(u1.des_ubicacion) AS ubicacion,
@@ -3186,6 +3185,84 @@ router.post('/batch-update-prices', async (req, res) => {
     } catch (err) {
         console.error('[POST /articulos/batch-update-prices] Error:', err);
         return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// PATCH /api/v1/articulos/:co_art/clasificacion — Actualización rápida de tipo e IVA
+// ────────────────────────────────────────────────────────────────────────────
+router.patch('/:co_art/clasificacion', async (req, res) => {
+    try {
+        const coArt = String(req.params.co_art || '').trim();
+        if (!coArt) {
+            return res.status(400).json({ success: false, message: 'El código de artículo es obligatorio.' });
+        }
+
+        const VALID_TIPOS = ['V', 'S', 'C'];
+        const VALID_TAX_CODES = ['1', '2', '3', '4', '5', '6', '7'];
+
+        let nextTipo = null;
+        if (req.body?.tipo !== undefined) {
+            nextTipo = String(req.body.tipo).trim().toUpperCase();
+            if (!VALID_TIPOS.includes(nextTipo)) {
+                return res.status(400).json({ success: false, message: 'Tipo inválido. Valores permitidos: V, S, C.' });
+            }
+        }
+
+        let nextTipoImp = null;
+        if (req.body?.tipo_imp !== undefined) {
+            nextTipoImp = String(req.body.tipo_imp).trim();
+            if (!VALID_TAX_CODES.includes(nextTipoImp)) {
+                return res.status(400).json({ success: false, message: 'Código tipo_imp inválido. Valores permitidos: 1..7.' });
+            }
+        }
+
+        if (!nextTipo && !nextTipoImp) {
+            return res.status(400).json({ success: false, message: 'Debe enviar al menos tipo o tipo_imp válido.' });
+        }
+
+        const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool) => {
+            const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 6).toUpperCase();
+            const r = new sql.Request(pool);
+            r.input('co_art', sql.VarChar(30), coArt);
+            r.input('auditUser', sql.Char(6), padProfit(auditUser, 6));
+
+            const setClauses = ['fe_us_mo = GETDATE()', 'co_us_mo = @auditUser'];
+            if (nextTipo) {
+                r.input('tipo', sql.Char(1), nextTipo);
+                setClauses.push('tipo = @tipo');
+            }
+            if (nextTipoImp) {
+                r.input('tipo_imp', sql.Char(1), nextTipoImp);
+                setClauses.push('tipo_imp = @tipo_imp');
+            }
+
+            const result = await r.query(`
+                UPDATE saArticulo
+                SET ${setClauses.join(', ')}
+                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
+
+                SELECT RTRIM(co_art) AS co_art, RTRIM(tipo) AS tipo, RTRIM(tipo_imp) AS tipo_imp
+                FROM saArticulo
+                WHERE LTRIM(RTRIM(co_art)) = LTRIM(RTRIM(@co_art));
+            `);
+
+            const updated = result.recordset?.[0];
+            if (!updated) {
+                throw new Error(`Artículo ${coArt} no encontrado.`);
+            }
+
+            return {
+                co_art: updated.co_art,
+                tipo: updated.tipo,
+                tipo_imp: updated.tipo_imp
+            };
+        });
+
+        return writeResponse(res, outcome, `Sede "${req.query.sede}" no encontrada o error al actualizar clasificación.`);
+    } catch (error) {
+        console.error('[PATCH /articulos/:co_art/clasificacion] Error:', error);
+        return res.status(500).json({ success: false, message: 'Error al actualizar clasificación del artículo.', error: error.message });
     }
 });
 

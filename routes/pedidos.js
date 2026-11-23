@@ -149,6 +149,7 @@ router.get('/:doc_num', async (req, res) => {
                     pool.request().input('doc_num', sql.VarChar, doc_num).query(`
                         SELECT r.reng_num, RTRIM(r.co_art) AS co_art, RTRIM(a.art_des) AS art_des,
                                RTRIM(a.co_lin) AS co_lin, RTRIM(a.co_subl) AS co_subl, RTRIM(a.tipo) AS tipo_art,
+                               RTRIM(a.tipo) AS tipo, RTRIM(a.tipo_imp) AS art_tipo_imp,
                                 r.total_art AS cantidad, r.pendiente, RTRIM(r.co_alma) AS co_alma,
                                r.co_precio AS co_precio, r.prec_vta AS precio,
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
@@ -485,7 +486,7 @@ router.post('/', async (req, res) => {
                             continue;
                         }
 
-                        if (info.tipo_art === 'S' || info.tipo_art === '2' || info.co_lin === '09') {
+                        if (info.tipo_art === 'S') {
                             continue;
                         }
 

@@ -48,9 +48,9 @@ router.get('/articulos', async (req, res) => {
         }
 
         if (stockFilter === 'true') { 
-            whereClauses.push(`EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) > 0)`);
+            whereClauses.push(`(RTRIM(a.tipo) = 'S' OR EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) > 0))`);
         } else if (stockFilter === 'false') {
-            whereClauses.push(`NOT EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) > 0)`);
+            whereClauses.push(`(RTRIM(a.tipo) <> 'S' AND NOT EXISTS (SELECT 1 FROM saStockAlmacen s2 WHERE s2.co_art = a.co_art GROUP BY s2.co_art HAVING SUM(CASE WHEN RTRIM(s2.tipo)='ACT' THEN s2.stock ELSE 0 END) > 0))`);
         }
 
         if (soloPendientes) { 
@@ -77,6 +77,7 @@ router.get('/articulos', async (req, res) => {
         const querySQL = `
             SELECT 
                 RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
+                RTRIM(a.tipo) AS tipo, RTRIM(a.tipo_imp) AS tipo_imp,
                 RTRIM(a.modelo) AS modelo, RTRIM(a.ref) AS referencia,
                 RTRIM(l.lin_des) AS linea, RTRIM(c.cat_des) AS categoria,
                 p1.monto AS prec1, m1.monto_max AS margen1,
