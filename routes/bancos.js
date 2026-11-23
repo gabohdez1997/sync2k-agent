@@ -358,6 +358,7 @@ router.get('/movimientos', async (req, res) => {
         const tipoOp = req.query.tipo_op ? String(req.query.tipo_op).trim().toUpperCase() : '';
         const origen = req.query.origen ? String(req.query.origen).trim().toUpperCase() : '';
         const estado = req.query.estado ? String(req.query.estado).trim().toLowerCase() : 'all';
+        const coCtaIngrEgr = req.query.co_cta_ingr_egr ? String(req.query.co_cta_ingr_egr).trim() : '';
         const fechaD = req.query.fecha_d || req.query.fec_d || '';
         const fechaH = req.query.fecha_h || req.query.fec_h || '';
         const coUsIn = req.query.co_us_in ? String(req.query.co_us_in).trim().toUpperCase() : '';
@@ -386,6 +387,7 @@ router.get('/movimientos', async (req, res) => {
             if (fechaD) request.input('FechaD', sql.SmallDateTime, parseProfitDate(fechaD));
             if (fechaH) request.input('FechaH', sql.SmallDateTime, parseProfitDate(fechaH));
             if (coUsIn) request.input('CoUsIn', sql.VarChar(20), coUsIn);
+            if (coCtaIngrEgr) request.input('CoCtaIngrEgr', sql.VarChar(30), coCtaIngrEgr);
         };
 
         if (search) {
@@ -399,6 +401,7 @@ router.get('/movimientos', async (req, res) => {
             )`);
         }
         if (codCta) whereParts.push('mb.cod_cta = @CodCta');
+        if (coCtaIngrEgr) whereParts.push('LTRIM(RTRIM(mb.co_cta_ingr_egr)) = @CoCtaIngrEgr');
         if (tipoOp) whereParts.push('mb.tipo_op = @TipoOp');
         if (origen) whereParts.push('mb.origen = @Origen');
         if (fechaD) whereParts.push('mb.fecha >= @FechaD');
@@ -2186,6 +2189,195 @@ router.get('/cuentas-ingr-egr', async (req, res) => {
     } catch (err) {
         console.error('❌ [BANCOS] Error en GET /cuentas-ingr-egr:', err.message);
         res.status(500).json({ success: false, message: 'Error consultando cuentas de ingresos y egresos: ' + err.message });
+    }
+});
+
+router.get('/cuentas-ingr-egr/:codigo/movimientos', async (req, res) => {
+    try {
+        const ctx = await resolvePool(req, res);
+        if (!ctx) return;
+        const { pool } = ctx;
+
+        const codigo = String(req.params.codigo || '').trim();
+        if (!codigo) {
+            return res.status(400).json({ success: false, message: 'Código de cuenta requerido.' });
+        }
+
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 25));
+        const offset = (page - 1) * limit;
+
+        const fechaD = req.query.fecha_d || req.query.fec_d || '';
+        const fechaH = req.query.fecha_h || req.query.fec_h || '';
+        const search = req.query.search ? String(req.query.search).trim() : '';
+
+        // 1. Obtener la cuenta
+        const cuentaInfo = await getCuentaIngEgrByCode(pool, codigo);
+        if (!cuentaInfo) {
+            return res.status(404).json({ success: false, message: `Cuenta de ingreso/egreso "${codigo}" no encontrada.` });
+        }
+
+        // 2. Filtros de fecha y búsqueda
+        const whereBanco = ['LTRIM(RTRIM(mb.co_cta_ingr_egr)) = @Codigo'];
+        const whereCaja = ['LTRIM(RTRIM(mc.co_cta_ingr_egr)) = @Codigo'];
+
+        const bindParams = (request) => {
+            request.input('Codigo', sql.VarChar(30), codigo);
+            if (fechaD) request.input('FechaD', sql.SmallDateTime, parseProfitDate(fechaD));
+            if (fechaH) request.input('FechaH', sql.SmallDateTime, parseProfitDate(fechaH));
+            if (search) request.input('Search', sql.VarChar(120), `%${search}%`);
+        };
+
+        if (fechaD) {
+            whereBanco.push('mb.fecha >= @FechaD');
+            whereCaja.push('mc.fecha >= @FechaD');
+        }
+        if (fechaH) {
+            whereBanco.push('mb.fecha < DATEADD(DAY, 1, @FechaH)');
+            whereCaja.push('mc.fecha < DATEADD(DAY, 1, @FechaH)');
+        }
+        if (search) {
+            whereBanco.push(`(
+                RTRIM(mb.mov_num) LIKE @Search
+                OR RTRIM(mb.doc_num) LIKE @Search
+                OR ISNULL(mb.descrip, '') LIKE @Search
+                OR RTRIM(cb.num_cta) LIKE @Search
+                OR RTRIM(b.des_ban) LIKE @Search
+            )`);
+            whereCaja.push(`(
+                RTRIM(mc.mov_num) LIKE @Search
+                OR RTRIM(mc.doc_num) LIKE @Search
+                OR ISNULL(mc.descrip, '') LIKE @Search
+                OR RTRIM(mc.cod_caja) LIKE @Search
+            )`);
+        }
+
+        const cteQuery = `
+            WITH MovsCTE AS (
+                SELECT
+                    'BANCO' AS fuente,
+                    RTRIM(mb.mov_num) AS mov_num,
+                    mb.fecha,
+                    RTRIM(mb.tipo_op) AS tipo_op,
+                    RTRIM(mb.doc_num) AS doc_num,
+                    RTRIM(ISNULL(mb.descrip, '')) AS descrip,
+                    RTRIM(mb.cod_cta) AS cuenta_origen_cod,
+                    RTRIM(cb.num_cta) AS num_cta,
+                    RTRIM(b.des_ban) AS entidad_nombre,
+                    RTRIM(cb.co_mone) AS co_mone,
+                    mb.monto_d,
+                    mb.monto_h,
+                    CASE 
+                        WHEN RTRIM(mb.tipo_op) = 'ID' THEN mb.idb
+                        WHEN mb.monto_h > 0 THEN mb.monto_h
+                        ELSE mb.monto_d
+                    END AS monto,
+                    CASE 
+                        WHEN RTRIM(mb.tipo_op) = 'ID' THEN 'IDB'
+                        WHEN mb.monto_h > 0 OR RTRIM(mb.tipo_op) IN ('DP','NC','TP') THEN 'INGRESO'
+                        ELSE 'EGRESO'
+                    END AS naturaleza,
+                    RTRIM(mb.origen) AS origen,
+                    mb.anulado,
+                    mb.conciliado
+                FROM saMovimientoBanco mb
+                INNER JOIN saCuentaBancaria cb ON mb.cod_cta = cb.cod_cta
+                INNER JOIN saBanco b ON cb.co_ban = b.co_ban
+                WHERE ${whereBanco.join(' AND ')}
+
+                UNION ALL
+
+                SELECT
+                    'CAJA' AS fuente,
+                    RTRIM(mc.mov_num) AS mov_num,
+                    mc.fecha,
+                    RTRIM(mc.tipo_mov) AS tipo_op,
+                    RTRIM(mc.doc_num) AS doc_num,
+                    RTRIM(ISNULL(mc.descrip, '')) AS descrip,
+                    RTRIM(mc.cod_caja) AS cuenta_origen_cod,
+                    RTRIM(mc.cod_caja) AS num_cta,
+                    'CAJA CHICA / EFECTIVO' AS entidad_nombre,
+                    'BS' AS co_mone,
+                    mc.monto_d,
+                    mc.monto_h,
+                    CASE 
+                        WHEN mc.monto_h > 0 THEN mc.monto_h
+                        ELSE mc.monto_d
+                    END AS monto,
+                    CASE 
+                        WHEN mc.monto_h > 0 OR RTRIM(mc.tipo_mov) = 'I' THEN 'INGRESO'
+                        ELSE 'EGRESO'
+                    END AS naturaleza,
+                    RTRIM(mc.origen) AS origen,
+                    mc.anulado,
+                    0 AS conciliado
+                FROM saMovimientoCaja mc
+                WHERE ${whereCaja.join(' AND ')}
+            )
+        `;
+
+        const metricsReq = pool.request();
+        bindParams(metricsReq);
+        const metricsRes = await metricsReq.query(`
+            ${cteQuery}
+            SELECT
+                COUNT(*) AS total_items,
+                SUM(CASE WHEN anulado = 1 THEN 1 ELSE 0 END) AS total_anulados,
+                SUM(CASE WHEN anulado = 0 AND conciliado = 1 THEN 1 ELSE 0 END) AS total_conciliados,
+                SUM(CASE WHEN anulado = 0 AND naturaleza = 'INGRESO' AND UPPER(RTRIM(co_mone)) IN ('BS','BSS','BS.','VEF','VES') THEN monto ELSE 0 END) AS total_ingresos_bs,
+                SUM(CASE WHEN anulado = 0 AND naturaleza = 'INGRESO' AND UPPER(RTRIM(co_mone)) NOT IN ('BS','BSS','BS.','VEF','VES') THEN monto ELSE 0 END) AS total_ingresos_usd,
+                SUM(CASE WHEN anulado = 0 AND naturaleza = 'EGRESO' AND UPPER(RTRIM(co_mone)) IN ('BS','BSS','BS.','VEF','VES') THEN monto ELSE 0 END) AS total_egresos_bs,
+                SUM(CASE WHEN anulado = 0 AND naturaleza = 'EGRESO' AND UPPER(RTRIM(co_mone)) NOT IN ('BS','BSS','BS.','VEF','VES') THEN monto ELSE 0 END) AS total_egresos_usd,
+                SUM(CASE WHEN anulado = 0 AND naturaleza = 'IDB' THEN monto ELSE 0 END) AS total_idb_bs
+            FROM MovsCTE
+        `);
+
+        const mRow = metricsRes.recordset[0] || {};
+        const totalItems = Number(mRow.total_items || 0);
+        const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+
+        const listReq = pool.request();
+        bindParams(listReq);
+        listReq.input('Offset', sql.Int, offset);
+        listReq.input('Limit', sql.Int, limit);
+
+        const listRes = await listReq.query(`
+            ${cteQuery}
+            SELECT *
+            FROM MovsCTE
+            ORDER BY fecha DESC, mov_num DESC
+            OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
+        `);
+
+        const data = listRes.recordset.map(row => ({
+            ...row,
+            tipo_op_label: TIPO_OP_LABELS[row.tipo_op] || (row.tipo_op === 'I' ? 'Ingreso Caja' : (row.tipo_op === 'E' ? 'Egreso Caja' : row.tipo_op))
+        }));
+
+        res.json({
+            success: true,
+            cuenta: cuentaInfo,
+            data,
+            metrics: {
+                total_registros: totalItems,
+                total_anulados: Number(mRow.total_anulados || 0),
+                total_conciliados: Number(mRow.total_conciliados || 0),
+                total_ingresos_bs: Number(mRow.total_ingresos_bs || 0),
+                total_ingresos_usd: Number(mRow.total_ingresos_usd || 0),
+                total_egresos_bs: Number(mRow.total_egresos_bs || 0),
+                total_egresos_usd: Number(mRow.total_egresos_usd || 0),
+                total_idb_bs: Number(mRow.total_idb_bs || 0)
+            },
+            pagination: {
+                page,
+                limit,
+                total: totalItems,
+                totalPages
+            }
+        });
+    } catch (err) {
+        console.error('❌ [BANCOS] Error en GET /cuentas-ingr-egr/:codigo/movimientos:', err.message);
+        res.status(500).json({ success: false, message: 'Error consultando movimientos de la cuenta: ' + err.message });
     }
 });
 
