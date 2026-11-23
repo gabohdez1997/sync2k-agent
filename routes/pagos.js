@@ -1507,8 +1507,76 @@ router.post('/', async (req, res) => {
             // Mapas para relacionar los renglones (Padre-Hijo)
             const rengDocGuidMap = new Map(); // nro_doc -> rowguid de saPagoDocReng
             const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA'];
+            const creditDocTypes = ['N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
             const parentLines = data.renglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
             const childLines = data.renglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
+
+            // 2.3 Procesar Retención de Timbre Fiscal 1x1000 (AJNA)
+            let createdTimbreAjnaBs = 0;
+            if (data.timbre_fiscal && (data.timbre_fiscal.aplicar || Number(data.timbre_fiscal.monto_bs) > 0.01)) {
+                const timbreMontoBs = Math.round((Number(data.timbre_fiscal.monto_bs) || 0) * 100) / 100;
+                if (timbreMontoBs > 0.01) {
+                    const corrAj = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: 'C008',
+                        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+                        co_sucur: sucuCode,
+                        table: 'saDocumentoCompra',
+                        col: 'nro_doc'
+                    });
+                    const ajDocNum = corrAj.docNum;
+                    const ajObserva = `RETENCION TIMBRE FISCAL 1X1000 PAGO N° ${cobNum}`.substring(0, 120);
+
+                    await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit('AJNA', 6))
+                        .input('nro_doc', sql.Char(20), padProfit(ajDocNum, 20))
+                        .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
+                        .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
+                        .input('tasa', sql.Decimal(21, 8), Number(data.tasa || 1))
+                        .input('observa', sql.VarChar(120), ajObserva)
+                        .input('fec_doc', sql.SmallDateTime, tsDate)
+                        .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
+                        .input('tipo_origen', sql.Int, 0)
+                        .input('nro_orig', sql.VarChar(20), cobNum)
+                        .input('total_bruto', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('total_neto', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('saldo', sql.Decimal(18, 2), timbreMontoBs)
+                        .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                        .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                        .query(`
+                            INSERT INTO saDocumentoCompra (
+                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
+                                fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
+                                doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
+                                total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                                otros1, otros2, otros3, adicional, co_us_in, co_sucu_in, fe_us_in,
+                                co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                                monto_desc_glob, monto_reca
+                            ) VALUES (
+                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
+                                @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
+                                @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
+                                @total_neto, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
+                                @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                                0, 0
+                            )
+                        `);
+
+                    createdTimbreAjnaBs = timbreMontoBs;
+                    childLines.push({
+                        co_tipo_doc: 'AJNA',
+                        nro_doc: ajDocNum,
+                        mont_cob: timbreMontoBs,
+                        monto_retencion_iva: 0,
+                        monto_retencion: 0,
+                        parent_doc: parentLines[0]?.nro_doc
+                    });
+
+                    console.log(`✨ [PAGOS] Retención Timbre Fiscal 1x1000 generada como AJNA ${ajDocNum} (${timbreMontoBs} Bs) para pago ${cobNum}`);
+                }
+            }
+
             const sortedRenglones = [...parentLines, ...childLines];
             let nextRengNum = 1;
 
@@ -1667,12 +1735,24 @@ router.post('/', async (req, res) => {
                 let finalMontCob = Math.abs(Number(line.mont_cob));
                 let adjustedMontoRetencionIva = Number(line.monto_retencion_iva || 0);
                 let adjustedMontoRetencion = Number(line.monto_retencion || 0);
+                const docTimbreBs = !creditDocTypes.includes(docTypeUpper)
+                    ? Math.abs(Number(line.monto_timbre_bs || 0))
+                    : 0;
 
-                let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                let totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion + docTimbreBs;
                 if (totalRebaje > docSaldo && docSaldo > 0) {
                     const excess = totalRebaje - docSaldo;
                     finalMontCob = Math.max(0, finalMontCob - excess);
-                    totalRebaje = finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion;
+                    totalRebaje = Math.min(docSaldo, finalMontCob + adjustedMontoRetencionIva + adjustedMontoRetencion + docTimbreBs);
+                } else if (!creditDocTypes.includes(docTypeUpper) && docSaldo > 0 && (docSaldo - totalRebaje) > 0) {
+                    const diffPendingBs = docSaldo - totalRebaje;
+                    const expectedTimbreFallback = docTimbreBs === 0 && parentLines.length === 1 ? createdTimbreAjnaBs : 0;
+                    if (
+                        (expectedTimbreFallback > 0 && Math.abs(diffPendingBs - expectedTimbreFallback) <= 0.05) ||
+                        diffPendingBs <= 0.05
+                    ) {
+                        totalRebaje = docSaldo;
+                    }
                 }
 
                 const guidResult = await transaction.request().query('SELECT NEWID() AS guid');

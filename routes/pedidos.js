@@ -153,7 +153,8 @@ router.get('/:doc_num', async (req, res) => {
                                r.co_precio AS co_precio, r.prec_vta AS precio,
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
                                 r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad,
-                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc, r.rowguid
+                               RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc, r.rowguid,
+                               RTRIM(ISNULL(r.comentario, '')) AS comentario
                         FROM saPedidoVentaReng r
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni
@@ -604,7 +605,9 @@ router.post('/', async (req, res) => {
                 ).trim().substring(0, 6);
 
                 const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
-                const prcUSD = isUSD ? prcIn : (prcIn / tasaDoc);
+                const prcUSD = isUSD
+                    ? prcIn
+                    : (Number(item.prec_vta_om) > 0 ? Number(item.prec_vta_om) : (prcIn / tasaDoc));
                 const sub = Math.round((qty * prcBs) * 100) / 100;
                 const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
 
@@ -655,7 +658,7 @@ router.post('/', async (req, res) => {
                 rL.input('deOtros',            sql.Decimal(18, 5),    0); // NO PERMITE NULL
                 rL.input('deTotal_Dev',        sql.Decimal(18, 5),    0);
                 rL.input('deMonto_Dev',        sql.Decimal(18, 5),    0); // NO PERMITE NULL
-                rL.input('sComentario',        sql.VarChar(sql.MAX),  '');
+                rL.input('sComentario',        sql.VarChar(sql.MAX),  String(item.comentario || '').substring(0, 500));
                 rL.input('sDis_Cen',           sql.VarChar(sql.MAX),  null);
                 rL.input('sCo_Sucu_In',        sql.Char(6),           padProfit(data.co_sucu_in || defSucu, 6));
                 rL.input('sCo_Us_In',          sql.Char(6),           padProfit(auditUser, 6));
