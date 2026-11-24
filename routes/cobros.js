@@ -137,6 +137,20 @@ function normalizeTaxId(raw) {
     return String(raw || '').trim().toUpperCase().replace(/[\s.-]/g, '');
 }
 
+/**
+ * Parsea fechas YYYY-MM-DD al mediodía local para evitar desfases de zona horaria (UTC-4).
+ */
+function parseLocalNoonDate(val, fallbackDate) {
+    if (!val) return fallbackDate || new Date();
+    const s = String(val).trim();
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (m) {
+        return new Date(`${m[1]}T12:00:00`);
+    }
+    const parsed = new Date(val);
+    return Number.isNaN(parsed.getTime()) ? (fallbackDate || new Date()) : parsed;
+}
+
 function isPersonaNaturalCliente(cliRow) {
     if (!cliRow) return false;
     const cleanRif = normalizeTaxId(cliRow.rif);
@@ -1933,8 +1947,9 @@ router.post('/', async (req, res) => {
             // Usar la caja '02' (Bolívares) por defecto para el renglón dummy de cobro neto a 0,00
             const dummyCaja = '02';
 
-            const activeFormasPago = data.formas_pago && data.formas_pago.length > 0
-                ? data.formas_pago
+            const validFormasPago = (data.formas_pago || []).filter(tp => Number(tp.mont_doc || 0) > 0);
+            const activeFormasPago = validFormasPago.length > 0
+                ? validFormasPago
                 : [{
                     forma_pag: 'EF',
                     cod_caja: dummyCaja,
@@ -1952,6 +1967,9 @@ router.post('/', async (req, res) => {
                 const rengNum = i + 1;
                 let movNumC = null;
                 let movNumB = null;
+                const tpFechaChe = parseLocalNoonDate(tp.fecha_che, tsDate);
+                const safeDocNum = String(tp.num_doc || '').trim().substring(0, 20);
+                const isBankForma = tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP';
 
                 if (tp.forma_pag === 'EF' || tp.forma_pag === 'TJ' || tp.forma_pag === 'CT') {
                     // Obtener la moneda de la caja
@@ -1988,7 +2006,7 @@ router.post('/', async (req, res) => {
                         rMovC.input('deTasa', sql.Decimal(21, 8), isUSDcaja ? rate : 1);
                         rMovC.input('sTipo_Mov', sql.Char(2), 'I');
                         rMovC.input('sForma_Pag', sql.Char(2), tp.forma_pag);
-                        rMovC.input('sNum_Pago', sql.VarChar(20), tp.num_doc ? tp.num_doc.substring(0, 20) : null);
+                        rMovC.input('sNum_Pago', sql.VarChar(20), safeDocNum || null);
                         rMovC.input('sCo_Ban', sql.Char(6), tp.co_ban ? padProfit(tp.co_ban, 6) : null);
                         rMovC.input('sCo_Tar', sql.Char(6), tp.co_tar ? padProfit(tp.co_tar, 6) : null);
                         rMovC.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
@@ -2010,7 +2028,7 @@ router.post('/', async (req, res) => {
                         await rMovC.execute('pInsertarMovimientoCaja');
                     }
 
-                } else if (tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP') {
+                } else if (isBankForma) {
                     // Obtener la moneda de la cuenta bancaria
                     let isUSDcuenta = false;
                     const resCtaInfo = await transaction.request()
@@ -2036,8 +2054,8 @@ router.post('/', async (req, res) => {
                         });
                         movNumB = corrBanco.docNum;
 
-                        // Tipo de operación para el banco
-                        let tipoOp = 'TR'; // Transferencia
+                        // Tipo de operación para el banco (en cobros, transferencia es ingreso 'TP')
+                        let tipoOp = 'TP';
                         if (tp.forma_pag === 'DP') tipoOp = 'DP'; // Depósito
                         if (tp.forma_pag === 'CH') tipoOp = 'CH'; // Cheque
 
@@ -2046,10 +2064,10 @@ router.post('/', async (req, res) => {
                         rMovB.input('sMov_Num', sql.Char(20), padProfit(movNumB, 20));
                         rMovB.input('sDescrip', sql.VarChar(160), (`INGR. COBRO ${cobNum} - ${data.co_cli}`).substring(0, 160));
                         rMovB.input('sCod_Cta', sql.Char(6), padProfit(tp.cod_cta, 6));
-                        rMovB.input('sdFecha', sql.SmallDateTime, tsDate);
+                        rMovB.input('sdFecha', sql.SmallDateTime, tpFechaChe);
                         rMovB.input('deTasa', sql.Decimal(21, 8), isUSDcuenta ? rate : 1);
                         rMovB.input('sTipo_Op', sql.Char(2), tipoOp);
-                        rMovB.input('sDoc_Num', sql.VarChar(20), (tp.num_doc || '').substring(0, 20));
+                        rMovB.input('sDoc_Num', sql.VarChar(20), safeDocNum);
                         rMovB.input('deMonto', sql.Decimal(18, 2), finalMontoBanco);
                         rMovB.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
                         rMovB.input('sOrigen', sql.Char(3), 'COB');
@@ -2062,7 +2080,7 @@ router.post('/', async (req, res) => {
                         rMovB.input('bOri_Dep', sql.Bit, 0);
                         rMovB.input('iDep_Con', sql.Int, 0);
                         rMovB.input('sCod_IngBen', sql.Char(6), null);
-                        rMovB.input('sdFecha_Che', sql.SmallDateTime, tsDate);
+                        rMovB.input('sdFecha_Che', sql.SmallDateTime, tpFechaChe);
                         rMovB.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
                         rMovB.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
                         rMovB.input('sRevisado', sql.Char(1), null);
@@ -2083,9 +2101,9 @@ router.post('/', async (req, res) => {
                     .input('cod_caja', sql.Char(6), tp.cod_caja ? padProfit(tp.cod_caja, 6) : null)
                     .input('mov_num_c', sql.Char(20), movNumC ? padProfit(movNumC, 20) : null)
                     .input('mov_num_b', sql.Char(20), movNumB ? padProfit(movNumB, 20) : null)
-                    .input('num_doc', sql.Char(20), tp.num_doc ? padProfit(tp.num_doc, 20) : null)
+                    .input('num_doc', sql.Char(20), isBankForma ? padProfit(safeDocNum, 20) : (safeDocNum ? padProfit(safeDocNum, 20) : null))
                     .input('mont_doc', sql.Decimal(18, 2), Number(tp.mont_doc))
-                    .input('fecha_che', sql.SmallDateTime, tp.fecha_che ? new Date(tp.fecha_che) : tsDate)
+                    .input('fecha_che', sql.SmallDateTime, tpFechaChe)
                     .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                     .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
                     .query(`
@@ -2185,7 +2203,7 @@ router.put('/:cob_num', async (req, res) => {
                     SELECT COUNT(*) AS reconciled 
                     FROM saMovimientoBanco 
                     WHERE mov_num IN (SELECT RTRIM(mov_num_b) FROM saCobroTPReng WHERE cob_num = @cob_num) 
-                      AND LTRIM(RTRIM(tipo_op)) IN ('DP', 'CH', 'TR') 
+                      AND LTRIM(RTRIM(tipo_op)) IN ('DP', 'CH', 'TR', 'TP') 
                       AND conciliado = 1
                 `);
             const resCajaMoviCheck = await transaction.request()
@@ -2992,8 +3010,9 @@ router.put('/:cob_num', async (req, res) => {
 
             // 9. Re-Insertar Formas de Pago (saCobroTPReng) y crear movimientos en Caja/Banco
             const dummyCaja = '02';
-            const activeFormasPago = data.formas_pago && data.formas_pago.length > 0
-                ? data.formas_pago
+            const validFormasPago = (data.formas_pago || []).filter(tp => Number(tp.mont_doc || 0) > 0);
+            const activeFormasPago = validFormasPago.length > 0
+                ? validFormasPago
                 : [{
                     forma_pag: 'EF',
                     cod_caja: dummyCaja,
@@ -3010,6 +3029,9 @@ router.put('/:cob_num', async (req, res) => {
                 const rengNum = i + 1;
                 let movNumC = null;
                 let movNumB = null;
+                const tpFechaChe = parseLocalNoonDate(tp.fecha_che, tsDate);
+                const safeDocNum = String(tp.num_doc || '').trim().substring(0, 20);
+                const isBankForma = tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP';
 
                 if (tp.forma_pag === 'EF' || tp.forma_pag === 'TJ' || tp.forma_pag === 'CT') {
                     let isUSDcaja = false;
@@ -3043,7 +3065,7 @@ router.put('/:cob_num', async (req, res) => {
                         rMovC.input('deTasa', sql.Decimal(21, 8), isUSDcaja ? rate : 1);
                         rMovC.input('sTipo_Mov', sql.Char(2), 'I');
                         rMovC.input('sForma_Pag', sql.Char(2), tp.forma_pag);
-                        rMovC.input('sNum_Pago', sql.VarChar(20), tp.num_doc ? tp.num_doc.substring(0, 20) : null);
+                        rMovC.input('sNum_Pago', sql.VarChar(20), safeDocNum || null);
                         rMovC.input('sCo_Ban', sql.Char(6), tp.co_ban ? padProfit(tp.co_ban, 6) : null);
                         rMovC.input('sCo_Tar', sql.Char(6), tp.co_tar ? padProfit(tp.co_tar, 6) : null);
                         rMovC.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
@@ -3065,7 +3087,7 @@ router.put('/:cob_num', async (req, res) => {
                         await rMovC.execute('pInsertarMovimientoCaja');
                     }
 
-                } else if (tp.forma_pag === 'TE' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP') {
+                } else if (isBankForma) {
                     let isUSDcuenta = false;
                     const resCtaInfo = await transaction.request()
                         .input('codCta', sql.Char(6), padProfit(tp.cod_cta, 6))
@@ -3089,7 +3111,7 @@ router.put('/:cob_num', async (req, res) => {
                         });
                         movNumB = corrBanco.docNum;
 
-                        let tipoOp = 'TR';
+                        let tipoOp = 'TP';
                         if (tp.forma_pag === 'DP') tipoOp = 'DP';
                         if (tp.forma_pag === 'CH') tipoOp = 'CH';
 
@@ -3097,10 +3119,10 @@ router.put('/:cob_num', async (req, res) => {
                         rMovB.input('sMov_Num', sql.Char(20), padProfit(movNumB, 20));
                         rMovB.input('sDescrip', sql.VarChar(160), (`INGR. COBRO ${cob_num} - ${data.co_cli}`).substring(0, 160));
                         rMovB.input('sCod_Cta', sql.Char(6), padProfit(tp.cod_cta, 6));
-                        rMovB.input('sdFecha', sql.SmallDateTime, tsDate);
+                        rMovB.input('sdFecha', sql.SmallDateTime, tpFechaChe);
                         rMovB.input('deTasa', sql.Decimal(21, 8), isUSDcuenta ? rate : 1);
                         rMovB.input('sTipo_Op', sql.Char(2), tipoOp);
-                        rMovB.input('sDoc_Num', sql.VarChar(20), (tp.num_doc || '').substring(0, 20));
+                        rMovB.input('sDoc_Num', sql.VarChar(20), safeDocNum);
                         rMovB.input('deMonto', sql.Decimal(18, 2), finalMontoBanco);
                         rMovB.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
                         rMovB.input('sOrigen', sql.Char(3), 'COB');
@@ -3113,7 +3135,7 @@ router.put('/:cob_num', async (req, res) => {
                         rMovB.input('bOri_Dep', sql.Bit, 0);
                         rMovB.input('iDep_Con', sql.Int, 0);
                         rMovB.input('sCod_IngBen', sql.Char(6), null);
-                        rMovB.input('sdFecha_Che', sql.SmallDateTime, tsDate);
+                        rMovB.input('sdFecha_Che', sql.SmallDateTime, tpFechaChe);
                         rMovB.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
                         rMovB.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
                         rMovB.input('sRevisado', sql.Char(1), null);
@@ -3133,9 +3155,9 @@ router.put('/:cob_num', async (req, res) => {
                     .input('cod_caja', sql.Char(6), tp.cod_caja ? padProfit(tp.cod_caja, 6) : null)
                     .input('mov_num_c', sql.Char(20), movNumC ? padProfit(movNumC, 20) : null)
                     .input('mov_num_b', sql.Char(20), movNumB ? padProfit(movNumB, 20) : null)
-                    .input('num_doc', sql.Char(20), tp.num_doc ? padProfit(tp.num_doc, 20) : null)
+                    .input('num_doc', sql.Char(20), isBankForma ? padProfit(safeDocNum, 20) : (safeDocNum ? padProfit(safeDocNum, 20) : null))
                     .input('mont_doc', sql.Decimal(18, 2), Number(tp.mont_doc))
-                    .input('fecha_che', sql.SmallDateTime, tp.fecha_che ? new Date(tp.fecha_che) : tsDate)
+                    .input('fecha_che', sql.SmallDateTime, tpFechaChe)
                     .input('co_sucu_in', sql.Char(6), padProfit(cobRecord.co_sucu_in || sucuCode, 6))
                     .input('co_us_in', sql.Char(6), padProfit(cobRecord.co_us_in || auditUser, 6))
                     .input('fe_us_in', sql.SmallDateTime, cobRecord.fe_us_in || tsDate)
