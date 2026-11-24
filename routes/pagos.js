@@ -4,6 +4,7 @@ const { sql, getPool, getServers } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
 const { getProximoConsecutivoRetencion, revertirConsecutivoRetencionIfLast } = require('../helpers/consecutivoRetenciones');
+const { syncSaldoBanco, generateUniqueMovNum, insertMovimientoBancoSP, isCurrencyUSD, round2 } = require('../helpers/bancoSaldo');
 
 /**
  * Parsea fechas YYYY-MM-DD al mediodía local para evitar desfases de zona horaria (UTC-4).
@@ -92,7 +93,7 @@ router.get('/', async (req, res) => {
                                     LEFT JOIN saDocumentoCompra d ON r.co_tipo_doc = d.co_tipo_doc 
                                                                  AND r.nro_doc = d.nro_doc
                                     WHERE r.cob_num = p.cob_num 
-                                      AND r.co_tipo_doc IN ('FACT  ', 'NDEB  ', 'N/DB  ', 'GIRO  ', 'AJPA  ')
+                                      AND LTRIM(RTRIM(r.co_tipo_doc)) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')
                                     ORDER BY r.reng_num
                                     FOR XML PATH('')), 
                                    3, 
@@ -138,7 +139,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                 let whereClauses = [
                     "d.saldo > 0",
                     "d.anulado = 0",
-                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR', 'AJNA')"
+                    "RTRIM(d.co_tipo_doc) IN ('FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'AJNA', 'AJNM', 'ADEL')"
                 ];
 
                 if (co_prov) {
@@ -151,6 +152,7 @@ router.get('/facturas/pendientes', async (req, res) => {
                     whereClauses.push(`(
                         d.nro_doc LIKE @search 
                         OR d.nro_fact LIKE @search
+                        OR d.observa LIKE @search
                         OR d.co_prov LIKE @search 
                         OR pr.prov_des LIKE @search 
                         OR pr.rif LIKE @search
@@ -182,6 +184,12 @@ router.get('/facturas/pendientes', async (req, res) => {
                            RTRIM(d.co_us_in) AS co_us_in,
                            RTRIM(ISNULL(d.doc_orig, '')) AS doc_orig,
                            RTRIM(ISNULL(d.nro_orig, '')) AS nro_orig,
+                           RTRIM(ISNULL(d.observa, '')) AS observa,
+                           RTRIM(ISNULL(d.mov_ban, '')) AS mov_ban,
+                           RTRIM(ISNULL(td.descrip, '')) AS des_tipo_doc,
+                           RTRIM(ISNULL(td.tipo_mov, '')) AS tipo_mov,
+                           RTRIM(ISNULL(d.co_cta_ingr_egr, '')) AS co_cta_ingr_egr,
+                           RTRIM(ISNULL(cie.descrip, '')) AS des_cta_ingr_egr,
                            CASE 
                                WHEN UPPER(RTRIM(d.co_tipo_doc)) IN ('N/CR', 'NCR', 'N/DB', 'NDEB') THEN
                                    COALESCE(
@@ -239,6 +247,8 @@ router.get('/facturas/pendientes', async (req, res) => {
                                      AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(d.nro_doc))), '') AS nro_comp_islr
                     FROM saDocumentoCompra d
                     INNER JOIN saProveedor pr ON d.co_prov = pr.co_prov
+                    LEFT JOIN saTipoDocumento td ON d.co_tipo_doc = td.co_tipo_doc
+                    LEFT JOIN saCuentaIngEgr cie ON d.co_cta_ingr_egr = cie.co_cta_ingr_egr
                     LEFT JOIN saTabuladorIslr t ON LTRIM(RTRIM(pr.co_tab)) = LTRIM(RTRIM(t.co_tab))
                     OUTER APPLY (
                         SELECT
@@ -611,17 +621,17 @@ router.get('/:cob_num', async (req, res) => {
                             SELECT TOP 1 r_doc.*
                             FROM saPagoDocReng r_doc
                             WHERE (
-                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL')
                                 AND r_doc.rowguid = pdr.rowguid
                             )
                             OR (
                                 UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'IVAN'
                                 AND r_doc.cob_num = pdr.cob_num
-                                AND UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                                AND UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL')
                             )
                             ORDER BY 
                                 CASE 
-                                    WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA') AND r_doc.rowguid = pdr.rowguid THEN 0
+                                    WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL') AND r_doc.rowguid = pdr.rowguid THEN 0
                                     WHEN pdr.rowguid_reng_ori IS NOT NULL AND r_doc.rowguid = pdr.rowguid_reng_ori THEN 1
                                     WHEN NULLIF(RTRIM(ri.numero_documento), '') IS NOT NULL AND LTRIM(RTRIM(r_doc.nro_fact)) = LTRIM(RTRIM(ri.numero_documento)) THEN 2
                                     WHEN NULLIF(RTRIM(ri.numero_documento), '') IS NOT NULL AND LTRIM(RTRIM(r_doc.nro_doc)) = LTRIM(RTRIM(ri.numero_documento)) THEN 3
@@ -758,7 +768,7 @@ router.get('/:cob_num', async (req, res) => {
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         INNER JOIN saPago p ON r.cob_num = p.cob_num
                         LEFT JOIN saProveedor pr ON p.co_prov = pr.co_prov
-                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')))
+                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL')))
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         OUTER APPLY (
@@ -854,17 +864,17 @@ router.get('/:cob_num', async (req, res) => {
                             SELECT TOP 1 r_doc.*
                             FROM saPagoDocReng r_doc
                             WHERE (
-                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                                UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL')
                                 AND r_doc.rowguid = pdr.rowguid
                             )
                             OR (
                                 UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) = 'ISLR'
                                 AND r_doc.cob_num = pdr.cob_num
-                                AND UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')
+                                AND UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL')
                             )
                             ORDER BY 
                                 CASE 
-                                    WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA') AND r_doc.rowguid = pdr.rowguid THEN 0
+                                    WHEN UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL') AND r_doc.rowguid = pdr.rowguid THEN 0
                                     WHEN pdr.rowguid_reng_ori IS NOT NULL AND r_doc.rowguid = pdr.rowguid_reng_ori THEN 1
                                     WHEN UPPER(LTRIM(RTRIM(r_doc.co_tipo_doc))) = 'FACT' THEN 2
                                     ELSE 3
@@ -906,7 +916,7 @@ router.get('/:cob_num', async (req, res) => {
                         INNER JOIN saDocumentoCompra d ON LTRIM(RTRIM(r.co_tipo_doc)) = LTRIM(RTRIM(d.co_tipo_doc)) 
                                                       AND LTRIM(RTRIM(r.nro_doc)) = LTRIM(RTRIM(d.nro_doc))
                         INNER JOIN saPago p ON r.cob_num = p.cob_num
-                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA')))
+                        LEFT JOIN saPagoDocReng pdr ON (r.rowguid_reng_ori = pdr.rowguid OR (pdr.cob_num = r.cob_num AND UPPER(LTRIM(RTRIM(pdr.co_tipo_doc))) NOT IN ('IVAN', 'ISLR', 'AJPA', 'AJNA', 'AJNM', 'AJPM', 'ADEL')))
                         LEFT JOIN saDocumentoCompra orig ON LTRIM(RTRIM(pdr.co_tipo_doc)) = LTRIM(RTRIM(orig.co_tipo_doc)) 
                                                         AND LTRIM(RTRIM(pdr.nro_doc)) = LTRIM(RTRIM(orig.nro_doc))
                         WHERE LTRIM(RTRIM(r.cob_num)) = LTRIM(RTRIM(@cob_num))
@@ -1142,6 +1152,38 @@ router.post('/:cob_num/anular', async (req, res) => {
                 throw new Error(`El pago ${cob_num} ya está anulado.`);
             }
 
+            // Verificar si algún anticipo/ajuste generado por este pago ya fue utilizado en otro pago activo
+            const resUsedAdv = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT TOP 1 RTRIM(dc.co_tipo_doc) AS co_tipo_doc, RTRIM(dc.nro_doc) AS nro_doc, RTRIM(p2.cob_num) AS used_cob_num
+                    FROM saDocumentoCompra dc
+                    INNER JOIN saPagoDocReng r2
+                        ON LTRIM(RTRIM(r2.co_tipo_doc)) = LTRIM(RTRIM(dc.co_tipo_doc))
+                       AND LTRIM(RTRIM(r2.nro_doc)) = LTRIM(RTRIM(dc.nro_doc))
+                    INNER JOIN saPago p2 ON p2.cob_num = r2.cob_num
+                    WHERE dc.DOC_ORIG = 'PAGO'
+                      AND LTRIM(RTRIM(dc.NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
+                      AND UPPER(LTRIM(RTRIM(dc.co_tipo_doc))) IN ('ADEL', 'AJPA', 'AJNA', 'AJNM', 'AJPM')
+                      AND p2.anulado = 0
+                      AND LTRIM(RTRIM(p2.cob_num)) <> LTRIM(RTRIM(@cob_num))
+                `);
+            if (resUsedAdv.recordset.length > 0) {
+                const u = resUsedAdv.recordset[0];
+                throw new Error(`Este pago generó el documento ${u.co_tipo_doc} ${u.nro_doc} y ya fue aplicado en el Pago activo N° ${u.used_cob_num}. Anule primero ese pago.`);
+            }
+
+            // Capturar cuentas bancarias afectadas para recalcular saSaldoBanco
+            const resBanCtas = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT DISTINCT RTRIM(cod_cta) AS cod_cta
+                    FROM saMovimientoBanco
+                    WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num))
+                      AND origen = 'PAG'
+                      AND cod_cta IS NOT NULL
+                `);
+
             // Obtener renglones de documentos pagados
             const resReng = await pool.request()
                 .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
@@ -1169,7 +1211,7 @@ router.post('/:cob_num/anular', async (req, res) => {
                         WHERE LTRIM(RTRIM(cob_num)) = LTRIM(RTRIM(@cob_num))
                     `);
 
-                // 2. Anular documentos generados por este pago (IVAN, ISLR, AJPA, AJNA)
+                // 2. Anular documentos generados por este pago (IVAN, ISLR, AJPA, AJNA, ADEL)
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
@@ -1202,7 +1244,7 @@ router.post('/:cob_num/anular', async (req, res) => {
                         WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG'
                     `);
 
-                // 5. Anular movimientos de banco asociados
+                // 5. Anular movimientos de banco asociados y recalcular saSaldoBanco
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
@@ -1213,6 +1255,12 @@ router.post('/:cob_num/anular', async (req, res) => {
                             co_us_mo = @auditUser
                         WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG'
                     `);
+
+                for (const ctaRow of resBanCtas.recordset) {
+                    if (ctaRow.cod_cta) {
+                        await syncSaldoBanco(transaction, ctaRow.cod_cta);
+                    }
+                }
 
                 await transaction.commit();
                 return { success: true, cob_num: cob_num };
@@ -1246,6 +1294,36 @@ const eliminarPagoHandler = async (req, res) => {
             if (!resPago.recordset.length) throw new Error(`El pago ${cob_num} no existe.`);
 
             const pago = resPago.recordset[0];
+
+            // Verificar si algún anticipo/ajuste generado por este pago está referenciado en otro pago (por FK_saPagoDocReng_saDocumentoCompra)
+            const resUsedAdvDel = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT TOP 1 RTRIM(dc.co_tipo_doc) AS co_tipo_doc, RTRIM(dc.nro_doc) AS nro_doc, RTRIM(r2.cob_num) AS used_cob_num
+                    FROM saDocumentoCompra dc
+                    INNER JOIN saPagoDocReng r2
+                        ON LTRIM(RTRIM(r2.co_tipo_doc)) = LTRIM(RTRIM(dc.co_tipo_doc))
+                       AND LTRIM(RTRIM(r2.nro_doc)) = LTRIM(RTRIM(dc.nro_doc))
+                    WHERE dc.DOC_ORIG = 'PAGO'
+                      AND LTRIM(RTRIM(dc.NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
+                      AND UPPER(LTRIM(RTRIM(dc.co_tipo_doc))) IN ('ADEL', 'AJPA', 'AJNA', 'AJNM', 'AJPM')
+                      AND LTRIM(RTRIM(r2.cob_num)) <> LTRIM(RTRIM(@cob_num))
+                `);
+            if (resUsedAdvDel.recordset.length > 0) {
+                const u = resUsedAdvDel.recordset[0];
+                throw new Error(`No se puede eliminar este pago porque su documento ${u.co_tipo_doc} ${u.nro_doc} está referenciado en el Pago N° ${u.used_cob_num}. Elimine primero ese pago.`);
+            }
+
+            // Capturar cuentas bancarias afectadas para recalcular saSaldoBanco
+            const resBanCtasDel = await pool.request()
+                .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
+                .query(`
+                    SELECT DISTINCT RTRIM(cod_cta) AS cod_cta
+                    FROM saMovimientoBanco
+                    WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num))
+                      AND origen = 'PAG'
+                      AND cod_cta IS NOT NULL
+                `);
 
             // 1.1 Consultar las retenciones (IVAN e ISLR) generadas por este pago antes de borrarlas
             const retIvaDocs = await pool.request()
@@ -1299,16 +1377,28 @@ const eliminarPagoHandler = async (req, res) => {
                     });
                 }
 
-                // 4. Eliminar movimientos de caja y banco creados por este pago
+                // 4. Desvincular FK mov_ban en documentos propios del pago y eliminar movimientos de caja y banco creados por este pago
                 await transaction.request()
                     .input('cob_num', sql.Char(20), padProfit(cob_num, 20))
                     .query(`
+                        UPDATE saDocumentoCompra
+                        SET mov_ban = NULL
+                        WHERE DOC_ORIG = 'PAGO'
+                          AND LTRIM(RTRIM(NRO_ORIG)) = LTRIM(RTRIM(@cob_num))
+                          AND mov_ban IS NOT NULL;
+
                         DELETE FROM saMovimientoCaja
                         WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG';
 
                         DELETE FROM saMovimientoBanco
                         WHERE LTRIM(RTRIM(cob_pag)) = LTRIM(RTRIM(@cob_num)) AND origen = 'PAG';
                     `);
+
+                for (const ctaRow of resBanCtasDel.recordset) {
+                    if (ctaRow.cod_cta) {
+                        await syncSaldoBanco(transaction, ctaRow.cod_cta);
+                    }
+                }
 
                 // 5. Eliminar renglones de retención de IVA e ISLR asociados al pago (hijos de saPagoDocReng)
                 await transaction.request()
@@ -1412,33 +1502,158 @@ router.post('/:cob_num/eliminar', eliminarPagoHandler);
 // --- GUARDAR PAGO ---
 router.post('/', async (req, res) => {
     const data = req.body;
-    console.log("📥 [AGENT] Recibiendo Pago (SAVE):", JSON.stringify({ co_prov: data.co_prov, renglones: data.renglones?.length, formas_pago: data.formas_pago?.length }, null, 2));
+    const isDirectAdvance = Boolean(data.is_advance);
+    console.log("📥 [AGENT] Recibiendo Pago (SAVE):", JSON.stringify({ co_prov: data.co_prov, is_advance: isDirectAdvance, advance_doc_type: data.advance_doc_type, renglones: data.renglones?.length, formas_pago: data.formas_pago?.length }, null, 2));
 
-    if (!data.co_prov || !data.renglones || !data.formas_pago) {
-        return res.status(400).json({ success: false, message: 'Campos obligatorios: co_prov, renglones, formas_pago' });
+    if (!data.co_prov || !Array.isArray(data.formas_pago)) {
+        return res.status(400).json({ success: false, message: 'Campos obligatorios: co_prov, formas_pago' });
+    }
+    if (!isDirectAdvance && !Array.isArray(data.renglones)) {
+        return res.status(400).json({ success: false, message: 'Campos obligatorios: renglones (o is_advance=true)' });
+    }
+    const rawRenglones = isDirectAdvance ? [] : (Array.isArray(data.renglones) ? data.renglones : []);
+    if (isDirectAdvance) {
+        const sumFp = data.formas_pago.reduce((acc, fp) => acc + Math.abs(Number(fp.mont_doc || fp.monto || 0)), 0);
+        if (sumFp <= 0.01) {
+            return res.status(400).json({ success: false, message: 'Para registrar un anticipo directo debe indicar al menos un instrumento de pago con monto mayor a 0.' });
+        }
     }
 
     const outcome = await executeWrite(req.query.sede || null, req.sqlAuth, async (pool, srv) => {
-        const configuredCtaIE = (data.co_cta_ingr_egr || srv.sql_config?.profit_defaults?.default_cta_ingr_egr || srv.profit_defaults?.default_cta_ingr_egr || '').trim();
+        const reqCtaInput = data.co_cta_ingr_egr ? String(data.co_cta_ingr_egr).trim() : '';
 
-        // Cargar Catálogos para valores predeterminados
-        const [resSucu, resCtaIE] = await Promise.all([
+        // Cargar Catálogos y parámetros reales de Compras (nunca heredar default_cta_ingr_egr de ventas/I-001)
+        const [resSucu, resAllCtasIE, resParEmp, resProvCta, resCaja] = await Promise.all([
             pool.request().query(`SELECT TOP 1 RTRIM(co_sucur) AS co_sucur FROM saSucursal`),
+            pool.request().query(`SELECT RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr, RTRIM(ISNULL(descrip, '')) AS descrip FROM saCuentaIngEgr ORDER BY co_cta_ingr_egr ASC`),
+            pool.request()
+                .query(`SELECT TOP 1 RTRIM(ISNULL(c_cta_ing_egr, '')) AS c_cta_ing_egr FROM par_emp`)
+                .catch(() => ({ recordset: [] })),
+            pool.request()
+                .input('co_prov_cta', sql.Char(16), padProfit(data.co_prov, 16))
+                .query(`SELECT TOP 1 RTRIM(ISNULL(co_cta_ingr_egr, '')) AS co_cta_ingr_egr FROM saProveedor WHERE LTRIM(RTRIM(co_prov)) = LTRIM(RTRIM(@co_prov_cta))`)
+                .catch(() => ({ recordset: [] })),
             pool.request().query(`
-                SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr 
-                FROM saCuentaIngEgr 
-                ORDER BY 
-                    CASE 
-                        WHEN RTRIM(co_cta_ingr_egr) = '${configuredCtaIE.replace(/'/g, "''")}' THEN 0 
-                        WHEN RTRIM(co_cta_ingr_egr) = 'P-001' THEN 1 
-                        WHEN RTRIM(co_cta_ingr_egr) = '01' THEN 2 
-                        ELSE 3 
-                    END
+                SELECT TOP 1 RTRIM(cod_caja) AS cod_caja
+                FROM saCaja
+                ORDER BY CASE WHEN RTRIM(cod_caja) = '02' THEN 0 ELSE 1 END, cod_caja
             `)
         ]);
 
+        const allCtas = (resAllCtasIE.recordset || []).map(r => String(r.co_cta_ingr_egr || '').trim()).filter(Boolean);
+        const validCtasMap = new Map();
+        for (const c of allCtas) {
+            validCtasMap.set(c.toUpperCase(), c);
+        }
+        const findValidCta = (cand) => {
+            const clean = String(cand || '').trim();
+            if (!clean) return null;
+            return validCtasMap.get(clean.toUpperCase()) || null;
+        };
+
+        const parCtaValid = findValidCta(resParEmp.recordset?.[0]?.c_cta_ing_egr);
+        const branchEgresoValid = findValidCta(srv.sql_config?.profit_defaults?.default_cta_egreso || srv.profit_defaults?.default_cta_egreso);
+        const provCtaRaw = findValidCta(resProvCta.recordset?.[0]?.co_cta_ingr_egr);
+        const provCtaValid = (provCtaRaw && !/^I-/i.test(provCtaRaw)) ? provCtaRaw : null;
+
+        // Consultar las cuentas definidas en los documentos seleccionados en renglones
+        const docCtasFound = [];
+        if (!isDirectAdvance && rawRenglones.length > 0) {
+            for (const line of rawRenglones) {
+                const lTipo = String(line.co_tipo_doc || '').trim();
+                const lNro = String(line.nro_doc || '').trim();
+                if (!lTipo || !lNro) continue;
+                try {
+                    const rDocCta = await pool.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit(lTipo, 6))
+                        .input('nro_doc', sql.Char(20), padProfit(lNro, 20))
+                        .query(`
+                            SELECT TOP 1 RTRIM(ISNULL(co_cta_ingr_egr, '')) AS co_cta_ingr_egr
+                            FROM saDocumentoCompra
+                            WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                              AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                        `);
+                    const validDocCta = findValidCta(rDocCta.recordset?.[0]?.co_cta_ingr_egr);
+                    if (validDocCta && !docCtasFound.some(c => c.toUpperCase() === validDocCta.toUpperCase())) {
+                        docCtasFound.push(validDocCta);
+                    }
+                } catch (_) {
+                    // Ignorar fallo individual de lectura de cuenta del documento
+                }
+            }
+        }
+
+        let defCtaIE = findValidCta(reqCtaInput);
+        let ctaSource = defCtaIE ? 'payload' : '';
+
+        if (!defCtaIE && docCtasFound.length > 0) {
+            if (docCtasFound.length === 1) {
+                defCtaIE = docCtasFound[0];
+            } else {
+                defCtaIE =
+                    (parCtaValid && docCtasFound.find(c => c.toUpperCase() === parCtaValid.toUpperCase())) ||
+                    docCtasFound.find(c => /^(P-|G-|PG-|02)/i.test(c)) ||
+                    docCtasFound.find(c => !/^I-/i.test(c)) ||
+                    docCtasFound[0];
+            }
+            if (defCtaIE) ctaSource = 'documentos_renglones';
+        }
+
+        if (!defCtaIE && parCtaValid) {
+            defCtaIE = parCtaValid;
+            ctaSource = 'par_emp.c_cta_ing_egr';
+        }
+
+        if (!defCtaIE && branchEgresoValid) {
+            defCtaIE = branchEgresoValid;
+            ctaSource = 'branch.default_cta_egreso';
+        }
+
+        if (!defCtaIE && provCtaValid) {
+            defCtaIE = provCtaValid;
+            ctaSource = 'saProveedor';
+        }
+
+        if (!defCtaIE) {
+            defCtaIE =
+                findValidCta('P-001') ||
+                findValidCta('02') ||
+                allCtas.find(c => !/^I-/i.test(c)) ||
+                findValidCta('01') ||
+                allCtas[0] ||
+                'P-001';
+            ctaSource = 'catalog_fallback';
+        }
+
+        console.log(`🏦 [PAGOS] Cuenta Ing/Egr resuelta para pago: "${defCtaIE}" (origen: ${ctaSource})`);
+
+        const allCtasRows = (resAllCtasIE.recordset || [])
+            .map(r => ({ code: String(r.co_cta_ingr_egr || '').trim(), descrip: String(r.descrip || '').trim() }))
+            .filter(r => r.code);
+        const findCtaByRegex = (rx, excludeRx = null) =>
+            allCtasRows.find(r => rx.test(r.descrip) && (!excludeRx || !excludeRx.test(r.descrip)))?.code || null;
+
+        const ctaRetIva =
+            findValidCta('P-005') ||
+            findCtaByRegex(/IVA.*RET.*PROV|RET.*IVA.*PROV/i) ||
+            findCtaByRegex(/IVA.*RET|RET.*IVA/i, /CLIENT/i) ||
+            findValidCta('PG-003') ||
+            defCtaIE;
+        const ctaRetIslr =
+            findValidCta('P-003') ||
+            findCtaByRegex(/I\.?S\.?L\.?R\.?.*RET.*PROV|RET.*I\.?S\.?L\.?R\.?.*PROV/i) ||
+            findValidCta('PG-001') ||
+            defCtaIE;
+        const ctaRetTimbre =
+            findCtaByRegex(/TIMBRE|1\s*[X\*]\s*1000|1X1000/i) ||
+            findValidCta('G-031') ||
+            findCtaByRegex(/OTROS\s+IMPUESTOS/i) ||
+            defCtaIE;
+
+        console.log(`🏛️ [PAGOS] Cuentas retenciones: IVA="${ctaRetIva}", ISLR="${ctaRetIslr}", TIMBRE="${ctaRetTimbre}"`);
+
         const defSucu = resSucu.recordset[0]?.co_sucur || '01';
-        const defCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || configuredCtaIE || 'P-001';
+        const defCaja = resCaja.recordset[0]?.cod_caja || '02';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
         const pagoFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/))
@@ -1468,18 +1683,14 @@ router.post('/', async (req, res) => {
             if (paymentMone.trim().toUpperCase() === 'US$') paymentMone = 'USD';
 
             let totalAbonoBs = 0;
-            if (data.renglones && Array.isArray(data.renglones)) {
-                data.renglones.forEach((line) => {
-                    totalAbonoBs += Number(line.mont_cob || 0);
-                });
-            }
+            rawRenglones.forEach((line) => {
+                totalAbonoBs += Number(line.mont_cob || 0);
+            });
 
             let totalFormasPagoBs = 0;
-            if (data.formas_pago && Array.isArray(data.formas_pago)) {
-                data.formas_pago.forEach((fp) => {
-                    totalFormasPagoBs += Math.abs(Number(fp.mont_doc || fp.monto || 0));
-                });
-            }
+            data.formas_pago.forEach((fp) => {
+                totalFormasPagoBs += Math.abs(Number(fp.mont_doc || fp.monto || 0));
+            });
 
             let finalMontoHeader = 0;
             if (data.formas_pago && data.formas_pago.length > 0) {
@@ -1489,6 +1700,10 @@ router.post('/', async (req, res) => {
             } else {
                 finalMontoHeader = 0;
             }
+
+            const defaultHeaderDesc = isDirectAdvance
+                ? `ANTICIPO PROVEEDOR ${data.co_prov}`
+                : `PAGO PROVEEDOR ${data.co_prov}`;
 
             // 2. Insertar Cabecera de Pago en saPago
             const rH = new sql.Request(transaction);
@@ -1501,7 +1716,7 @@ router.post('/', async (req, res) => {
             rH.input('bAnulado', sql.Bit, 0);
             rH.input('deMonto', sql.Decimal(18, 2), finalMontoHeader);
             rH.input('sDis_cen', sql.VarChar(sql.MAX), null);
-            rH.input('sDescrip', sql.VarChar(60), (data.descrip || `PAGO PROVEEDOR ${data.co_prov}`).substring(0, 60));
+            rH.input('sDescrip', sql.VarChar(60), (data.descrip || defaultHeaderDesc).substring(0, 60));
             rH.input('sCampo1', sql.VarChar(60), null);
             rH.input('sCampo2', sql.VarChar(60), null);
             rH.input('sCampo3', sql.VarChar(60), null);
@@ -1519,15 +1734,15 @@ router.post('/', async (req, res) => {
             await rH.execute('pInsertarPago');
 
             // Mapas para relacionar los renglones (Padre-Hijo)
-            const rengDocGuidMap = new Map(); // nro_doc -> rowguid de saPagoDocReng
-            const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA'];
-            const creditDocTypes = ['N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
-            const parentLines = data.renglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
-            const childLines = data.renglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
+            const rengDocGuidMap = new Map(); // `${tipo}::${nro_doc}` (y `nro_doc` para padres) -> rowguid de saPagoDocReng
+            const parentTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO'];
+            const creditDocTypes = ['N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL', 'AJPA', 'AJPM'];
+            const parentLines = rawRenglones.filter(r => parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
+            const childLines = rawRenglones.filter(r => !parentTypes.includes(r.co_tipo_doc.trim().toUpperCase()));
 
             // 2.3 Procesar Retención de Timbre Fiscal 1x1000 (AJNA)
             let createdTimbreAjnaBs = 0;
-            if (data.timbre_fiscal && (data.timbre_fiscal.aplicar || Number(data.timbre_fiscal.monto_bs) > 0.01)) {
+            if (!isDirectAdvance && data.timbre_fiscal && (data.timbre_fiscal.aplicar || Number(data.timbre_fiscal.monto_bs) > 0.01)) {
                 const timbreMontoBs = Math.round((Number(data.timbre_fiscal.monto_bs) || 0) * 100) / 100;
                 if (timbreMontoBs > 0.01) {
                     const corrAj = await getProximoConsecutivo({
@@ -1547,6 +1762,7 @@ router.post('/', async (req, res) => {
                         .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
                         .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
                         .input('tasa', sql.Decimal(21, 8), Number(data.tasa || 1))
+                        .input('co_cta_ingr_egr', sql.Char(20), padProfit(ctaRetTimbre, 20))
                         .input('observa', sql.VarChar(120), ajObserva)
                         .input('fec_doc', sql.SmallDateTime, tsDate)
                         .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
@@ -1559,7 +1775,7 @@ router.post('/', async (req, res) => {
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                         .query(`
                             INSERT INTO saDocumentoCompra (
-                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
+                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, co_cta_ingr_egr, observa,
                                 fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
                                 doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
@@ -1567,7 +1783,7 @@ router.post('/', async (req, res) => {
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
                                 monto_desc_glob, monto_reca
                             ) VALUES (
-                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
+                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @co_cta_ingr_egr, @observa,
                                 @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
@@ -1597,12 +1813,12 @@ router.post('/', async (req, res) => {
             // 3. Insertar Renglones de Documentos de Compra (saPagoDocReng)
             for (let i = 0; i < sortedRenglones.length; i++) {
                 const line = sortedRenglones[i];
-                const rengNum = nextRengNum++;
+                const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
 
                 let parentGuid = null;
-                if (!parentTypes.includes(line.co_tipo_doc.trim().toUpperCase())) {
+                if (!parentTypes.includes(docTypeUpper)) {
                     const lookupKey = line.parent_doc ? line.parent_doc.trim() : line.nro_doc?.trim();
-                    parentGuid = rengDocGuidMap.get(lookupKey);
+                    parentGuid = rengDocGuidMap.get(lookupKey) || null;
                 }
 
                 // Consultar saDocumentoCompra para obtener datos y saldo actual
@@ -1619,8 +1835,7 @@ router.post('/', async (req, res) => {
                 let docAlicuota = 16;
                 let docNroFactOrigen = '0';
 
-                const docTypeUpper = line.co_tipo_doc.trim().toUpperCase();
-                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'N/CR', 'NCR', 'AJNA'];
+                const queryTypes = ['FACT', 'NDEB', 'N/DB', 'GIRO', 'AJPA', 'AJPM', 'N/CR', 'NCR', 'AJNA', 'AJNM', 'ADEL'];
                 if (queryTypes.includes(docTypeUpper)) {
                     const docInfo = await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(line.co_tipo_doc, 6))
@@ -1769,9 +1984,19 @@ router.post('/', async (req, res) => {
                     }
                 }
 
+                // Evitar insertar renglones en 0 cuando un crédito/anticipo no consume nada (ej. ya cubierto por otro anterior)
+                if (creditDocTypes.includes(docTypeUpper) && totalRebaje <= 0.001) {
+                    continue;
+                }
+
+                const rengNum = nextRengNum++;
                 const guidResult = await transaction.request().query('SELECT NEWID() AS guid');
                 const lineGuid = guidResult.recordset[0].guid;
-                rengDocGuidMap.set(line.nro_doc?.trim(), lineGuid);
+                const cleanLineNro = line.nro_doc?.trim();
+                rengDocGuidMap.set(`${docTypeUpper}::${cleanLineNro}`, lineGuid);
+                if (parentTypes.includes(docTypeUpper)) {
+                    rengDocGuidMap.set(cleanLineNro, lineGuid);
+                }
 
                 // Insertar renglón en saPagoDocReng
                 await transaction.request()
@@ -1927,6 +2152,7 @@ router.post('/', async (req, res) => {
                         .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
                         .input('co_mone', sql.Char(6), padProfit(docMone, 6))
                         .input('tasa', sql.Decimal(21, 8), docTasa)
+                        .input('co_cta_ingr_egr', sql.Char(20), padProfit(ctaRetIva, 20))
                         .input('observa', sql.VarChar(120), `PAGO N° ${cobNum} de proveedor ${data.co_prov}`)
                         .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
                         .input('tipo_origen', sql.Int, 0)
@@ -1940,7 +2166,7 @@ router.post('/', async (req, res) => {
                         .input('num_comprobante', sql.Char(14), comprobanteSeniat.substring(0, 14))
                         .query(`
                             INSERT INTO saDocumentoCompra (
-                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
+                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, co_cta_ingr_egr, observa,
                                 fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
                                 doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
@@ -1948,7 +2174,7 @@ router.post('/', async (req, res) => {
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
                                 monto_desc_glob, monto_reca, num_comprobante, tipo_imp
                             ) VALUES (
-                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
+                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @co_cta_ingr_egr, @observa,
                                 @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
@@ -2067,6 +2293,7 @@ router.post('/', async (req, res) => {
                         .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
                         .input('co_mone', sql.Char(6), padProfit(docMone, 6))
                         .input('tasa', sql.Decimal(21, 8), docTasa)
+                        .input('co_cta_ingr_egr', sql.Char(20), padProfit(ctaRetIslr, 20))
                         .input('observa', sql.VarChar(120), `PAGO N° ${cobNum} de proveedor ${data.co_prov}`)
                         .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
                         .input('tipo_origen', sql.Int, 0)
@@ -2080,7 +2307,7 @@ router.post('/', async (req, res) => {
                         .input('num_comprobante', sql.Char(14), islrComprobanteSeniat.substring(0, 14))
                         .query(`
                             INSERT INTO saDocumentoCompra (
-                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
+                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, co_cta_ingr_egr, observa,
                                 fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
                                 doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
@@ -2088,7 +2315,7 @@ router.post('/', async (req, res) => {
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
                                 monto_desc_glob, monto_reca, num_comprobante, tipo_imp
                             ) VALUES (
-                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
+                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @co_cta_ingr_egr, @observa,
                                 @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
@@ -2194,7 +2421,8 @@ router.post('/', async (req, res) => {
             }
 
             // 3.3 Procesar Ajuste por Saldo a Favor / Diferencia de Compra (AJPA / Serie C010)
-            if (data.ajuste_diferencia && (data.ajuste_diferencia.tipo === 'AJPA' || data.ajuste_diferencia.tipo === 'AJNA')) {
+            let surplusDocCreated = null;
+            if (!isDirectAdvance && data.ajuste_diferencia && (data.ajuste_diferencia.tipo === 'AJPA' || data.ajuste_diferencia.tipo === 'AJNA')) {
                 const ajTipo = data.ajuste_diferencia.tipo === 'AJNA' ? 'AJNA' : 'AJPA';
                 const coTipoSerie = ajTipo === 'AJNA' ? 'C008' : 'C010';
                 const coConsecutivos = ajTipo === 'AJNA'
@@ -2209,7 +2437,9 @@ router.post('/', async (req, res) => {
                         co_consecutivos: coConsecutivos,
                         co_sucur: sucuCode,
                         table: 'saDocumentoCompra',
-                        col: 'nro_doc'
+                        col: 'nro_doc',
+                        filter_col: 'co_tipo_doc',
+                        filter_val: ajTipo
                     });
                     const ajDocNum = corrAj.docNum;
                     const ajObserva = (`PAGO N° ${cobNum} de proveedor ${data.co_prov}`).substring(0, 120);
@@ -2220,7 +2450,9 @@ router.post('/', async (req, res) => {
                         .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
                         .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
                         .input('tasa', sql.Decimal(21, 8), Number(data.tasa || 1))
+                        .input('co_cta_ingr_egr', sql.Char(20), padProfit(defCtaIE, 20))
                         .input('observa', sql.VarChar(120), ajObserva)
+                        .input('fec_doc', sql.SmallDateTime, tsDate)
                         .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
                         .input('tipo_origen', sql.Int, 0)
                         .input('nro_orig', sql.VarChar(20), cobNum)
@@ -2231,7 +2463,7 @@ router.post('/', async (req, res) => {
                         .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
                         .query(`
                             INSERT INTO saDocumentoCompra (
-                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, observa,
+                                co_tipo_doc, nro_doc, co_prov, co_mone, tasa, co_cta_ingr_egr, observa,
                                 fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
                                 doc_orig, tipo_origen, nro_orig, saldo, total_bruto,
                                 total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
@@ -2239,8 +2471,8 @@ router.post('/', async (req, res) => {
                                 co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
                                 monto_desc_glob, monto_reca
                             ) VALUES (
-                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @observa,
-                                CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), CONVERT(VARCHAR(10), GETDATE(), 120), 0, 1, 0,
+                                @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @co_cta_ingr_egr, @observa,
+                                @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
                                 @doc_orig, @tipo_origen, @nro_orig, @saldo, @total_bruto,
                                 @total_neto, 0, 0, 0, 0, 0, 0,
                                 0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
@@ -2273,6 +2505,7 @@ router.post('/', async (req, res) => {
                                 @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
                             )
                         `);
+                    surplusDocCreated = { co_tipo_doc: ajTipo, nro_doc: ajDocNum };
                     console.log(`✨ [PAGOS] ${ajTipo} generado con éxito: ${ajDocNum} por ${ajMontoBs} Bs.`);
                 }
             }
@@ -2283,7 +2516,7 @@ router.post('/', async (req, res) => {
                 ? validFormasPago
                 : [{
                     forma_pag: 'EF',
-                    cod_caja: '02',
+                    cod_caja: defCaja,
                     cod_cta: null,
                     co_ban: null,
                     co_tar: null,
@@ -2292,6 +2525,10 @@ router.post('/', async (req, res) => {
                     fecha_che: null
                 }];
 
+            const touchedBankAccounts = new Set();
+            let firstMovNumB = null;
+            let firstFpRef = null;
+
             for (let i = 0; i < activeFormasPago.length; i++) {
                 const tp = activeFormasPago[i];
                 const rengNum = i + 1;
@@ -2299,21 +2536,24 @@ router.post('/', async (req, res) => {
                 let movNumB = null;
                 const tpFechaChe = parseLocalNoonDate(tp.fecha_che, tsDate);
                 const safeDocNum = String(tp.num_doc || '').trim().substring(0, 20);
-                const isBankForma = tp.forma_pag === 'TE' || tp.forma_pag === 'TR' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP';
+                const isBankForma = tp.forma_pag === 'TE' || tp.forma_pag === 'TR' || tp.forma_pag === 'DP' || tp.forma_pag === 'CH' || tp.forma_pag === 'TP' || tp.forma_pag === 'ND';
+                if (!firstFpRef && safeDocNum) {
+                    firstFpRef = safeDocNum;
+                }
 
                 if (tp.forma_pag === 'EF') {
                     // Obtener la moneda de la caja
                     let isUSDcaja = false;
                     const resCajaInfo = await transaction.request()
-                        .input('codCaja', sql.Char(6), padProfit(tp.cod_caja, 6))
+                        .input('codCaja', sql.Char(6), padProfit(tp.cod_caja || defCaja, 6))
                         .query('SELECT RTRIM(co_mone) AS co_mone FROM saCaja WHERE cod_caja = @codCaja');
-                    if (resCajaInfo.recordset[0] && resCajaInfo.recordset[0].co_mone !== 'BS' && resCajaInfo.recordset[0].co_mone !== 'VES') {
+                    if (resCajaInfo.recordset[0] && isCurrencyUSD(resCajaInfo.recordset[0].co_mone)) {
                         isUSDcaja = true;
                     }
 
                     const rate = Number(data.tasa || 1);
                     const rawMonto = Number(tp.mont_doc);
-                    const finalMontoCaja = isUSDcaja ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
+                    const finalMontoCaja = isUSDcaja ? round2(rawMonto / rate) : round2(rawMonto);
 
                     if (finalMontoCaja > 0) {
                         const corrCaja = await getProximoConsecutivo({
@@ -2330,8 +2570,8 @@ router.post('/', async (req, res) => {
                         const rMovC = new sql.Request(transaction);
                         rMovC.input('sMov_Num', sql.Char(20), padProfit(movNumC, 20));
                         rMovC.input('sdFecha', sql.SmallDateTime, tsDate);
-                        rMovC.input('sDescrip', sql.VarChar(60), (`EGRESO PAGO ${cobNum} - ${data.co_prov}`).substring(0, 60));
-                        rMovC.input('sCod_Caja', sql.Char(6), padProfit(tp.cod_caja, 6));
+                        rMovC.input('sDescrip', sql.VarChar(60), (`${isDirectAdvance ? 'ANTICIPO PAGO' : 'EGRESO PAGO'} ${cobNum} - ${data.co_prov}`).substring(0, 60));
+                        rMovC.input('sCod_Caja', sql.Char(6), padProfit(tp.cod_caja || defCaja, 6));
                         rMovC.input('deTasa', sql.Decimal(21, 8), isUSDcaja ? rate : 1);
                         rMovC.input('sTipo_Mov', sql.Char(2), 'E'); // Egreso
                         rMovC.input('sForma_Pag', sql.Char(2), tp.forma_pag);
@@ -2362,56 +2602,43 @@ router.post('/', async (req, res) => {
                     const resCtaInfo = await transaction.request()
                         .input('codCta', sql.Char(6), padProfit(tp.cod_cta, 6))
                         .query('SELECT RTRIM(co_mone) AS co_mone FROM saCuentaBancaria WHERE cod_cta = @codCta');
-                    if (resCtaInfo.recordset[0] && resCtaInfo.recordset[0].co_mone !== 'BS' && resCtaInfo.recordset[0].co_mone !== 'VES') {
+                    if (resCtaInfo.recordset[0] && isCurrencyUSD(resCtaInfo.recordset[0].co_mone)) {
                         isUSDcuenta = true;
                     }
 
                     const rate = Number(data.tasa || 1);
                     const rawMonto = Number(tp.mont_doc);
-                    const finalMontoBanco = isUSDcuenta ? Math.round((rawMonto / rate) * 100) / 100 : rawMonto;
+                    const finalMontoBanco = isUSDcuenta ? round2(rawMonto / rate) : round2(rawMonto);
 
                     if (finalMontoBanco > 0) {
-                        const corrBanco = await getProximoConsecutivo({
-                            runner: transaction,
-                            co_tipo_serie: 'B002',
-                            co_consecutivos: ['MOVB_NUM', 'B002'],
-                            co_sucur: sucuCode,
-                            table: 'saMovimientoBanco',
-                            col: 'mov_num'
-                        });
-                        movNumB = corrBanco.docNum;
+                        movNumB = await generateUniqueMovNum(transaction, sucuCode);
 
                         let tipoOp = 'TR'; // Transferencia
-                        if (tp.forma_pag === 'CH') tipoOp = 'CH'; // Cheque
+                        if (tp.forma_pag === 'CH') tipoOp = 'CH';
+                        else if (tp.forma_pag === 'ND') tipoOp = 'ND';
 
-                        // Crear Movimiento de Banco
-                        const rMovB = new sql.Request(transaction);
-                        rMovB.input('sMov_Num', sql.Char(20), padProfit(movNumB, 20));
-                        rMovB.input('sDescrip', sql.VarChar(160), (`EGRESO PAGO ${cobNum} - ${data.co_prov}`).substring(0, 160));
-                        rMovB.input('sCod_Cta', sql.Char(6), padProfit(tp.cod_cta, 6));
-                        rMovB.input('sdFecha', sql.SmallDateTime, tpFechaChe);
-                        rMovB.input('deTasa', sql.Decimal(21, 8), isUSDcuenta ? rate : 1);
-                        rMovB.input('sTipo_Op', sql.Char(2), tipoOp);
-                        rMovB.input('sDoc_Num', sql.VarChar(20), safeDocNum);
-                        rMovB.input('deMonto', sql.Decimal(18, 2), finalMontoBanco);
-                        rMovB.input('sCo_Cta_Ingr_Egr', sql.Char(20), padProfit(defCtaIE, 20));
-                        rMovB.input('sOrigen', sql.Char(3), 'PAG');
-                        rMovB.input('sCob_Pag', sql.Char(20), padProfit(cobNum, 20));
-                        rMovB.input('deIDB', sql.Decimal(18, 2), 0.00);
-                        rMovB.input('sDep_Num', sql.Char(20), null);
-                        rMovB.input('bAnulado', sql.Bit, 0);
-                        rMovB.input('bSaldo_Ini', sql.Bit, 0);
-                        rMovB.input('bConciliado', sql.Bit, 0);
-                        rMovB.input('bOri_Dep', sql.Bit, 0);
-                        rMovB.input('iDep_Con', sql.Int, 0);
-                        rMovB.input('sCod_IngBen', sql.Char(6), null);
-                        rMovB.input('sdFecha_Che', sql.SmallDateTime, tpFechaChe);
-                        rMovB.input('sCo_Us_In', sql.Char(6), padProfit(auditUser, 6));
-                        rMovB.input('sCo_Sucu_In', sql.Char(6), padProfit(sucuCode, 6));
-                        rMovB.input('sRevisado', sql.Char(1), null);
-                        rMovB.input('sTrasnfe', sql.Char(1), null);
+                        const movDesc = `${isDirectAdvance ? 'ANTICIPO PAGO' : 'EGRESO PAGO'} ${cobNum} - ${data.co_prov}`.substring(0, 160);
+                        await insertMovimientoBancoSP(transaction, {
+                            mov_num: movNumB,
+                            descrip: movDesc,
+                            cod_cta: tp.cod_cta,
+                            fecha: tpFechaChe,
+                            fecha_che: tpFechaChe,
+                            tasa: isUSDcuenta ? rate : 1,
+                            tipo_op: tipoOp,
+                            doc_num: safeDocNum || movNumB,
+                            monto: finalMontoBanco,
+                            co_cta_ingr_egr: defCtaIE,
+                            origen: 'PAG',
+                            cob_pag: cobNum,
+                            idb: 0,
+                            co_us_in: auditUser,
+                            co_sucu_in: sucuCode,
+                            maquina: 'WEB'
+                        });
 
-                        await rMovB.execute('pInsertarMovimientoBanco');
+                        if (!firstMovNumB) firstMovNumB = movNumB;
+                        if (tp.cod_cta) touchedBankAccounts.add(String(tp.cod_cta).trim());
                     }
                 }
 
@@ -2444,8 +2671,132 @@ router.post('/', async (req, res) => {
                     `);
             }
 
+            // Recalcular saSaldoBanco para todas las cuentas bancarias tocadas
+            for (const touchedCta of touchedBankAccounts) {
+                await syncSaldoBanco(transaction, touchedCta);
+            }
+
+            // 4.5 Enlace de mov_ban para ajuste AJPA por excedente o creación de Anticipo Directo
+            if (!isDirectAdvance && surplusDocCreated && firstMovNumB) {
+                await transaction.request()
+                    .input('co_tipo_doc', sql.Char(6), padProfit(surplusDocCreated.co_tipo_doc, 6))
+                    .input('nro_doc', sql.Char(20), padProfit(surplusDocCreated.nro_doc, 20))
+                    .input('mov_ban', sql.Char(20), padProfit(firstMovNumB, 20))
+                    .query(`
+                        UPDATE saDocumentoCompra
+                        SET mov_ban = @mov_ban
+                        WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                          AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
+                    `);
+            }
+
+            let createdAdvanceDoc = null;
+            if (isDirectAdvance && totalFormasPagoBs > 0.01) {
+                const reqAdvType = String(data.advance_doc_type || 'ADEL').trim().toUpperCase();
+                const advType = ['ADEL', 'AJPA', 'AJNM'].includes(reqAdvType) ? reqAdvType : 'ADEL';
+                const advConsecKey = advType === 'AJPA'
+                    ? 'DOC_COMPRA_AJPA'
+                    : advType === 'AJNM'
+                        ? 'DOC_COMPRA_AJNM'
+                        : 'DOC_COMPRA_ADEL';
+
+                let advDocNum = null;
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    const corrAdv = await getProximoConsecutivo({
+                        runner: transaction,
+                        co_tipo_serie: advConsecKey,
+                        co_sucur: sucuCode
+                    });
+                    const cand = String(corrAdv.docNum || '').trim();
+                    if (!cand) continue;
+                    const dupChk = await transaction.request()
+                        .input('co_tipo_doc', sql.Char(6), padProfit(advType, 6))
+                        .input('nro_doc', sql.Char(20), padProfit(cand, 20))
+                        .query(`SELECT 1 AS ex FROM saDocumentoCompra WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc)) AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))`);
+                    if (dupChk.recordset.length === 0) {
+                        advDocNum = cand;
+                        break;
+                    }
+                }
+                if (!advDocNum) {
+                    throw new Error(`No se pudo asignar un número único de documento ${advType} para el anticipo directo.`);
+                }
+
+                const advObserva = (data.descrip || `ANTICIPO PAGO N° ${cobNum} - ${data.co_prov}`).substring(0, 120);
+                const advMontoBs = round2(totalFormasPagoBs);
+
+                await transaction.request()
+                    .input('co_tipo_doc', sql.Char(6), padProfit(advType, 6))
+                    .input('nro_doc', sql.Char(20), padProfit(advDocNum, 20))
+                    .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
+                    .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
+                    .input('tasa', sql.Decimal(21, 8), Number(data.tasa || 1))
+                    .input('co_cta_ingr_egr', sql.Char(20), padProfit(defCtaIE, 20))
+                    .input('observa', sql.VarChar(120), advObserva)
+                    .input('fec_doc', sql.SmallDateTime, tsDate)
+                    .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))
+                    .input('tipo_origen', sql.Int, 0)
+                    .input('nro_orig', sql.VarChar(20), cobNum)
+                    .input('mov_ban', sql.Char(20), firstMovNumB ? padProfit(firstMovNumB, 20) : null)
+                    .input('total_bruto', sql.Decimal(18, 2), advMontoBs)
+                    .input('total_neto', sql.Decimal(18, 2), advMontoBs)
+                    .input('saldo', sql.Decimal(18, 2), advMontoBs)
+                    .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                    .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                    .query(`
+                        INSERT INTO saDocumentoCompra (
+                            co_tipo_doc, nro_doc, co_prov, co_mone, tasa, co_cta_ingr_egr, observa,
+                            fec_reg, fec_emis, fec_venc, anulado, aut, pagar,
+                            doc_orig, tipo_origen, nro_orig, mov_ban, saldo, total_bruto,
+                            total_neto, monto_imp, monto_imp2, monto_imp3, porc_imp, porc_imp2, porc_imp3,
+                            otros1, otros2, otros3, adicional, co_us_in, co_sucu_in, fe_us_in,
+                            co_us_mo, co_sucu_mo, fe_us_mo, rowguid,
+                            monto_desc_glob, monto_reca
+                        ) VALUES (
+                            @co_tipo_doc, @nro_doc, @co_prov, @co_mone, @tasa, @co_cta_ingr_egr, @observa,
+                            @fec_doc, @fec_doc, @fec_doc, 0, 1, 0,
+                            @doc_orig, @tipo_origen, @nro_orig, @mov_ban, @saldo, @total_bruto,
+                            @total_neto, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0.00, @co_us_in, @co_sucu_in, GETDATE(),
+                            @co_us_in, @co_sucu_in, GETDATE(), NEWID(),
+                            0, 0
+                        )
+                    `);
+
+                const advRengGuidResult = await transaction.request().query('SELECT NEWID() AS guid');
+                const advRengGuid = advRengGuidResult.recordset[0].guid;
+                await transaction.request()
+                    .input('reng_num', sql.Int, nextRengNum++)
+                    .input('cob_num', sql.Char(20), padProfit(cobNum, 20))
+                    .input('co_tipo_doc', sql.Char(6), padProfit(advType, 6))
+                    .input('nro_doc', sql.Char(20), padProfit(advDocNum, 20))
+                    .input('mont_cob', sql.Decimal(18, 2), advMontoBs)
+                    .input('co_sucu_in', sql.Char(6), padProfit(sucuCode, 6))
+                    .input('co_us_in', sql.Char(6), padProfit(auditUser, 6))
+                    .input('rowguid', sql.UniqueIdentifier, advRengGuid)
+                    .query(`
+                        INSERT INTO saPagoDocReng (
+                            reng_num, cob_num, co_tipo_doc, nro_doc, mont_cob,
+                            dppago_porc_desc, dppago_monto, monto_retencion_iva, monto_retencion,
+                            co_sucu_in, co_us_in, fe_us_in, co_sucu_mo, co_us_mo, fe_us_mo, rowguid
+                        ) VALUES (
+                            @reng_num, @cob_num, @co_tipo_doc, @nro_doc, @mont_cob,
+                            0.00, 0.00, 0.00, 0.00,
+                            @co_sucu_in, @co_us_in, GETDATE(), @co_sucu_in, @co_us_in, GETDATE(), @rowguid
+                        )
+                    `);
+
+                createdAdvanceDoc = { co_tipo_doc: advType, nro_doc: advDocNum, saldo: advMontoBs };
+                console.log(`✨ [PAGOS] Anticipo Directo ${advType} ${advDocNum} por ${advMontoBs} Bs generado con Pago ${cobNum} (MovBan: ${firstMovNumB || 'N/A'})`);
+            }
+
             await transaction.commit();
-            return { success: true, doc_num: cobNum };
+            return {
+                success: true,
+                doc_num: cobNum,
+                advance_doc: createdAdvanceDoc,
+                mov_ban: firstMovNumB || null
+            };
         } catch (err) {
             if (transaction._aborted === false) await transaction.rollback();
             throw err;

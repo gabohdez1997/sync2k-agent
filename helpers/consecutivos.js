@@ -298,6 +298,94 @@ const DOC_TYPE_CONFIG = {
         filter_col: 'co_tipo_doc',
         filter_val: 'N/DB'
     },
+    DOC_COMPRA_ADEL: {
+        co_tipo_serie: 'C007',
+        co_consecutivos: ['DOC_COM_ADEL', 'C007', 'ADEL_COM', 'ADEL'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'ADEL'
+    },
+    C007: {
+        co_tipo_serie: 'C007',
+        co_consecutivos: ['DOC_COM_ADEL', 'C007', 'ADEL_COM', 'ADEL'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'ADEL'
+    },
+    ADEL_COMPRA: {
+        co_tipo_serie: 'C007',
+        co_consecutivos: ['DOC_COM_ADEL', 'C007', 'ADEL_COM', 'ADEL'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'ADEL'
+    },
+    DOC_COMPRA_AJNA: {
+        co_tipo_serie: 'C008',
+        co_consecutivos: ['DOC_COM_AJNA', 'C008', 'AJNA_NUM', 'AJNA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNA'
+    },
+    DOC_COMPRA_AJNM: {
+        co_tipo_serie: 'C009',
+        co_consecutivos: ['DOC_COM_AJNM', 'C009', 'AJNM_COM', 'AJNM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNM'
+    },
+    C009: {
+        co_tipo_serie: 'C009',
+        co_consecutivos: ['DOC_COM_AJNM', 'C009', 'AJNM_COM', 'AJNM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNM'
+    },
+    AJNM_COMPRA: {
+        co_tipo_serie: 'C009',
+        co_consecutivos: ['DOC_COM_AJNM', 'C009', 'AJNM_COM', 'AJNM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJNM'
+    },
+    DOC_COMPRA_AJPA: {
+        co_tipo_serie: 'C010',
+        co_consecutivos: ['DOC_COM_AJPA', 'C010', 'AJPA_NUM', 'AJPA'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPA'
+    },
+    DOC_COMPRA_AJPM: {
+        co_tipo_serie: 'C011',
+        co_consecutivos: ['DOC_COM_AJPM', 'C011', 'AJPM_COM', 'AJPM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPM'
+    },
+    C011: {
+        co_tipo_serie: 'C011',
+        co_consecutivos: ['DOC_COM_AJPM', 'C011', 'AJPM_COM', 'AJPM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPM'
+    },
+    AJPM_COMPRA: {
+        co_tipo_serie: 'C011',
+        co_consecutivos: ['DOC_COM_AJPM', 'C011', 'AJPM_COM', 'AJPM'],
+        table: 'saDocumentoCompra',
+        col: 'nro_doc',
+        filter_col: 'co_tipo_doc',
+        filter_val: 'AJPM'
+    },
     MOVIMIENTO_BANCO: {
         co_tipo_serie: 'B002',
         co_consecutivos: ['MOVB_NUM', 'B002'],

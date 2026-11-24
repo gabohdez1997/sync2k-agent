@@ -3,6 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers, getAllActiveServers, getExchangeRate } = require('../db');
 const { padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
+const { syncSaldoBanco, generateUniqueMovNum, insertMovimientoBancoSP, isCurrencyUSD, round2 } = require('../helpers/bancoSaldo');
 
 console.log("📑 [AGENT] Iniciando Módulo de Documentos de Compra (saDocumentoCompra)");
 
@@ -59,10 +60,14 @@ router.get('/tipos', async (req, res) => {
             FROM saTipoDocumento
             WHERE usar_compras = 1
             ORDER BY CASE 
-                WHEN co_tipo_doc = 'FACT' THEN 1 
-                WHEN co_tipo_doc = 'N/CR' THEN 2 
-                WHEN co_tipo_doc = 'N/DB' THEN 3 
-                ELSE 4 
+                WHEN RTRIM(co_tipo_doc) = 'FACT' THEN 1 
+                WHEN RTRIM(co_tipo_doc) = 'N/CR' THEN 2 
+                WHEN RTRIM(co_tipo_doc) = 'N/DB' THEN 3 
+                WHEN RTRIM(co_tipo_doc) = 'ADEL' THEN 4
+                WHEN RTRIM(co_tipo_doc) = 'AJNM' THEN 5
+                WHEN RTRIM(co_tipo_doc) = 'AJPM' THEN 6
+                WHEN RTRIM(co_tipo_doc) = 'AJPA' THEN 7
+                ELSE 8 
             END, descrip ASC
         `);
         return res.json({ success: true, data: result.recordset });
@@ -80,14 +85,36 @@ router.get('/cuentas', async (req, res) => {
         if (!target) return res.status(404).json({ success: false, message: 'Sede no encontrada.' });
 
         const pool = await getPool(target.id, req.sqlAuth);
-        const result = await pool.request().query(`
-            SELECT 
-                RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr,
-                RTRIM(descrip) AS descrip
-            FROM saCuentaIngEgr
-            ORDER BY descrip ASC
-        `);
-        return res.json({ success: true, data: result.recordset });
+        const [result, resPar] = await Promise.all([
+            pool.request().query(`
+                SELECT 
+                    RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr,
+                    RTRIM(descrip) AS descrip
+                FROM saCuentaIngEgr
+                ORDER BY descrip ASC
+            `),
+            pool.request()
+                .query(`SELECT TOP 1 RTRIM(ISNULL(c_cta_ing_egr, '')) AS c_cta FROM par_emp`)
+                .catch(() => ({ recordset: [] }))
+        ]);
+
+        const rows = result.recordset || [];
+        const matchCta = (cand) => {
+            const clean = String(cand || '').trim();
+            if (!clean) return '';
+            const hit = rows.find(r => String(r.co_cta_ingr_egr || '').trim().toUpperCase() === clean.toUpperCase());
+            return hit ? String(hit.co_cta_ingr_egr).trim() : '';
+        };
+        const parCta = resPar.recordset?.[0]?.c_cta || '';
+        const defaultEgreso =
+            matchCta(parCta) ||
+            matchCta('P-001') ||
+            matchCta('02') ||
+            (rows.find(r => !/^I-/i.test(String(r.co_cta_ingr_egr || '').trim()))?.co_cta_ingr_egr || '').trim() ||
+            (rows[0]?.co_cta_ingr_egr || '').trim() ||
+            '';
+
+        return res.json({ success: true, data: rows, default_egreso: defaultEgreso });
     } catch (e) {
         console.error('[DOCS COMPRA] Error al consultar cuentas:', e.message);
         return res.status(500).json({ success: false, message: e.message });
@@ -427,6 +454,7 @@ router.get('/', async (req, res) => {
                         RTRIM(d.co_sucu_in) AS co_sucu_in,
                         RTRIM(d.doc_orig) AS doc_orig,
                         RTRIM(d.nro_orig) AS nro_orig,
+                        RTRIM(ISNULL(d.mov_ban, '')) AS mov_ban,
                         (
                             SELECT COUNT(*) 
                             FROM saPagoDocReng pdr 
@@ -634,11 +662,23 @@ router.get('/:co_tipo_doc/:nro_doc', async (req, res) => {
                 RTRIM(d.co_us_in) AS co_us_in,
                 RTRIM(d.co_sucu_in) AS co_sucu_in,
                 RTRIM(d.doc_orig) AS doc_orig,
-                RTRIM(d.nro_orig) AS nro_orig
+                RTRIM(d.nro_orig) AS nro_orig,
+                RTRIM(ISNULL(d.mov_ban, '')) AS mov_ban,
+                RTRIM(ISNULL(mb.cod_cta, '')) AS mov_ban_cod_cta,
+                RTRIM(ISNULL(b.des_ban, '')) AS mov_ban_des_ban,
+                RTRIM(ISNULL(mb.tipo_op, '')) AS mov_ban_tipo_op,
+                RTRIM(ISNULL(mb.doc_num, '')) AS mov_ban_doc_num,
+                mb.fecha AS mov_ban_fecha,
+                ISNULL(mb.monto_d, 0) AS mov_ban_monto_d,
+                ISNULL(mb.anulado, 0) AS mov_ban_anulado,
+                RTRIM(ISNULL(cb.co_mone, '')) AS mov_ban_co_mone
             FROM saDocumentoCompra d
             LEFT JOIN saProveedor p ON d.co_prov = p.co_prov
             LEFT JOIN saTipoDocumento td ON d.co_tipo_doc = td.co_tipo_doc
             LEFT JOIN saCuentaIngEgr cie ON d.co_cta_ingr_egr = cie.co_cta_ingr_egr
+            LEFT JOIN saMovimientoBanco mb ON LTRIM(RTRIM(d.mov_ban)) = LTRIM(RTRIM(mb.mov_num))
+            LEFT JOIN saCuentaBancaria cb ON mb.cod_cta = cb.cod_cta
+            LEFT JOIN saBanco b ON cb.co_ban = b.co_ban
             WHERE LTRIM(RTRIM(d.co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(d.nro_doc)) = LTRIM(RTRIM(@nro_doc))
         `);
@@ -708,15 +748,41 @@ router.post('/', async (req, res) => {
         if (!payload.co_prov || !String(payload.co_prov).trim()) {
             return res.status(400).json({ success: false, message: 'El código de proveedor es obligatorio.' });
         }
-        if (!payload.nro_fact || !String(payload.nro_fact).trim()) {
+
+        const coTipoDoc = (payload.co_tipo_doc || 'FACT').trim().toUpperCase();
+        const ADVANCE_ADJUST_TYPES = ['ADEL', 'AJNM', 'AJPM', 'AJPA', 'AJNA'];
+        const isAdvanceOrAdjust = ADVANCE_ADJUST_TYPES.includes(coTipoDoc);
+        const rawNroFact = payload.nro_fact && String(payload.nro_fact).trim()
+            ? String(payload.nro_fact).trim().substring(0, 20)
+            : '';
+
+        if (!isAdvanceOrAdjust && !rawNroFact) {
             return res.status(400).json({ success: false, message: 'El número de factura / documento fiscal del proveedor es obligatorio.' });
         }
         if (!payload.fec_emis) {
             return res.status(400).json({ success: false, message: 'La fecha de emisión es obligatoria.' });
         }
 
-        const coTipoDoc = (payload.co_tipo_doc || 'FACT').trim().toUpperCase();
-        const nroFact = String(payload.nro_fact).trim().substring(0, 20);
+        const generarMovBanco = Boolean(payload.generar_mov_banco);
+        const movBancoPayload = payload.mov_banco || {};
+        const banCodCta = String(movBancoPayload.cod_cta || payload.cod_cta_banco || '').trim();
+        const banTipoOp = String(movBancoPayload.tipo_op || payload.tipo_op_banco || 'TR').trim().toUpperCase();
+        const banRef = String(movBancoPayload.doc_num || movBancoPayload.referencia || payload.ref_banco || rawNroFact || '').trim().substring(0, 20);
+        const banFechaStr = safeDate(movBancoPayload.fecha || payload.fec_banco || payload.fec_emis);
+        const banCtaIngEgrInput = String(movBancoPayload.co_cta_ingr_egr || payload.co_cta_ingr_egr_banco || payload.co_cta_ingr_egr || '').trim();
+
+        if (generarMovBanco) {
+            if (!banCodCta) {
+                return res.status(400).json({ success: false, message: 'Debe seleccionar una cuenta bancaria para generar el movimiento bancario.' });
+            }
+            if (!['TR', 'CH', 'ND'].includes(banTipoOp)) {
+                return res.status(400).json({ success: false, message: `Tipo de operación bancaria inválido (${banTipoOp}). Permitidos: TR, CH, ND.` });
+            }
+            if (!banRef) {
+                return res.status(400).json({ success: false, message: 'Debe indicar el número de referencia / cheque para el movimiento bancario.' });
+            }
+        }
+
         const nControl = payload.n_control && String(payload.n_control).trim() 
             ? String(payload.n_control).trim().substring(0, 20) 
             : 'N/A';
@@ -762,50 +828,146 @@ router.post('/', async (req, res) => {
         pool = await getPool(srv.id, req.sqlAuth);
         const { coMone, bNac } = await resolveCurrencyAndNac(pool, payload.co_mone, payload.co_prov);
 
-        // Verificar si ya existe un documento activo con este mismo nro_fact para este proveedor en CUALQUIER sucursal
-        const dup = await checkDuplicateAcrossBranches({
-            currentSedeId: srv.id,
-            coProv: payload.co_prov,
-            rif: payload.rif,
-            nroFact: nroFact,
-            excludeNroDoc: null,
-            sqlAuth: req.sqlAuth
-        });
+        // Validar cuenta bancaria y cuenta ingreso/egreso si se solicitó generar movimiento bancario
+        let banCtaMone = 'BS';
+        let resolvedBanCtaIE = null;
+        if (generarMovBanco) {
+            const resBancoCta = await pool.request()
+                .input('cod_cta', sql.Char(6), padProfit(banCodCta, 6))
+                .query(`SELECT TOP 1 RTRIM(co_mone) AS co_mone, inactivo FROM saCuentaBancaria WHERE LTRIM(RTRIM(cod_cta)) = LTRIM(RTRIM(@cod_cta))`);
+            if (!resBancoCta.recordset.length) {
+                return res.status(400).json({ success: false, message: `La cuenta bancaria "${banCodCta}" no existe en Profit Plus.` });
+            }
+            if (resBancoCta.recordset[0].inactivo) {
+                return res.status(400).json({ success: false, message: `La cuenta bancaria "${banCodCta}" se encuentra inactiva.` });
+            }
+            banCtaMone = resBancoCta.recordset[0].co_mone || 'BS';
 
-        if (dup) {
-            const sedeText = dup.branch_id === srv.id ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
-            return res.status(400).json({
-                success: false,
-                message: `El documento fiscal N° "${nroFact}" ya fue registrado en ${sedeText} para el proveedor ${dup.prov_des} (RIF: ${dup.rif || dup.co_prov}) con el documento interno ${dup.co_tipo_doc} #${dup.nro_doc}.`
+            const resPar = await pool.request()
+                .query(`SELECT TOP 1 RTRIM(ISNULL(c_cta_ing_egr, '')) AS c_cta FROM par_emp`)
+                .catch(() => ({ recordset: [] }));
+            const parCta = String(resPar.recordset?.[0]?.c_cta || '').trim();
+
+            const resCtaIE = await pool.request()
+                .input('pref_cta', sql.VarChar(20), banCtaIngEgrInput)
+                .input('par_cta', sql.VarChar(20), parCta)
+                .query(`
+                    SELECT TOP 1 RTRIM(co_cta_ingr_egr) AS co_cta_ingr_egr
+                    FROM saCuentaIngEgr
+                    ORDER BY CASE
+                        WHEN @pref_cta <> '' AND LTRIM(RTRIM(co_cta_ingr_egr)) = LTRIM(RTRIM(@pref_cta)) THEN 0
+                        WHEN @par_cta <> '' AND LTRIM(RTRIM(co_cta_ingr_egr)) = LTRIM(RTRIM(@par_cta)) THEN 1
+                        WHEN LTRIM(RTRIM(co_cta_ingr_egr)) = 'P-001' THEN 2
+                        WHEN LTRIM(RTRIM(co_cta_ingr_egr)) = '02' THEN 3
+                        WHEN LTRIM(RTRIM(co_cta_ingr_egr)) = '01' THEN 4
+                        ELSE 5
+                    END, co_cta_ingr_egr ASC
+                `);
+            resolvedBanCtaIE = resCtaIE.recordset[0]?.co_cta_ingr_egr || banCtaIngEgrInput || parCta || 'P-001';
+        }
+
+        // Verificar si ya existe un documento fiscal activo con este mismo nro_fact para este proveedor en CUALQUIER sucursal
+        if (rawNroFact && !isAdvanceOrAdjust) {
+            const dup = await checkDuplicateAcrossBranches({
+                currentSedeId: srv.id,
+                coProv: payload.co_prov,
+                rif: payload.rif,
+                nroFact: rawNroFact,
+                excludeNroDoc: null,
+                sqlAuth: req.sqlAuth
             });
+
+            if (dup) {
+                const sedeText = dup.branch_id === srv.id ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
+                return res.status(400).json({
+                    success: false,
+                    message: `El documento fiscal N° "${rawNroFact}" ya fue registrado en ${sedeText} para el proveedor ${dup.prov_des} (RIF: ${dup.rif || dup.co_prov}) con el documento interno ${dup.co_tipo_doc} #${dup.nro_doc}.`
+                });
+            }
         }
 
         transaction = new sql.Transaction(pool);
         await transaction.begin();
 
-        // Obtener correlativo consecutivo atómico
-        let consecKey = 'DOC_COMPRA_FACT';
-        if (coTipoDoc === 'N/CR') consecKey = 'DOC_COMPRA_NCR';
-        else if (coTipoDoc === 'N/DB') consecKey = 'DOC_COMPRA_NDB';
+        // Obtener correlativo consecutivo atómico y verificar unicidad
+        const consecMap = {
+            'N/CR': 'DOC_COMPRA_NCR',
+            'N/DB': 'DOC_COMPRA_NDB',
+            'ADEL': 'DOC_COMPRA_ADEL',
+            'AJNA': 'DOC_COMPRA_AJNA',
+            'AJNM': 'DOC_COMPRA_AJNM',
+            'AJPA': 'DOC_COMPRA_AJPA',
+            'AJPM': 'DOC_COMPRA_AJPM'
+        };
+        const consecKey = consecMap[coTipoDoc] || 'DOC_COMPRA_FACT';
 
-        const { docNum } = await getProximoConsecutivo({
-            runner: transaction,
-            co_tipo_serie: consecKey,
-            co_sucur: sucuCode
-        });
+        let docNum = '';
+        for (let attempt = 0; attempt < 5; attempt++) {
+            const corr = await getProximoConsecutivo({
+                runner: transaction,
+                co_tipo_serie: consecKey,
+                co_sucur: sucuCode
+            });
+            const cand = String(corr.docNum || '').trim();
+            if (!cand) continue;
+            const chkDoc = await new sql.Request(transaction)
+                .input('co_tipo_doc', sql.Char(6), padProfit(coTipoDoc, 6))
+                .input('nro_doc', sql.Char(20), padProfit(cand, 20))
+                .query(`SELECT 1 AS ex FROM saDocumentoCompra WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc)) AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))`);
+            if (chkDoc.recordset.length === 0) {
+                docNum = cand;
+                break;
+            }
+        }
+        if (!docNum) {
+            throw new Error(`No se pudo asignar un correlativo único para el tipo de documento ${coTipoDoc}.`);
+        }
 
+        const nroFact = (rawNroFact || banRef || docNum).substring(0, 20);
         console.log(`🧾 [DOCS COMPRA] Consecutivo asignado: ${docNum} (${coTipoDoc}) para proveedor ${payload.co_prov}`);
 
         const coCtaIngEgr = payload.co_cta_ingr_egr && String(payload.co_cta_ingr_egr).trim()
             ? padProfit(String(payload.co_cta_ingr_egr).trim(), 20)
-            : null;
+            : (generarMovBanco && resolvedBanCtaIE ? padProfit(resolvedBanCtaIE, 20) : null);
         const docOrig = payload.doc_orig && String(payload.doc_orig).trim()
             ? padProfit(String(payload.doc_orig).trim(), 6)
-            : null;
+            : (isAdvanceOrAdjust ? padProfit(coTipoDoc, 6) : null);
         const nroOrig = payload.nro_orig && String(payload.nro_orig).trim()
             ? padProfit(String(payload.nro_orig).trim(), 20)
             : null;
         const observa = (payload.observa || `${coTipoDoc} N° ${nroFact} - PROV ${payload.co_prov}`).substring(0, 120);
+
+        // 0. Si corresponde, crear el Movimiento Bancario ANTES para respetar FK_saDocumentoCompra_saMovimientoBanco
+        let movBanNum = null;
+        if (generarMovBanco) {
+            const fecBancoDate = new Date(`${banFechaStr || fecEmis}T12:00:00`);
+            const banIsUSD = isCurrencyUSD(banCtaMone);
+            const montoBanco = banIsUSD ? round2(totalNeto / tasaDoc) : round2(totalNeto);
+            const tasaMov = banIsUSD ? tasaDoc : 1;
+
+            movBanNum = await generateUniqueMovNum(transaction, sucuCode);
+            await insertMovimientoBancoSP(transaction, {
+                mov_num: movBanNum,
+                descrip: observa,
+                cod_cta: banCodCta,
+                fecha: fecBancoDate,
+                fecha_che: fecBancoDate,
+                tasa: tasaMov,
+                tipo_op: banTipoOp,
+                doc_num: banRef,
+                monto: montoBanco,
+                co_cta_ingr_egr: resolvedBanCtaIE,
+                origen: 'BAN',
+                cob_pag: null,
+                idb: 0,
+                co_us_in: auditUser,
+                co_sucu_in: sucuCode,
+                maquina: 'SYNC2K'
+            });
+            await syncSaldoBanco(transaction, banCodCta);
+            console.log(`🏦 [DOCS COMPRA] Movimiento bancario generado: ${movBanNum} (Cuenta: ${banCodCta}, Op: ${banTipoOp}, Monto: ${montoBanco})`);
+        }
+        const movBanPadded = movBanNum ? padProfit(movBanNum, 20) : null;
 
         // 1. Intentar ejecución vía Stored Procedure oficial de Profit
         let inserted = false;
@@ -818,7 +980,7 @@ router.post('/', async (req, res) => {
             reqDoc.input('sCo_Prov',         sql.Char(16),       padProfit(payload.co_prov, 16));
             reqDoc.input('sCo_Cta_Ingr_Egr', sql.Char(20),       coCtaIngEgr);
             reqDoc.input('sDoc_Orig',        sql.Char(6),        docOrig);
-            reqDoc.input('sMov_Ban',         sql.Char(20),       null);
+            reqDoc.input('sMov_Ban',         sql.Char(20),       movBanPadded);
             reqDoc.input('sNro_Orig',        sql.Char(20),       nroOrig);
             reqDoc.input('sNro_Che',         sql.Char(20),       null);
             reqDoc.input('sPorc_Reca',       sql.Char(15),       porcReca);
@@ -887,6 +1049,7 @@ router.post('/', async (req, res) => {
             directReq.input('co_prov',        sql.Char(16), padProfit(payload.co_prov, 16));
             directReq.input('co_cta_ingr_egr',sql.Char(20), coCtaIngEgr);
             directReq.input('doc_orig',       sql.Char(6),  docOrig);
+            directReq.input('mov_ban',        sql.Char(20), movBanPadded);
             directReq.input('nro_orig',       sql.Char(20), nroOrig);
             directReq.input('anulado',        sql.Bit, 0);
             directReq.input('aut',            sql.Bit, 0);
@@ -924,7 +1087,7 @@ router.post('/', async (req, res) => {
             await directReq.query(`
                 INSERT INTO saDocumentoCompra (
                     co_tipo_doc, nro_doc, nro_fact, co_mone, co_prov, co_cta_ingr_egr,
-                    doc_orig, nro_orig,
+                    doc_orig, mov_ban, nro_orig,
                     porc_desc_glob, monto_desc_glob, porc_reca, monto_reca, anulado, aut, pagar, observa, tipo_imp,
                     fec_reg, fec_emis, fec_venc, porc_imp, porc_imp2, porc_imp3,
                     monto_imp, monto_imp2, monto_imp3, tasa, total_bruto, total_neto,
@@ -933,7 +1096,7 @@ router.post('/', async (req, res) => {
                     fe_us_mo, nac
                 ) VALUES (
                     @co_tipo_doc, @nro_doc, @nro_fact, @co_mone, @co_prov, @co_cta_ingr_egr,
-                    @doc_orig, @nro_orig,
+                    @doc_orig, @mov_ban, @nro_orig,
                     @porc_desc_glob, @monto_desc_glob, @porc_reca, @monto_reca, @anulado, @aut, @pagar, @observa, @tipo_imp,
                     @fec_reg, @fec_emis, @fec_venc, @porc_imp, @porc_imp2, @porc_imp3,
                     @monto_imp, @monto_imp2, @monto_imp3, @tasa, @total_bruto, @total_neto,
@@ -954,7 +1117,10 @@ router.post('/', async (req, res) => {
             nro_doc: docNum,
             co_tipo_doc: coTipoDoc,
             nro_fact: nroFact,
-            message: `Documento ${coTipoDoc} ${docNum} registrado con éxito.`
+            mov_ban: movBanNum || null,
+            message: movBanNum
+                ? `Documento ${coTipoDoc} ${docNum} y Movimiento Bancario ${movBanNum} registrados con éxito.`
+                : `Documento ${coTipoDoc} ${docNum} registrado con éxito.`
         });
     } catch (e) {
         if (transaction) {
@@ -1012,7 +1178,8 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
                 saldo,
                 total_neto,
                 RTRIM(doc_orig) AS doc_orig,
-                RTRIM(nro_orig) AS nro_orig
+                RTRIM(nro_orig) AS nro_orig,
+                RTRIM(ISNULL(mov_ban, '')) AS mov_ban
             FROM saDocumentoCompra
             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
@@ -1082,10 +1249,16 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
         if (totalNeto <= 0) {
             return res.status(400).json({ success: false, message: 'El monto total neto del documento debe ser mayor a 0.' });
         }
+        if (existingDoc.mov_ban && Math.abs(totalNeto - Number(existingDoc.total_neto || 0)) > 0.01) {
+            return res.status(400).json({
+                success: false,
+                message: `Este documento posee el Movimiento Bancario asociado N° ${existingDoc.mov_ban}. Para cambiar el monto total debe anularlo y registrarlo nuevamente para mantener cuadrado el banco.`
+            });
+        }
 
         // 3. Validar duplicado de nro_fact en todas las sucursales para este proveedor
         const dup = await checkDuplicateAcrossBranches({
-            currentSedeId: target.id,
+            currentSedeId: srv.id,
             coProv: payload.co_prov,
             rif: payload.rif,
             nroFact: nroFact,
@@ -1093,7 +1266,7 @@ router.put('/:co_tipo_doc/:nro_doc', async (req, res) => {
             sqlAuth: req.sqlAuth
         });
         if (dup) {
-            const sedeText = dup.branch_id === target.id ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
+            const sedeText = dup.branch_id === srv.id ? 'esta sucursal' : `la sucursal "${dup.branch_name}"`;
             return res.status(400).json({
                 success: false,
                 message: `El documento fiscal N° "${nroFact}" ya fue registrado en ${sedeText} para el proveedor ${dup.prov_des} (RIF: ${dup.rif || dup.co_prov}) con el documento interno ${dup.co_tipo_doc} #${dup.nro_doc}.`
@@ -1242,8 +1415,9 @@ router.post('/:co_tipo_doc/:nro_doc/anular', async (req, res) => {
                 anulado,
                 saldo,
                 total_neto,
-                doc_orig,
-                nro_orig
+                RTRIM(ISNULL(doc_orig, '')) AS doc_orig,
+                RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
+                RTRIM(ISNULL(mov_ban, '')) AS mov_ban
             FROM saDocumentoCompra
             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
@@ -1256,6 +1430,12 @@ router.post('/:co_tipo_doc/:nro_doc/anular', async (req, res) => {
         const doc = resDoc.recordset[0];
         if (doc.anulado) {
             return res.status(400).json({ success: false, message: 'El documento ya se encuentra anulado.' });
+        }
+        if (doc.doc_orig === 'PAGO' && doc.nro_orig) {
+            return res.status(400).json({
+                success: false,
+                message: `Este documento fue generado por el Pago N° ${doc.nro_orig}. Anúlelo desde el módulo de Pagos a Proveedores.`
+            });
         }
 
         // 2. Verificar si tiene pagos asociados activos
@@ -1279,6 +1459,27 @@ router.post('/:co_tipo_doc/:nro_doc/anular', async (req, res) => {
             });
         }
 
+        // 2.1 Verificar movimiento bancario asociado si existe
+        let linkedMov = null;
+        if (doc.mov_ban) {
+            const resMov = await pool.request()
+                .input('mov_ban', sql.Char(20), padProfit(doc.mov_ban, 20))
+                .query(`
+                    SELECT TOP 1 RTRIM(mov_num) AS mov_num, RTRIM(cod_cta) AS cod_cta, conciliado, anulado, RTRIM(ISNULL(origen, '')) AS origen
+                    FROM saMovimientoBanco
+                    WHERE LTRIM(RTRIM(mov_num)) = LTRIM(RTRIM(@mov_ban))
+                `);
+            if (resMov.recordset.length > 0) {
+                linkedMov = resMov.recordset[0];
+                if (linkedMov.conciliado) {
+                    return res.status(400).json({
+                        success: false,
+                        message: `El movimiento bancario ${linkedMov.mov_num} asociado a este documento está conciliado. Desconcílielo primero antes de anular el documento.`
+                    });
+                }
+            }
+        }
+
         transaction = new sql.Transaction(pool);
         await transaction.begin();
 
@@ -1297,6 +1498,23 @@ router.post('/:co_tipo_doc/:nro_doc/anular', async (req, res) => {
             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
         `);
+
+        // 4. Anular movimiento bancario asociado y recalcular saSaldoBanco
+        if (linkedMov && !linkedMov.anulado) {
+            await new sql.Request(transaction)
+                .input('mov_ban', sql.Char(20), padProfit(linkedMov.mov_num, 20))
+                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                .query(`
+                    UPDATE saMovimientoBanco
+                    SET anulado = 1,
+                        fe_us_mo = GETDATE(),
+                        co_us_mo = @auditUser
+                    WHERE LTRIM(RTRIM(mov_num)) = LTRIM(RTRIM(@mov_ban));
+                `);
+            if (linkedMov.cod_cta) {
+                await syncSaldoBanco(transaction, linkedMov.cod_cta);
+            }
+        }
 
         await transaction.commit();
 
@@ -1342,8 +1560,9 @@ router.delete('/:co_tipo_doc/:nro_doc', async (req, res) => {
                 anulado,
                 saldo,
                 total_neto,
-                doc_orig,
-                nro_orig
+                RTRIM(ISNULL(doc_orig, '')) AS doc_orig,
+                RTRIM(ISNULL(nro_orig, '')) AS nro_orig,
+                RTRIM(ISNULL(mov_ban, '')) AS mov_ban
             FROM saDocumentoCompra
             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc))
@@ -1354,6 +1573,12 @@ router.delete('/:co_tipo_doc/:nro_doc', async (req, res) => {
         }
 
         const doc = resDoc.recordset[0];
+        if (doc.doc_orig === 'PAGO' && doc.nro_orig) {
+            return res.status(400).json({
+                success: false,
+                message: `Este documento fue generado por el Pago N° ${doc.nro_orig}. Elimínelo desde el módulo de Pagos a Proveedores.`
+            });
+        }
 
         // Si fue generado desde una factura con inventario (saFacturaCompra), no se debe eliminar directamente desde aquí
         if (doc.doc_orig && doc.doc_orig.trim() === 'FACT' && doc.nro_orig && doc.nro_orig.trim()) {
@@ -1396,6 +1621,26 @@ router.delete('/:co_tipo_doc/:nro_doc', async (req, res) => {
             });
         }
 
+        let linkedMovDel = null;
+        if (doc.mov_ban) {
+            const resMovDel = await pool.request()
+                .input('mov_ban', sql.Char(20), padProfit(doc.mov_ban, 20))
+                .query(`
+                    SELECT TOP 1 RTRIM(mov_num) AS mov_num, RTRIM(cod_cta) AS cod_cta, conciliado, RTRIM(ISNULL(origen, '')) AS origen
+                    FROM saMovimientoBanco
+                    WHERE LTRIM(RTRIM(mov_num)) = LTRIM(RTRIM(@mov_ban))
+                `);
+            if (resMovDel.recordset.length > 0) {
+                linkedMovDel = resMovDel.recordset[0];
+                if (linkedMovDel.conciliado) {
+                    return res.status(400).json({
+                        success: false,
+                        message: `El movimiento bancario ${linkedMovDel.mov_num} asociado a este documento está conciliado. Desconcílielo primero antes de eliminarlo.`
+                    });
+                }
+            }
+        }
+
         transaction = new sql.Transaction(pool);
         await transaction.begin();
 
@@ -1408,6 +1653,18 @@ router.delete('/:co_tipo_doc/:nro_doc', async (req, res) => {
             WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
               AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
         `);
+
+        if (linkedMovDel && linkedMovDel.origen === 'BAN') {
+            await new sql.Request(transaction)
+                .input('mov_ban', sql.Char(20), padProfit(linkedMovDel.mov_num, 20))
+                .query(`
+                    DELETE FROM saMovimientoBanco
+                    WHERE LTRIM(RTRIM(mov_num)) = LTRIM(RTRIM(@mov_ban));
+                `);
+            if (linkedMovDel.cod_cta) {
+                await syncSaldoBanco(transaction, linkedMovDel.cod_cta);
+            }
+        }
 
         await transaction.commit();
 

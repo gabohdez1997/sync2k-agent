@@ -279,7 +279,7 @@ router.get('/catalogos', async (req, res) => {
         if (!ctx) return;
         const { srv, pool } = ctx;
 
-        const [cuentasRes, ingEgrRes, tasa] = await Promise.all([
+        const [cuentasRes, ingEgrRes, tasa, parEmpRes] = await Promise.all([
             pool.request().query(`
                 SELECT
                     RTRIM(cb.cod_cta) AS cod_cta,
@@ -309,8 +309,34 @@ router.get('/catalogos', async (req, res) => {
                 FROM saCuentaIngEgr
                 ORDER BY co_cta_ingr_egr ASC
             `),
-            db.getExchangeRate(pool)
+            db.getExchangeRate(pool),
+            pool.request()
+                .query(`SELECT TOP 1 RTRIM(ISNULL(v_cta_ing_egr, '')) AS v_cta, RTRIM(ISNULL(c_cta_ing_egr, '')) AS c_cta FROM par_emp`)
+                .catch(() => ({ recordset: [] }))
         ]);
+
+        const ieRows = ingEgrRes.recordset || [];
+        const matchCta = (cand) => {
+            const clean = String(cand || '').trim();
+            if (!clean) return '';
+            const hit = ieRows.find(r => String(r.co_cta_ingr_egr || '').trim().toUpperCase() === clean.toUpperCase());
+            return hit ? String(hit.co_cta_ingr_egr).trim() : '';
+        };
+        const parIng = parEmpRes.recordset?.[0]?.v_cta || '';
+        const parEgr = parEmpRes.recordset?.[0]?.c_cta || '';
+
+        const defaultEgreso =
+            matchCta(parEgr) ||
+            matchCta('P-001') ||
+            matchCta('02') ||
+            (ieRows.find(r => !/^I-/i.test(String(r.co_cta_ingr_egr || '').trim()))?.co_cta_ingr_egr || '').trim() ||
+            '02';
+        const defaultIngreso =
+            matchCta(parIng) ||
+            matchCta('I-001') ||
+            matchCta('01') ||
+            (ieRows[0]?.co_cta_ingr_egr || '').trim() ||
+            '01';
 
         const todasCuentas = cuentasRes.recordset.map(c => ({
             ...c,
@@ -323,15 +349,15 @@ router.get('/catalogos', async (req, res) => {
             tasa: Number(tasa || 1),
             cuentas_bancarias: todasCuentas.filter(c => !c.inactivo),
             todas_cuentas_bancarias: todasCuentas,
-            cuentas_ingr_egr: ingEgrRes.recordset,
+            cuentas_ingr_egr: ieRows,
             tipos_operacion: Object.entries(TIPO_OP_LABELS).map(([codigo, label]) => ({
                 codigo,
                 label,
                 naturaleza: codigo === 'ID' ? 'IDB' : CREDIT_TYPES.has(codigo) ? 'INGRESO' : 'EGRESO'
             })),
             defaults: {
-                cta_ingr_egr_ingreso: '01',
-                cta_ingr_egr_egreso: '02'
+                cta_ingr_egr_ingreso: defaultIngreso,
+                cta_ingr_egr_egreso: defaultEgreso
             }
         });
     } catch (err) {
