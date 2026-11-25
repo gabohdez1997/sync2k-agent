@@ -3,6 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
+const { fetchLatestArticlePrices, resolveLinePricing } = require('../helpers/precios');
 
 /**
  * @swagger
@@ -266,7 +267,8 @@ router.get('/:doc_num', async (req, res) => {
                                RTRIM(r.tipo_imp) AS tipo_imp, r.porc_imp, r.reng_neto AS total_renglon,
                                r.prec_vta_om, RTRIM(r.co_uni) AS co_uni, RTRIM(u.des_uni) AS unidad,
                                RTRIM(r.tipo_doc) AS tipo_doc, RTRIM(r.num_doc) AS num_doc, r.rowguid_doc,
-                               ISNULL(r.total_dev, 0) AS total_dev, ISNULL(r.monto_dev, 0) AS monto_dev, r.rowguid
+                               ISNULL(r.total_dev, 0) AS total_dev, ISNULL(r.monto_dev, 0) AS monto_dev, r.rowguid,
+                               RTRIM(ISNULL(r.comentario, '')) AS comentario
                         FROM saFacturaVentaReng r
                         LEFT JOIN saArticulo a ON r.co_art = a.co_art
                         LEFT JOIN saUnidad u ON r.co_uni = u.co_uni
@@ -513,18 +515,23 @@ router.post('/', async (req, res) => {
             tasaDoc = currentTasa;
         }
 
-        // 3. Calcular montos
-        // La factura se guardará en USD, por lo tanto, los montos recibidos en el renglón (precio)
-        // se asume que están en USD. Calculamos montos en Bs para guardar en campos locales de base.
+        // 3. Calcular montos usando siempre el último precio vigente en saArtPrecio (solo respeta precio enviado si tiene PRECIO_AUT:)
+        const latestPriceMap = await fetchLatestArticlePrices(
+            pool,
+            (data.renglones || []).map((r) => r.co_art),
+            tasaDoc
+        );
+        const resolvedLines = (data.renglones || []).map((item) =>
+            resolveLinePricing(item, latestPriceMap, { isUSD: true, tasaDoc })
+        );
+
         let totalBrutoBs = 0;
         let totalImpBs   = 0;
         
-        data.renglones.forEach(item => {
+        data.renglones.forEach((item, idx) => {
             const qty = Number(item.cantidad || 0);
-            const prcUSD = Number(item.precio || 0);
             const pImp = Number(item.porc_imp || 0);
-            
-            const prcBs = prcUSD * tasaDoc;
+            const prcBs = resolvedLines[idx].prcBs;
             const subBs = Math.round((qty * prcBs) * 100) / 100;
             const impBs = Math.round(((subBs * pImp) / 100) * 100) / 100;
             
@@ -618,11 +625,8 @@ router.post('/', async (req, res) => {
             for (let i = 0; i < data.renglones.length; i++) {
                 const item = data.renglones[i];
                 const qty = Number(item.cantidad || 0);
-                const prcUSD = Number(item.precio || 0);
                 const pImp = Number(item.porc_imp || 0);
-                const coPrecio = String(item.co_precio || '01').trim().substring(0, 6);
-
-                const prcBs = prcUSD * tasaDoc;
+                const { coPrecio, prcUSD, prcBs } = resolvedLines[i];
                 const subBs = Math.round((qty * prcBs) * 100) / 100;
                 const impBs = Math.round(((subBs * pImp) / 100) * 100) / 100;
                 
@@ -673,7 +677,7 @@ router.post('/', async (req, res) => {
                 rL.input('deOtros',            sql.Decimal(18, 5),   0);
                 rL.input('deTotal_Dev',        sql.Decimal(18, 5),   0);
                 rL.input('deMonto_Dev',        sql.Decimal(18, 5),   0);
-                rL.input('sComentario',        sql.VarChar(sql.MAX),  '');
+                rL.input('sComentario',        sql.VarChar(sql.MAX),  String(item.comentario || '').substring(0, 500));
                 rL.input('sDis_Cen',           sql.VarChar(sql.MAX),  null);
                 rL.input('sCo_Sucu_In',        sql.Char(6),           padProfit(sucuCode, 6));
                 rL.input('sCo_Us_In',          sql.Char(6),           padProfit(auditUser, 6));
@@ -879,7 +883,20 @@ router.post('/', async (req, res) => {
             }
 
             await transaction.commit();
-            return { doc_num: docNum, success: true, message: 'Factura guardada exitosamente en base de datos.' };
+            return {
+                doc_num: docNum,
+                success: true,
+                message: 'Factura guardada exitosamente en base de datos.',
+                resolved_renglones: resolvedLines.map((l, idx) => ({
+                    reng_num: idx + 1,
+                    co_art: String(data.renglones[idx].co_art || '').trim(),
+                    co_precio: l.coPrecio,
+                    precio_usd: l.prcUSD,
+                    precio_bs: l.prcBs,
+                    authorized: l.authorized,
+                    from_catalog: l.fromCatalog
+                }))
+            };
         } catch (err) {
             if (transaction._aborted === false) await transaction.rollback();
             throw err;

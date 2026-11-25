@@ -3,6 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
+const { fetchLatestArticlePrices, resolveCatalogPrice, resolveLinePricing, isAuthorizedCustomPrice } = require('../helpers/precios');
 
 console.log("ðŸ› ï¸ [AGENT] Iniciando Módulo de Pedidos (Versión Unificada POST)");
 
@@ -193,6 +194,23 @@ router.get('/:doc_num', async (req, res) => {
                         };
                     });
                 }
+
+                const latestPriceMap = await fetchLatestArticlePrices(
+                    pool,
+                    renglones.map((r) => r.co_art),
+                    docTasa > 1 ? docTasa : Number(currentRate || 1)
+                );
+                renglones = renglones.map((r) => {
+                    const latest = resolveCatalogPrice(latestPriceMap, r.co_art, r.co_precio);
+                    return {
+                        ...r,
+                        precio_actual_om: latest ? latest.precio_usd : null,
+                        precio_actual_bs: latest ? latest.precio_bs : null,
+                        precio_actual_moneda: latest ? latest.co_mone : null,
+                        precio_autorizado: isAuthorizedCustomPrice(r)
+                    };
+                });
+
                 return { 
                     ...enc, 
                     renglones, 
@@ -541,19 +559,26 @@ router.post('/', async (req, res) => {
                 tasaDoc = currentTasa; // Auto-corrección de bug anterior
             }
             
+            // Consultar último precio vigente por artículo/tipo en saArtPrecio y respetar solo renglones PRECIO_AUT:
+            const latestPriceMap = await fetchLatestArticlePrices(
+                transaction,
+                (data.renglones || []).map((r) => r.co_art),
+                tasaDoc
+            );
+            const resolvedLines = (data.renglones || []).map((item) =>
+                resolveLinePricing(item, latestPriceMap, { isUSD, tasaDoc })
+            );
+
             // Recalcular Totales desde Renglones (Importante para que no guarde en cero)
             // En Profit, los totales de cabecera suelen almacenarse en MONEDA BASE (BS)
             let totalBruto = 0;
             let totalImp   = 0;
 
             if (data.renglones && Array.isArray(data.renglones)) {
-                data.renglones.forEach(item => {
+                data.renglones.forEach((item, idx) => {
                     const qty = Number(item.cantidad || 0);
-                    const prcIn = Number(item.precio || 0);
                     const pImp = Number(item.porc_imp || 0);
-                    
-                    // Convertir a BS para la cabecera
-                    const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
+                    const prcBs = resolvedLines[idx].prcBs;
                     
                     const sub = Math.round((qty * prcBs) * 100) / 100;
                     const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
@@ -626,16 +651,8 @@ router.post('/', async (req, res) => {
             for (let i = 0; i < data.renglones.length; i++) {
                 const item = data.renglones[i];
                 const qty = Number(item.cantidad || 0);
-                const prcIn = Number(item.precio || 0);
                 const pImp = Number(item.porc_imp || 0);
-                const coPrecio = String(
-                    item.co_precio || item.id_precio || item.co_tipo_precio || '01'
-                ).trim().substring(0, 6);
-
-                const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
-                const prcUSD = isUSD
-                    ? prcIn
-                    : (Number(item.prec_vta_om) > 0 ? Number(item.prec_vta_om) : (prcIn / tasaDoc));
+                const { coPrecio, prcBs, prcUSD } = resolvedLines[i];
                 const sub = Math.round((qty * prcBs) * 100) / 100;
                 const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
 

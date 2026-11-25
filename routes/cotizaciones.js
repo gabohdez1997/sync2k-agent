@@ -3,6 +3,7 @@ const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, padProfit } = require('../helpers/multiSede');
 const { getProximoConsecutivo } = require('../helpers/consecutivos');
+const { fetchLatestArticlePrices, resolveCatalogPrice, resolveLinePricing, isAuthorizedCustomPrice } = require('../helpers/precios');
 
 console.log("🛠️ [AGENT] Iniciando Módulo de Cotizaciones (Versión Unificada POST)");
 
@@ -158,9 +159,53 @@ router.get('/:doc_num', async (req, res) => {
                 ]);
 
                 if (!resEnc.recordset.length) return null;
+                const enc = resEnc.recordset[0];
+                const docTasa = Number(enc.tasa || 0) > 1 ? Number(enc.tasa) : Number(currentRate || 0);
+                const headerBruto = Number(enc.total_bruto || 0);
+                let renglones = resReng.recordset || [];
+                const sumRengNeto = renglones.reduce((acc, r) => acc + Number(r.total_renglon || 0), 0);
+                const allMissingOm = renglones.length > 0 && renglones.every((r) => !(Number(r.prec_vta_om || 0) > 0));
+                if (
+                    docTasa > 10 &&
+                    headerBruto > 0 &&
+                    allMissingOm &&
+                    sumRengNeto > 0 &&
+                    Math.abs((headerBruto / sumRengNeto) - docTasa) / docTasa < 0.05
+                ) {
+                    console.warn(
+                        `[cotizaciones] Normalizing USD-in-BS lines for cotizacion ${enc.doc_num} (header total_bruto=${headerBruto}, sumRengNeto=${sumRengNeto}, tasa=${docTasa})`
+                    );
+                    renglones = renglones.map((r) => {
+                        const unitUsd = Number(r.precio || 0);
+                        const netUsd = Number(r.total_renglon || 0);
+                        return {
+                            ...r,
+                            prec_vta_om: unitUsd,
+                            precio: Number((unitUsd * docTasa).toFixed(5)),
+                            total_renglon: Number((netUsd * docTasa).toFixed(2))
+                        };
+                    });
+                }
+
+                const latestPriceMap = await fetchLatestArticlePrices(
+                    pool,
+                    renglones.map((r) => r.co_art),
+                    docTasa > 1 ? docTasa : Number(currentRate || 1)
+                );
+                renglones = renglones.map((r) => {
+                    const latest = resolveCatalogPrice(latestPriceMap, r.co_art, r.co_precio);
+                    return {
+                        ...r,
+                        precio_actual_om: latest ? latest.precio_usd : null,
+                        precio_actual_bs: latest ? latest.precio_bs : null,
+                        precio_actual_moneda: latest ? latest.co_mone : null,
+                        precio_autorizado: isAuthorizedCustomPrice(r)
+                    };
+                });
+
                 return { 
-                    ...resEnc.recordset[0], 
-                    renglones: resReng.recordset, 
+                    ...enc, 
+                    renglones, 
                     tasa_actual: currentRate,
                     sede_id: srv.id, 
                     sede_nombre: srv.name 
@@ -299,19 +344,26 @@ router.post('/', async (req, res) => {
                 tasaDoc = currentTasa; // Auto-corrección de bug anterior
             }
             
+            // Consultar último precio vigente por artículo/tipo en saArtPrecio y respetar solo renglones PRECIO_AUT:
+            const latestPriceMap = await fetchLatestArticlePrices(
+                transaction,
+                (data.renglones || []).map((r) => r.co_art),
+                tasaDoc
+            );
+            const resolvedLines = (data.renglones || []).map((item) =>
+                resolveLinePricing(item, latestPriceMap, { isUSD, tasaDoc })
+            );
+
             // Recalcular Totales desde Renglones (Importante para que no guarde en cero)
             // En Profit, los totales de cabecera suelen almacenarse en MONEDA BASE (BS)
             let totalBruto = 0;
             let totalImp   = 0;
 
             if (data.renglones && Array.isArray(data.renglones)) {
-                data.renglones.forEach(item => {
+                data.renglones.forEach((item, idx) => {
                     const qty = Number(item.cantidad || 0);
-                    const prcIn = Number(item.precio || 0);
                     const pImp = Number(item.porc_imp || 0);
-                    
-                    // Convertir a BS para la cabecera
-                    const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
+                    const prcBs = resolvedLines[idx].prcBs;
                     
                     const sub = Math.round((qty * prcBs) * 100) / 100;
                     const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
@@ -384,16 +436,8 @@ router.post('/', async (req, res) => {
             for (let i = 0; i < data.renglones.length; i++) {
                 const item = data.renglones[i];
                 const qty = Number(item.cantidad || 0);
-                const prcIn = Number(item.precio || 0);
                 const pImp = Number(item.porc_imp || 0);
-                const coPrecio = String(
-                    item.co_precio || item.id_precio || item.co_tipo_precio || '01'
-                ).trim().substring(0, 6);
-
-                const prcBs = isUSD ? (prcIn * tasaDoc) : prcIn;
-                const prcUSD = isUSD
-                    ? prcIn
-                    : (Number(item.prec_vta_om) > 0 ? Number(item.prec_vta_om) : (prcIn / tasaDoc));
+                const { coPrecio, prcBs, prcUSD } = resolvedLines[i];
                 const sub = Math.round((qty * prcBs) * 100) / 100;
                 const imp = Math.round(((sub * pImp) / 100) * 100) / 100;
 
