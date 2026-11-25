@@ -9,7 +9,13 @@ console.log("📑 [AGENT] Iniciando Módulo de Documentos de Compra (saDocumento
 
 function safeDate(val) {
     if (!val) return null;
-    if (val instanceof Date) return val.toISOString().split('T')[0];
+    if (val instanceof Date) {
+        if (Number.isNaN(val.getTime())) return null;
+        const y = val.getFullYear();
+        const m = String(val.getMonth() + 1).padStart(2, '0');
+        const d = String(val.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
     return String(val).split('T')[0];
 }
 

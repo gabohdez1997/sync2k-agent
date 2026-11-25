@@ -1,4 +1,60 @@
 const sql = require('mssql');
+const tedious = require('tedious');
+
+// Parche global para tedious/mssql con useUTC: false en zonas con LMT sub-minuto en 1900 (ej. Venezuela UTC-04:27:40):
+// 1) SmallDateTime.generateParameterData usaba EPOCH_DATE = new Date(1900, 0, 1) + getTimezoneOffset() (perdiendo 40s),
+//    desplazando -1 día cualquier Date con hora 00:00:00..00:00:39.
+// 2) validate() en tipos fecha usaba Date.parse('YYYY-MM-DD') (UTC 00:00Z -> día anterior 20:00 en UTC-4).
+(function patchTediousDateTypes() {
+    const types = tedious && tedious.TYPES;
+    if (!types || types.__sync2kDatePatched) return;
+
+    const UTC_1900_MS = Date.UTC(1900, 0, 1);
+    const MS_PER_DAY = 86400000;
+
+    if (types.SmallDateTime) {
+        types.SmallDateTime.generateParameterData = function* (parameter, options) {
+            if (parameter.value == null) return;
+            const v = parameter.value;
+            const useUTC = Boolean(options && options.useUTC);
+            const year = useUTC ? v.getUTCFullYear() : v.getFullYear();
+            const month = useUTC ? v.getUTCMonth() : v.getMonth();
+            const day = useUTC ? v.getUTCDate() : v.getDate();
+            const days = Math.round((Date.UTC(year, month, day) - UTC_1900_MS) / MS_PER_DAY);
+            const minutes = useUTC
+                ? (v.getUTCHours() * 60 + v.getUTCMinutes())
+                : (v.getHours() * 60 + v.getMinutes());
+            const buffer = Buffer.alloc(4);
+            buffer.writeUInt16LE(days, 0);
+            buffer.writeUInt16LE(minutes, 2);
+            yield buffer;
+        };
+    }
+
+    const dateOnlyRe = /^(\d{4})-(\d{2})-(\d{2})$/;
+    for (const typeName of ['SmallDateTime', 'DateTime', 'Date', 'DateTime2']) {
+        const t = types[typeName];
+        if (!t || typeof t.validate !== 'function') continue;
+        const origValidate = t.validate.bind(t);
+        t.validate = function (value, collation, options) {
+            if (typeof value === 'string') {
+                const m = value.trim().match(dateOnlyRe);
+                if (m) {
+                    const y = Number(m[1]);
+                    const mo = Number(m[2]) - 1;
+                    const d = Number(m[3]);
+                    value = (options && options.useUTC)
+                        ? new Date(Date.UTC(y, mo, d, 0, 0, 0, 0))
+                        : new Date(y, mo, d, 0, 0, 0, 0);
+                }
+            }
+            return origValidate(value, collation, options);
+        };
+    }
+
+    types.__sync2kDatePatched = true;
+})();
+
 const pg = require('pg');
 require('dotenv').config();
 

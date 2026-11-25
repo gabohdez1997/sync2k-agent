@@ -7,10 +7,25 @@ const { getProximoConsecutivoRetencion, revertirConsecutivoRetencionIfLast } = r
 const { syncSaldoBanco, generateUniqueMovNum, insertMovimientoBancoSP, isCurrencyUSD, round2 } = require('../helpers/bancoSaldo');
 
 /**
+ * Devuelve YYYY-MM-DD en hora local para evitar desfases con fechas UTC (toISOString).
+ */
+function getLocalDateStr(d = new Date()) {
+    const dt = d instanceof Date && !Number.isNaN(d.getTime()) ? d : new Date();
+    const y = dt.getFullYear();
+    const m = String(dt.getMonth() + 1).padStart(2, '0');
+    const day = String(dt.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+/**
  * Parsea fechas YYYY-MM-DD al mediodía local para evitar desfases de zona horaria (UTC-4).
  */
 function parseLocalNoonDate(val, fallbackDate) {
     if (!val) return fallbackDate || new Date();
+    if (val instanceof Date) {
+        if (Number.isNaN(val.getTime())) return fallbackDate || new Date();
+        return new Date(val.getFullYear(), val.getMonth(), val.getDate(), 12, 0, 0, 0);
+    }
     const s = String(val).trim();
     const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
     if (m) {
@@ -1656,9 +1671,8 @@ router.post('/', async (req, res) => {
         const defCaja = resCaja.recordset[0]?.cod_caja || '02';
 
         const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
-        const pagoFechaStr = (data.fecha && String(data.fecha).match(/^\d{4}-\d{2}-\d{2}$/))
-            ? String(data.fecha).trim()
-            : new Date().toISOString().split('T')[0];
+        const rawFechaMatch = data.fecha ? String(data.fecha).trim().match(/^(\d{4}-\d{2}-\d{2})/) : null;
+        const pagoFechaStr = rawFechaMatch ? rawFechaMatch[1] : getLocalDateStr();
         const tsDate = new Date(`${pagoFechaStr}T12:00:00`);
 
         const branchCodes = srv.profit_branch_codes || [];
@@ -1952,7 +1966,8 @@ router.post('/', async (req, res) => {
                         docNroFact = di.nro_fact || docNroFact;
                         docNControl = di.n_control || '';
                         docNroOrig = di.nro_orig || '';
-                        if (di.fec_emis) docFecEmis = new Date(di.fec_emis);
+                        if (di.fec_emis_str) docFecEmis = parseLocalNoonDate(di.fec_emis_str, tsDate);
+                        else if (di.fec_emis) docFecEmis = parseLocalNoonDate(di.fec_emis, tsDate);
                         docTotalNeto = Number(di.total_neto || 0);
                         docBaseImponible = Number(di.base_imponible_calc || 0);
                         docMontoExento = Number(di.monto_exento_calc || 0);
