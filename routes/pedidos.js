@@ -166,9 +166,36 @@ router.get('/:doc_num', async (req, res) => {
                 ]);
 
                 if (!resEnc.recordset.length) return null;
+                const enc = resEnc.recordset[0];
+                const docTasa = Number(enc.tasa || 0) > 1 ? Number(enc.tasa) : Number(currentRate || 0);
+                const headerBruto = Number(enc.total_bruto || 0);
+                let renglones = resReng.recordset || [];
+                const sumRengNeto = renglones.reduce((acc, r) => acc + Number(r.total_renglon || 0), 0);
+                const allMissingOm = renglones.length > 0 && renglones.every((r) => !(Number(r.prec_vta_om || 0) > 0));
+                if (
+                    docTasa > 10 &&
+                    headerBruto > 0 &&
+                    allMissingOm &&
+                    sumRengNeto > 0 &&
+                    Math.abs((headerBruto / sumRengNeto) - docTasa) / docTasa < 0.05
+                ) {
+                    console.warn(
+                        `[pedidos] Normalizing USD-in-BS lines for pedido ${enc.doc_num} (header total_bruto=${headerBruto}, sumRengNeto=${sumRengNeto}, tasa=${docTasa})`
+                    );
+                    renglones = renglones.map((r) => {
+                        const unitUsd = Number(r.precio || 0);
+                        const netUsd = Number(r.total_renglon || 0);
+                        return {
+                            ...r,
+                            prec_vta_om: unitUsd,
+                            precio: Number((unitUsd * docTasa).toFixed(5)),
+                            total_renglon: Number((netUsd * docTasa).toFixed(2))
+                        };
+                    });
+                }
                 return { 
-                    ...resEnc.recordset[0], 
-                    renglones: resReng.recordset, 
+                    ...enc, 
+                    renglones, 
                     tasa_actual: currentRate,
                     sede_id: srv.id, 
                     sede_nombre: srv.name 
