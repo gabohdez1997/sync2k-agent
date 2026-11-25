@@ -2442,7 +2442,16 @@ router.post('/', async (req, res) => {
                         filter_val: ajTipo
                     });
                     const ajDocNum = corrAj.docNum;
-                    const ajObserva = (`PAGO N° ${cobNum} de proveedor ${data.co_prov}`).substring(0, 120);
+                    const isFromTimbre = data.ajuste_diferencia.motivo === 'timbre_1x1000' || createdTimbreAjnaBs > 0.01;
+                    const ctaAjpa = findValidCta(data.ajuste_diferencia.co_cta_ingr_egr) || (
+                        isFromTimbre
+                            ? (findValidCta('I-002') || findValidCta('I-001') || allCtas.find(c => /^I-/i.test(c)) || defCtaIE)
+                            : (findCtaByRegex(/DIFERENCIAL|CAMBIAR/i) || findValidCta('I-001') || findCtaByRegex(/INGRESO.*FINANCIER/i) || findValidCta('G-024') || defCtaIE)
+                    );
+                    const ajObserva = isFromTimbre
+                        ? (`AJUSTE EXCEDENTE RET. 1X1000 PAGO N° ${cobNum} - ${data.co_prov}`).substring(0, 120)
+                        : (`AJUSTE POR DIFERENCIAL CAMBIARIO PAGO N° ${cobNum} - ${data.co_prov}`).substring(0, 120);
+                    console.log(`📌 Pago ${cobNum}: ${ajTipo} ${ajDocNum} -> cta ${ctaAjpa} (motivo: ${isFromTimbre ? 'timbre_1x1000' : 'diferencial_cambiario'})`);
 
                     await transaction.request()
                         .input('co_tipo_doc', sql.Char(6), padProfit(ajTipo, 6))
@@ -2450,7 +2459,7 @@ router.post('/', async (req, res) => {
                         .input('co_prov', sql.Char(16), padProfit(data.co_prov, 16))
                         .input('co_mone', sql.Char(6), padProfit(paymentMone, 6))
                         .input('tasa', sql.Decimal(21, 8), Number(data.tasa || 1))
-                        .input('co_cta_ingr_egr', sql.Char(20), padProfit(defCtaIE, 20))
+                        .input('co_cta_ingr_egr', sql.Char(20), padProfit(ctaAjpa, 20))
                         .input('observa', sql.VarChar(120), ajObserva)
                         .input('fec_doc', sql.SmallDateTime, tsDate)
                         .input('doc_orig', sql.Char(6), padProfit('PAGO', 6))

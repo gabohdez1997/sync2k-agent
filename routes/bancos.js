@@ -247,13 +247,15 @@ async function insertMovementSP(runner, params) {
 }
 
 async function insertPista(runner, { user, fecha, sucu, tabla, rowguid, tipoOp, campos }) {
+    const rawTipo = String(tipoOp || '').trim().toUpperCase();
+    const safeTipoOp = ['I', 'M', 'E'].includes(rawTipo) ? rawTipo : 'M';
     const pista = new sql.Request(runner);
     pista.input('sUsuario_Id', sql.Char(6), padProfit(user, 6));
     pista.input('dtFecha', sql.DateTime, fecha);
     pista.input('sCo_Sucu', sql.Char(6), padProfit(sucu, 6));
     pista.input('sTablaOri', sql.VarChar(30), tabla);
     pista.input('rowguidOri', sql.UniqueIdentifier, rowguid);
-    pista.input('sTipo_Op', sql.Char(1), tipoOp);
+    pista.input('sTipo_Op', sql.Char(1), safeTipoOp);
     pista.input('sMaquina', sql.VarChar(60), 'SYNC2K');
     pista.input('sCampos', sql.VarChar(sql.MAX), campos || null);
     await pista.execute('pInsertarPista');
@@ -847,6 +849,18 @@ router.put('/movimientos/:mov_num', async (req, res) => {
             throw new Error(`Este movimiento pertenece a la Transferencia entre Cuentas #${trRes.recordset[0].co_trans_ban}. Edítela desde el modo Transferencia.`);
         }
 
+        const docLinkRes = await new sql.Request(transaction)
+            .input('Mov', sql.Char(20), padProfit(movNumOri, 20))
+            .query(`
+                SELECT TOP 1 RTRIM(co_tipo_doc) AS co_tipo_doc, RTRIM(nro_doc) AS nro_doc
+                FROM saDocumentoCompra
+                WHERE LTRIM(RTRIM(mov_ban)) = LTRIM(RTRIM(@Mov))
+            `);
+        if (docLinkRes.recordset.length > 0) {
+            const doc = docLinkRes.recordset[0];
+            throw new Error(`Este movimiento bancario está vinculado al Documento de Compra ${doc.co_tipo_doc} ${doc.nro_doc}. Adminístrelo desde Documentos de Compra.`);
+        }
+
         const ctaReq = new sql.Request(transaction);
         ctaReq.input('CodCta', sql.Char(6), padProfit(newCodCta, 6));
         const ctaRes = await ctaReq.query(`SELECT RTRIM(cod_cta) AS cod_cta, RTRIM(co_mone) AS co_mone, inactivo FROM saCuentaBancaria WHERE cod_cta = @CodCta`);
@@ -876,6 +890,7 @@ router.put('/movimientos/:mov_num', async (req, res) => {
         updReq.input('CoSucuMo', sql.Char(6), padProfit(sucuCode, 6));
 
         const updRes = await updReq.query(`
+            DECLARE @Out TABLE (rowguid UNIQUEIDENTIFIER, fe_us_mo DATETIME);
             UPDATE saMovimientoBanco
             SET
                 descrip = @Descrip,
@@ -892,8 +907,9 @@ router.put('/movimientos/:mov_num', async (req, res) => {
                 co_us_mo = @CoUsMo,
                 co_sucu_mo = @CoSucuMo,
                 fe_us_mo = GETDATE()
-            OUTPUT inserted.rowguid, inserted.fe_us_mo
-            WHERE mov_num = @MovOri
+            OUTPUT inserted.rowguid, inserted.fe_us_mo INTO @Out
+            WHERE mov_num = @MovOri;
+            SELECT rowguid, fe_us_mo FROM @Out;
         `);
 
         if (updRes.recordset.length > 0) {
@@ -945,6 +961,19 @@ async function handleAnularMovimiento(req, res) {
         if (cur.origen !== 'BAN') throw new Error(`Solo pueden anularse movimientos de origen BAN desde este módulo (origen: ${cur.origen}).`);
         if (cur.anulado) throw new Error(`El movimiento ${movNum} ya se encuentra anulado.`);
         if (cur.conciliado) throw new Error(`No puede anular un movimiento conciliado (${movNum}).`);
+
+        const docLinkRes = await new sql.Request(transaction)
+            .input('Mov', sql.Char(20), padProfit(movNum, 20))
+            .query(`
+                SELECT TOP 1 RTRIM(co_tipo_doc) AS co_tipo_doc, RTRIM(nro_doc) AS nro_doc
+                FROM saDocumentoCompra
+                WHERE LTRIM(RTRIM(mov_ban)) = LTRIM(RTRIM(@Mov))
+                  AND anulado = 0
+            `);
+        if (docLinkRes.recordset.length > 0) {
+            const doc = docLinkRes.recordset[0];
+            throw new Error(`Este movimiento bancario está vinculado al Documento de Compra activo ${doc.co_tipo_doc} ${doc.nro_doc}. Anúlelo desde Documentos de Compra para anular ambos de forma consistente.`);
+        }
 
         const trReq = new sql.Request(transaction);
         trReq.input('Mov', sql.Char(20), padProfit(movNum, 20));
@@ -1001,10 +1030,12 @@ async function handleAnularMovimiento(req, res) {
             vReq.input('User', sql.Char(6), padProfit(profitUser, 6));
             vReq.input('Sucu', sql.Char(6), padProfit(sucuCode, 6));
             const vRes = await vReq.query(`
+                DECLARE @Out TABLE (rowguid UNIQUEIDENTIFIER, fe_us_mo DATETIME);
                 UPDATE saMovimientoBanco
                 SET anulado = 1, co_us_mo = @User, co_sucu_mo = @Sucu, fe_us_mo = GETDATE()
-                OUTPUT inserted.rowguid, inserted.fe_us_mo
-                WHERE mov_num = @Mov AND anulado = 0
+                OUTPUT inserted.rowguid, inserted.fe_us_mo INTO @Out
+                WHERE mov_num = @Mov AND anulado = 0;
+                SELECT rowguid, fe_us_mo FROM @Out;
             `);
             if (vRes.recordset.length > 0) {
                 await insertPista(transaction, {
@@ -1013,7 +1044,7 @@ async function handleAnularMovimiento(req, res) {
                     sucu: sucuCode,
                     tabla: 'saMovimientoBanco',
                     rowguid: vRes.recordset[0].rowguid,
-                    tipoOp: 'A',
+                    tipoOp: 'M',
                     campos: `ANULACION ${m}`
                 });
             }
@@ -1058,6 +1089,18 @@ async function handleEliminarMovimiento(req, res) {
         const cur = curRes.recordset[0];
         if (cur.origen !== 'BAN') throw new Error(`Solo pueden eliminarse movimientos de origen BAN desde este módulo (origen: ${cur.origen}).`);
         if (cur.conciliado) throw new Error(`No puede eliminar un movimiento conciliado (${movNum}).`);
+
+        const docLinkDelRes = await new sql.Request(transaction)
+            .input('Mov', sql.Char(20), padProfit(movNum, 20))
+            .query(`
+                SELECT TOP 1 RTRIM(co_tipo_doc) AS co_tipo_doc, RTRIM(nro_doc) AS nro_doc
+                FROM saDocumentoCompra
+                WHERE LTRIM(RTRIM(mov_ban)) = LTRIM(RTRIM(@Mov))
+            `);
+        if (docLinkDelRes.recordset.length > 0) {
+            const doc = docLinkDelRes.recordset[0];
+            throw new Error(`Este movimiento bancario está vinculado al Documento de Compra ${doc.co_tipo_doc} ${doc.nro_doc}. Elimínelo desde Documentos de Compra para respetar la integridad en Profit Plus.`);
+        }
 
         const trReq = new sql.Request(transaction);
         trReq.input('Mov', sql.Char(20), padProfit(movNum, 20));
@@ -1959,6 +2002,7 @@ router.post('/conciliacion/guardar', async (req, res) => {
             upd.input('Sucu', sql.Char(6), padProfit(sucuCode, 6));
 
             const updRes = await upd.query(`
+                DECLARE @Out TABLE (rowguid UNIQUEIDENTIFIER, fe_us_mo DATETIME);
                 UPDATE saMovimientoBanco
                 SET
                     conciliado = @Conc,
@@ -1966,8 +2010,9 @@ router.post('/conciliacion/guardar', async (req, res) => {
                     co_us_mo = @User,
                     co_sucu_mo = @Sucu,
                     fe_us_mo = GETDATE()
-                OUTPUT inserted.rowguid, inserted.fe_us_mo
-                WHERE mov_num = @Mov AND cod_cta = @CodCta AND anulado = 0
+                OUTPUT inserted.rowguid, inserted.fe_us_mo INTO @Out
+                WHERE mov_num = @Mov AND cod_cta = @CodCta AND anulado = 0;
+                SELECT rowguid, fe_us_mo FROM @Out;
             `);
 
             if (updRes.recordset.length > 0) {
@@ -2439,19 +2484,21 @@ router.post('/cuentas-ingr-egr', async (req, res) => {
         ins.input('Sucu', sql.Char(6), padProfit(sucuCode, 6));
 
         const insRes = await ins.query(`
+            DECLARE @Out TABLE (rowguid UNIQUEIDENTIFIER, fe_us_in DATETIME);
             INSERT INTO saCuentaIngEgr (
                 co_cta_ingr_egr, descrip, co_islr, numcom, feccom, dis_cen,
                 campo1, campo2, campo3, campo4, campo5, campo6, campo7, campo8,
                 co_us_in, co_sucu_in, fe_us_in, co_us_mo, co_sucu_mo, fe_us_mo,
                 revisado, trasnfe, rowguid
             )
-            OUTPUT inserted.rowguid, inserted.fe_us_in
+            OUTPUT inserted.rowguid, inserted.fe_us_in INTO @Out
             VALUES (
                 @Codigo, @Descrip, @CoIslr, NULL, NULL, NULL,
                 @Campo1, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                 @User, @Sucu, GETDATE(), @User, @Sucu, GETDATE(),
                 NULL, NULL, NEWID()
-            )
+            );
+            SELECT rowguid, fe_us_in FROM @Out;
         `);
 
         await insertPista(transaction, {
@@ -2510,6 +2557,7 @@ router.put('/cuentas-ingr-egr/:codigo', async (req, res) => {
         upd.input('Sucu', sql.Char(6), padProfit(sucuCode, 6));
 
         const updRes = await upd.query(`
+            DECLARE @Out TABLE (rowguid UNIQUEIDENTIFIER, fe_us_mo DATETIME);
             UPDATE saCuentaIngEgr
             SET
                 descrip = @Descrip,
@@ -2518,8 +2566,9 @@ router.put('/cuentas-ingr-egr/:codigo', async (req, res) => {
                 co_us_mo = @User,
                 co_sucu_mo = @Sucu,
                 fe_us_mo = GETDATE()
-            OUTPUT inserted.rowguid, inserted.fe_us_mo
-            WHERE co_cta_ingr_egr = @Codigo
+            OUTPUT inserted.rowguid, inserted.fe_us_mo INTO @Out
+            WHERE co_cta_ingr_egr = @Codigo;
+            SELECT rowguid, fe_us_mo FROM @Out;
         `);
 
         await insertPista(transaction, {
