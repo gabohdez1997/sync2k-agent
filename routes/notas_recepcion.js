@@ -15,6 +15,8 @@ function safeDate(val) {
     return String(val).split('T')[0];
 }
 
+const resolveSede = (req) => String(req.query.sede || req.headers['x-branch-id'] || '').trim() || null;
+
 // =========================================================================
 // 1. LISTAR NOTAS DE RECEPCIÓN (HISTORIAL)
 // =========================================================================
@@ -170,9 +172,13 @@ router.get('/', async (req, res) => {
 // =========================================================================
 router.get('/ordenes-pendientes', async (req, res) => {
     try {
-        const { sede, search, co_prov, co_us_in, exact } = req.query;
+        const { search, co_prov, co_us_in, exact } = req.query;
+        const sede = resolveSede(req);
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
+        if (sede && targets.length === 0) {
+            return res.status(404).json({ success: false, message: `Sede "${sede}" no encontrada.`, data: [] });
+        }
 
         const allOrders = await Promise.all(targets.map(async (srv) => {
             try {
@@ -261,10 +267,13 @@ router.get('/ordenes-pendientes', async (req, res) => {
 router.get('/ordenes-pendientes/:doc_num', async (req, res) => {
     try {
         const { doc_num } = req.params;
-        const { sede } = req.query;
+        const sede = resolveSede(req);
 
         const servers = getServers();
         const targets = sede ? servers.filter(s => s.id === sede) : servers;
+        if (sede && targets.length === 0) {
+            return res.status(404).json({ success: false, message: `Sede "${sede}" no encontrada.` });
+        }
 
         for (const srv of targets) {
             try {
@@ -351,7 +360,12 @@ router.get('/ordenes-pendientes/:doc_num', async (req, res) => {
             }
         }
 
-        return res.status(404).json({ success: false, message: `Orden de compra ${doc_num} no encontrada.` });
+        return res.status(404).json({
+            success: false,
+            message: sede
+                ? `La orden de compra ${doc_num} no existe en la sede seleccionada (puede pertenecer a otra sede).`
+                : `Orden de compra ${doc_num} no encontrada.`
+        });
     } catch (error) {
         console.error("❌ [AGENT] Error en GET /ordenes-pendientes/:doc_num:", error);
         res.status(500).json({ success: false, message: 'Error interno del servidor.', error: error.message });
@@ -498,7 +512,7 @@ router.get('/:doc_num', async (req, res) => {
 // 5. CREAR / PROCESAR NOTA DE RECEPCIÓN
 // =========================================================================
 router.post('/', async (req, res) => {
-    const { sede } = req.query;
+    const sede = resolveSede(req);
     const data = req.body;
     const auditUser = (req.profitUser || data.co_us_in || 'SYNC2K').substring(0, 6).toUpperCase();
 
@@ -691,6 +705,65 @@ router.post('/', async (req, res) => {
 
                 if (validRenglones.length === 0) {
                     throw new Error("No hay renglones válidos con cantidad mayor a 0 para procesar.");
+                }
+
+                // 4b. Validar estrictamente que las órdenes de compra pertenezcan a esta sede
+                const currentSrvId = String(srv.id || '').trim().toLowerCase();
+                const currentSrvLabel = srv.name || srv.id;
+                if (data.sede_id && String(data.sede_id).trim().toLowerCase() !== currentSrvId) {
+                    throw new Error(`La recepción indica sede distinta a ${currentSrvLabel}.`);
+                }
+
+                const ocsToVerify = new Set();
+                if (Array.isArray(data.doc_num_oc)) {
+                    for (const oc of data.doc_num_oc) {
+                        const clean = String(oc || '').trim();
+                        if (clean) ocsToVerify.add(clean);
+                    }
+                } else if (data.doc_num_oc) {
+                    const clean = String(data.doc_num_oc).trim();
+                    if (clean) ocsToVerify.add(clean);
+                }
+
+                for (const item of validRenglones) {
+                    if (item.sede_id && String(item.sede_id).trim().toLowerCase() !== currentSrvId) {
+                        throw new Error(`El artículo ${String(item.co_art || '').trim()} proviene de una orden de compra de otra sede y no puede recepcionarse en ${currentSrvLabel}.`);
+                    }
+                    const itemOc = String(item.num_doc || item.doc_num || '').trim();
+                    if (itemOc) ocsToVerify.add(itemOc);
+                }
+
+                for (const ocNum of ocsToVerify) {
+                    const ocCheck = await transaction.request()
+                        .input('oc_doc', sql.Char(20), padProfit(ocNum, 20))
+                        .query(`
+                            SELECT TOP 1 RTRIM(doc_num) AS doc_num, anulado
+                            FROM saOrdenCompra
+                            WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@oc_doc))
+                        `);
+                    if (!ocCheck.recordset || ocCheck.recordset.length === 0) {
+                        throw new Error(`La orden de compra "${ocNum}" no existe en la sede ${currentSrvLabel} (pertenece a otra sede). No se permite recepcionar órdenes de compra de otra sede.`);
+                    }
+                    if (ocCheck.recordset[0].anulado) {
+                        throw new Error(`La orden de compra "${ocNum}" está anulada en la sede ${currentSrvLabel}.`);
+                    }
+                }
+
+                for (const item of validRenglones) {
+                    const originDocNum = String(item.num_doc || item.doc_num || (Array.isArray(data.doc_num_oc) ? data.doc_num_oc[0] : data.doc_num_oc) || '').trim();
+                    if (originDocNum && item.rowguid_doc) {
+                        const rengCheck = await transaction.request()
+                            .input('oc_doc', sql.Char(20), padProfit(originDocNum, 20))
+                            .input('rowguid_oc', sql.UniqueIdentifier, item.rowguid_doc)
+                            .query(`
+                                SELECT TOP 1 1 AS ok
+                                FROM saOrdenCompraReng
+                                WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@oc_doc)) AND rowguid = @rowguid_oc
+                            `);
+                        if (!rengCheck.recordset || rengCheck.recordset.length === 0) {
+                            throw new Error(`El renglón del artículo "${String(item.co_art || '').trim()}" (OC ${originDocNum}) no pertenece a una orden de compra de la sede ${currentSrvLabel}.`);
+                        }
+                    }
                 }
 
                 const totalNetoBs = Math.round((totalBrutoBs + totalImpBs) * 100) / 100;
