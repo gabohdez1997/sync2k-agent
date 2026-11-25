@@ -287,6 +287,98 @@ router.get('/:doc_num', async (req, res) => {
     }
 });
 
+async function revertirInventarioYFacturasDevolucion(transaction, renglones, auditUser) {
+    // Revertir inventario (Restar de 'ACT' porque se había sumado al devolver)
+    // Y revertir total_dev, pendiente y estatus en la factura original (saFacturaVentaReng / saFacturaVenta)
+    const facturasAfectadas = new Set();
+    for (const line of renglones) {
+        const rStock = new sql.Request(transaction);
+        rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
+        rStock.input('sCo_Art',               sql.Char(30), line.co_art);
+        rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
+        rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
+        rStock.input('sTipoStock',            sql.Char(4),  'ACT');
+        rStock.input('bSumarStock',           sql.Bit,      0); // Restar stock
+        rStock.input('bPermiteStockNegativo', sql.Bit,      1);
+        await rStock.execute('pStockActualizar');
+
+        // Revertir total_dev y restaurar pendiente en saFacturaVentaReng
+        if (line.rowguid_doc) {
+            const origRengRes = await transaction.request()
+                .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
+                .query(`SELECT doc_num, co_art, co_alma, co_uni, total_art, pendiente, total_dev FROM saFacturaVentaReng WHERE rowguid = @rowguid_doc`);
+
+            const origReng = origRengRes.recordset?.[0];
+            if (origReng) {
+                facturasAfectadas.add(origReng.doc_num.trim());
+
+                const despRes = await transaction.request()
+                    .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
+                    .query(`
+                        SELECT ISNULL(SUM(dr.total_art), 0) AS cant_desp
+                        FROM saNotaDespachoVentaReng dr
+                        INNER JOIN saNotaDespachoVenta d ON d.doc_num = dr.doc_num
+                        WHERE dr.rowguid_doc = @rowguid_doc AND d.anulado = 0
+                    `);
+                const cantDesp = Number(despRes.recordset?.[0]?.cant_desp || 0);
+                const totalArt = Number(origReng.total_art || 0);
+                const maxPendientePosible = Math.max(0, totalArt - cantDesp);
+                const pendienteActual = Number(origReng.pendiente || 0);
+                const cantARestaurarPend = Math.min(Number(line.total_art || 0), Math.max(0, maxPendientePosible - pendienteActual));
+
+                if (cantARestaurarPend > 0) {
+                    // Restaurar DES en saStockAlmacen
+                    const rStockDes = new sql.Request(transaction);
+                    rStockDes.input('sCo_Alma',              sql.Char(6),  padProfit(origReng.co_alma || line.co_alma, 6));
+                    rStockDes.input('sCo_Art',               sql.Char(30), padProfit(origReng.co_art || line.co_art, 30));
+                    rStockDes.input('sCo_Uni',               sql.Char(6),  padProfit(origReng.co_uni || line.co_uni, 6));
+                    rStockDes.input('deCantidad',            sql.Decimal(18, 5), cantARestaurarPend);
+                    rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
+                    rStockDes.input('bSumarStock',           sql.Bit,      1); // Sumar stock DES
+                    rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
+                    await rStockDes.execute('pStockActualizar');
+                }
+
+                await transaction.request()
+                    .input('qty', sql.Decimal(18, 5), line.total_art)
+                    .input('cant_restaurar_pend', sql.Decimal(18, 5), cantARestaurarPend)
+                    .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
+                    .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+                    .query(`
+                        UPDATE saFacturaVentaReng
+                        SET total_dev = CASE WHEN total_dev >= @qty THEN total_dev - @qty ELSE 0 END,
+                            pendiente = pendiente + @cant_restaurar_pend,
+                            fe_us_mo = GETDATE(),
+                            co_us_mo = @auditUser
+                        WHERE rowguid = @rowguid_doc;
+                    `);
+            }
+        }
+    }
+
+    // Recalcular estatus de las facturas de venta afectadas
+    for (const docNumFact of facturasAfectadas) {
+        await transaction.request()
+            .input('doc_num', sql.Char(20), padProfit(docNumFact, 20))
+            .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
+            .query(`
+                DECLARE @total_art DECIMAL(18,5), @pendiente DECIMAL(18,5);
+                SELECT @total_art = ISNULL(SUM(total_art), 0), @pendiente = ISNULL(SUM(pendiente), 0)
+                FROM saFacturaVentaReng WHERE doc_num = @doc_num;
+
+                UPDATE saFacturaVenta 
+                SET status = CASE 
+                    WHEN @pendiente <= 0 THEN '2'
+                    WHEN @pendiente < @total_art THEN '1'
+                    ELSE '0'
+                END,
+                fe_us_mo = GETDATE(),
+                co_us_mo = @auditUser
+                WHERE doc_num = @doc_num;
+            `);
+    }
+}
+
 // --- ANULAR DEVOLUCION ---
 router.post('/:doc_num/anular', async (req, res) => {
     try {
@@ -347,95 +439,8 @@ router.post('/:doc_num/anular', async (req, res) => {
                         `);
                 }
 
-                // 3. Revertir inventario (Restar de 'ACT' porque se había sumado al devolver)
-                // Y revertir total_dev, pendiente y estatus en la factura original (saFacturaVentaReng / saFacturaVenta)
-                const facturasAfectadas = new Set();
-                for (const line of resL.recordset) {
-                    const rStock = new sql.Request(transaction);
-                    rStock.input('sCo_Alma',              sql.Char(6),  line.co_alma);
-                    rStock.input('sCo_Art',               sql.Char(30), line.co_art);
-                    rStock.input('sCo_Uni',               sql.Char(6),  line.co_uni);
-                    rStock.input('deCantidad',            sql.Decimal(18, 5), line.total_art);
-                    rStock.input('sTipoStock',            sql.Char(4),  'ACT');
-                    rStock.input('bSumarStock',           sql.Bit,      0); // Restar stock
-                    rStock.input('bPermiteStockNegativo', sql.Bit,      1);
-                    await rStock.execute('pStockActualizar');
-
-                    // Revertir total_dev y restaurar pendiente en saFacturaVentaReng
-                    if (line.rowguid_doc) {
-                        const origRengRes = await transaction.request()
-                            .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
-                            .query(`SELECT doc_num, co_art, co_alma, co_uni, total_art, pendiente, total_dev FROM saFacturaVentaReng WHERE rowguid = @rowguid_doc`);
-
-                        const origReng = origRengRes.recordset?.[0];
-                        if (origReng) {
-                            facturasAfectadas.add(origReng.doc_num.trim());
-
-                            const despRes = await transaction.request()
-                                .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
-                                .query(`
-                                    SELECT ISNULL(SUM(dr.total_art), 0) AS cant_desp
-                                    FROM saNotaDespachoVentaReng dr
-                                    INNER JOIN saNotaDespachoVenta d ON d.doc_num = dr.doc_num
-                                    WHERE dr.rowguid_doc = @rowguid_doc AND d.anulado = 0
-                                `);
-                            const cantDesp = Number(despRes.recordset?.[0]?.cant_desp || 0);
-                            const totalArt = Number(origReng.total_art || 0);
-                            const maxPendientePosible = Math.max(0, totalArt - cantDesp);
-                            const pendienteActual = Number(origReng.pendiente || 0);
-                            const cantARestaurarPend = Math.min(Number(line.total_art || 0), Math.max(0, maxPendientePosible - pendienteActual));
-
-                            if (cantARestaurarPend > 0) {
-                                // Restaurar DES en saStockAlmacen
-                                const rStockDes = new sql.Request(transaction);
-                                rStockDes.input('sCo_Alma',              sql.Char(6),  padProfit(origReng.co_alma || line.co_alma, 6));
-                                rStockDes.input('sCo_Art',               sql.Char(30), padProfit(origReng.co_art || line.co_art, 30));
-                                rStockDes.input('sCo_Uni',               sql.Char(6),  padProfit(origReng.co_uni || line.co_uni, 6));
-                                rStockDes.input('deCantidad',            sql.Decimal(18, 5), cantARestaurarPend);
-                                rStockDes.input('sTipoStock',            sql.Char(4),  'DES');
-                                rStockDes.input('bSumarStock',           sql.Bit,      1); // Sumar stock DES
-                                rStockDes.input('bPermiteStockNegativo', sql.Bit,      1);
-                                await rStockDes.execute('pStockActualizar');
-                            }
-
-                            await transaction.request()
-                                .input('qty', sql.Decimal(18, 5), line.total_art)
-                                .input('cant_restaurar_pend', sql.Decimal(18, 5), cantARestaurarPend)
-                                .input('rowguid_doc', sql.UniqueIdentifier, line.rowguid_doc)
-                                .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                                .query(`
-                                    UPDATE saFacturaVentaReng
-                                    SET total_dev = CASE WHEN total_dev >= @qty THEN total_dev - @qty ELSE 0 END,
-                                        pendiente = pendiente + @cant_restaurar_pend,
-                                        fe_us_mo = GETDATE(),
-                                        co_us_mo = @auditUser
-                                    WHERE rowguid = @rowguid_doc;
-                                `);
-                        }
-                    }
-                }
-
-                // Recalcular estatus de las facturas de venta afectadas
-                for (const docNumFact of facturasAfectadas) {
-                    await transaction.request()
-                        .input('doc_num', sql.Char(20), padProfit(docNumFact, 20))
-                        .input('auditUser', sql.Char(6), padProfit(auditUser, 6))
-                        .query(`
-                            DECLARE @total_art DECIMAL(18,5), @pendiente DECIMAL(18,5);
-                            SELECT @total_art = ISNULL(SUM(total_art), 0), @pendiente = ISNULL(SUM(pendiente), 0)
-                            FROM saFacturaVentaReng WHERE doc_num = @doc_num;
-
-                            UPDATE saFacturaVenta 
-                            SET status = CASE 
-                                WHEN @pendiente <= 0 THEN '2'
-                                WHEN @pendiente < @total_art THEN '1'
-                                ELSE '0'
-                            END,
-                            fe_us_mo = GETDATE(),
-                            co_us_mo = @auditUser
-                            WHERE doc_num = @doc_num;
-                        `);
-                }
+                // 3. Revertir inventario y estatus de facturas asociadas
+                await revertirInventarioYFacturasDevolucion(transaction, resL.recordset, auditUser);
 
                 await transaction.commit();
                 return { success: true, message: `Devolución ${doc_num} anulada con éxito.` };
@@ -1009,5 +1014,237 @@ router.post('/', async (req, res) => {
         res.status(500).json({ success: false, message: 'Error al registrar Devolución.', error: error.message });
     }
 });
+
+// --- ELIMINAR DEVOLUCION PERMANENTEMENTE (SIN RESTRICCIONES FK) ---
+async function eliminarDevolucionClienteTx(pool, docNumRaw, auditUser = 'API') {
+    const cleanDocNum = String(docNumRaw || '').trim();
+    if (!cleanDocNum) {
+        throw new Error('Número de devolución requerido.');
+    }
+
+    const resH = await pool.request()
+        .input('doc_num', sql.VarChar(20), cleanDocNum)
+        .query(`
+            SELECT doc_num, rowguid, anulado,
+                   RTRIM(ISNULL(co_tipo_doc, '')) AS co_tipo_doc,
+                   RTRIM(ISNULL(nro_doc, '')) AS nro_doc
+            FROM saDevolucionCliente
+            WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+        `);
+    if (!resH.recordset.length) {
+        throw new Error(`La devolución ${cleanDocNum} no existe.`);
+    }
+
+    const hdr = resH.recordset[0];
+    const docNumTrim = String(hdr.doc_num || cleanDocNum).trim();
+    const resL = await pool.request()
+        .input('doc_num', sql.VarChar(20), docNumTrim)
+        .query(`
+            SELECT reng_num, co_art, co_alma, co_uni, total_art, rowguid,
+                   RTRIM(ISNULL(tipo_doc, '')) AS tipo_doc,
+                   RTRIM(ISNULL(num_doc, '')) AS num_doc,
+                   rowguid_doc
+            FROM saDevolucionClienteReng
+            WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num))
+        `);
+
+    const transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    try {
+        // 3.1 Si aún no estaba anulada, revertir inventario y cantidades/estatus en facturas origen
+        if (!hdr.anulado && resL.recordset.length > 0) {
+            await revertirInventarioYFacturasDevolucion(transaction, resL.recordset, auditUser);
+        }
+
+        // 3.2 Identificar todos los documentos asociados en saDocumentoVenta ANTES de borrar cabecera
+        const assocReq = new sql.Request(transaction);
+        assocReq.input('doc_num', sql.VarChar(20), docNumTrim);
+        assocReq.input('hdr_tipo_doc', sql.VarChar(6), hdr.co_tipo_doc || '');
+        assocReq.input('hdr_nro_doc', sql.VarChar(20), hdr.nro_doc || '');
+        const assocRes = await assocReq.query(`
+            SELECT LTRIM(RTRIM(co_tipo_doc)) AS co_tipo_doc,
+                   LTRIM(RTRIM(nro_doc)) AS nro_doc,
+                   rowguid
+            FROM saDocumentoVenta
+            WHERE (LTRIM(RTRIM(ISNULL(doc_orig, ''))) = 'DEVO' AND LTRIM(RTRIM(ISNULL(nro_orig, ''))) = LTRIM(RTRIM(@doc_num)))
+               OR (NULLIF(LTRIM(RTRIM(@hdr_tipo_doc)), '') IS NOT NULL
+                   AND NULLIF(LTRIM(RTRIM(@hdr_nro_doc)), '') IS NOT NULL
+                   AND LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@hdr_tipo_doc))
+                   AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@hdr_nro_doc)))
+        `);
+        const associatedDocs = assocRes.recordset || [];
+
+        // 3.3 Limpiar tablas hijas de saDevolucionClienteReng y saDevolucionCliente
+        const delDevReq = new sql.Request(transaction);
+        delDevReq.input('doc_num', sql.VarChar(20), docNumTrim);
+        delDevReq.input('devRowguid', sql.UniqueIdentifier, hdr.rowguid || null);
+        await delDevReq.query(`
+            DECLARE @DevRengGuids TABLE (rowguid UNIQUEIDENTIFIER);
+            INSERT INTO @DevRengGuids (rowguid)
+            SELECT rowguid FROM saDevolucionClienteReng
+            WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num));
+
+            IF EXISTS (SELECT 1 FROM @DevRengGuids)
+            BEGIN
+                IF OBJECT_ID('dbo.saLoteSalida', 'U') IS NOT NULL AND OBJECT_ID('dbo.saLoteEntrada', 'U') IS NOT NULL
+                BEGIN
+                    DELETE FROM saLoteSalida
+                    WHERE Rowguid_Lote IN (
+                        SELECT rowguid FROM saLoteEntrada
+                        WHERE rowguid_reng IN (SELECT rowguid FROM @DevRengGuids)
+                    );
+                END
+                IF OBJECT_ID('dbo.saLoteEntrada', 'U') IS NOT NULL
+                BEGIN
+                    DELETE FROM saLoteEntrada
+                    WHERE rowguid_reng IN (SELECT rowguid FROM @DevRengGuids);
+                END
+                IF OBJECT_ID('dbo.saCostoHistoricoSalida', 'U') IS NOT NULL
+                BEGIN
+                    DELETE FROM saCostoHistoricoSalida
+                    WHERE cod_costo_historico_entrada IN (SELECT rowguid FROM @DevRengGuids);
+                END
+                IF OBJECT_ID('dbo.saCostoHistoricoEntrada', 'U') IS NOT NULL
+                BEGIN
+                    DELETE FROM saCostoHistoricoEntrada
+                    WHERE cod_costo_historico_entrada IN (SELECT rowguid FROM @DevRengGuids);
+                END
+            END
+
+            IF OBJECT_ID('dbo.pvDevolucionClienteExt', 'U') IS NOT NULL AND @devRowguid IS NOT NULL
+            BEGIN
+                DELETE FROM pvDevolucionClienteExt WHERE rowguid_doc_num = @devRowguid;
+            END
+
+            DELETE FROM saDevolucionClienteReng WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num));
+            DELETE FROM saDevolucionCliente WHERE LTRIM(RTRIM(doc_num)) = LTRIM(RTRIM(@doc_num));
+        `);
+
+        // 3.4 Eliminar cada documento asociado en saDocumentoVenta (ej. N/CR) y sus tablas hijas FK
+        for (const doc of associatedDocs) {
+            const delDocReq = new sql.Request(transaction);
+            delDocReq.input('co_tipo_doc', sql.VarChar(6), doc.co_tipo_doc);
+            delDocReq.input('nro_doc', sql.VarChar(20), doc.nro_doc);
+            delDocReq.input('docRowguid', sql.UniqueIdentifier, doc.rowguid || null);
+            await delDocReq.query(`
+                DECLARE @CobRengGuids TABLE (rowguid UNIQUEIDENTIFIER);
+                IF OBJECT_ID('dbo.saCobroDocReng', 'U') IS NOT NULL
+                BEGIN
+                    INSERT INTO @CobRengGuids (rowguid)
+                    SELECT rowguid FROM saCobroDocReng
+                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+
+                    IF EXISTS (SELECT 1 FROM @CobRengGuids)
+                    BEGIN
+                        IF OBJECT_ID('dbo.saCobroRetenIvaReng', 'U') IS NOT NULL
+                            DELETE FROM saCobroRetenIvaReng WHERE rowguid_reng_cob IN (SELECT rowguid FROM @CobRengGuids);
+
+                        IF OBJECT_ID('dbo.saCobroRentenReng', 'U') IS NOT NULL
+                            DELETE FROM saCobroRentenReng WHERE rowguid_reng_cob IN (SELECT rowguid FROM @CobRengGuids);
+
+                        UPDATE saCobroDocReng
+                        SET rowguid_reng_ori = NULL
+                        WHERE rowguid_reng_ori IN (SELECT rowguid FROM @CobRengGuids);
+
+                        DELETE FROM saCobroDocReng
+                        WHERE rowguid IN (SELECT rowguid FROM @CobRengGuids);
+                    END
+                END
+
+                IF OBJECT_ID('dbo.pvMovimientoCajaDevolucionExt', 'U') IS NOT NULL AND @docRowguid IS NOT NULL
+                    DELETE FROM pvMovimientoCajaDevolucionExt WHERE rowguid_nro_doc = @docRowguid;
+
+                IF OBJECT_ID('dbo.saDocumentoVentaInfoIGTF', 'U') IS NOT NULL AND @docRowguid IS NOT NULL
+                    DELETE FROM saDocumentoVentaInfoIGTF WHERE rowguid = @docRowguid;
+
+                IF OBJECT_ID('dbo.saDocumentoVentaReng', 'U') IS NOT NULL
+                    DELETE FROM saDocumentoVentaReng
+                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+
+                IF OBJECT_ID('dbo.saChequeDevueltoVenta', 'U') IS NOT NULL
+                    DELETE FROM saChequeDevueltoVenta
+                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+
+                IF OBJECT_ID('dbo.saGiroVentaReng', 'U') IS NOT NULL
+                    DELETE FROM saGiroVentaReng
+                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+
+                IF OBJECT_ID('dbo.saNCFInfoDocVenta', 'U') IS NOT NULL
+                    DELETE FROM saNCFInfoDocVenta
+                    WHERE LTRIM(RTRIM(tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM saDevolucionCliente
+                    WHERE LTRIM(RTRIM(ISNULL(co_tipo_doc, ''))) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(ISNULL(nro_doc, ''))) = LTRIM(RTRIM(@nro_doc))
+                )
+                BEGIN
+                    DELETE FROM saDocumentoVenta
+                    WHERE LTRIM(RTRIM(co_tipo_doc)) = LTRIM(RTRIM(@co_tipo_doc))
+                      AND LTRIM(RTRIM(nro_doc)) = LTRIM(RTRIM(@nro_doc));
+                END
+            `);
+        }
+
+        await transaction.commit();
+        return {
+            success: true,
+            doc_num: docNumTrim,
+            deleted_docs: associatedDocs.map(d => ({ co_tipo_doc: d.co_tipo_doc, nro_doc: d.nro_doc })),
+            message: `Devolución ${docNumTrim} eliminada permanentemente con éxito.`
+        };
+    } catch (errTx) {
+        try { await transaction.rollback(); } catch {}
+        throw errTx;
+    }
+}
+
+async function eliminarDevolucionHandler(req, res) {
+    try {
+        const doc_num = decodeURIComponent(req.params.doc_num || '').trim();
+        const { sede } = req.query;
+
+        const outcome = await executeWrite(sede || null, req.sqlAuth, async (pool) => {
+            const auditUser = (req.profitUser || req.sqlAuth?.user || 'API').substring(0, 10).toUpperCase();
+            return await eliminarDevolucionClienteTx(pool, doc_num, auditUser);
+        });
+
+        if (outcome.notFound) {
+            return res.status(404).json({ success: false, message: 'Sede no encontrada.' });
+        }
+
+        const successResult = outcome.results.find(r => r.success);
+        if (!successResult) {
+            const firstError = outcome.results[0]?.error || 'Error al eliminar devolución.';
+            return res.status(400).json({
+                success: false,
+                message: firstError,
+                results: outcome.results
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: successResult.message || `Devolución ${doc_num} eliminada permanentemente con éxito.`,
+            data: {
+                ...successResult,
+                results: outcome.results
+            }
+        });
+    } catch (error) {
+        console.error('[DEVOLUCION ELIMINAR ERROR]:', error);
+        return res.status(500).json({ success: false, message: 'Error al eliminar devolución.', error: error.message });
+    }
+}
+
+router.delete('/:doc_num', eliminarDevolucionHandler);
+router.post('/:doc_num/eliminar', eliminarDevolucionHandler);
+router.eliminarDevolucionClienteTx = eliminarDevolucionClienteTx;
 
 module.exports = router;
