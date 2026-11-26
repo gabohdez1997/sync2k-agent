@@ -956,6 +956,124 @@ router.get('/tipos_proveedor', (req, res) =>
     )
 );
 
+// ── Tipos de Precio (saTipoPrecio) ──────────────────────────────────────────
+router.get('/tipos-precio', async (req, res) => {
+    try {
+        const requestedSede = String(req.query.sede || req.headers['x-branch-id'] || '').trim().toLowerCase();
+        const query = `
+            SELECT LTRIM(RTRIM(co_precio)) AS co_precio,
+                   LTRIM(RTRIM(des_precio)) AS des_precio
+            FROM saTipoPrecio
+            ORDER BY TRY_CAST(LTRIM(RTRIM(co_precio)) AS INT), co_precio
+        `;
+
+        let data = [];
+        const servers = getServers();
+        const targetSrv = requestedSede
+            ? servers.find(s => String(s.id).toLowerCase() === requestedSede || String(s.name || '').toLowerCase() === requestedSede)
+            : null;
+
+        if (targetSrv) {
+            const pool = await getPool(targetSrv.id, req.sqlAuth);
+            const r = await pool.request().query(query);
+            data = r.recordset || [];
+        } else {
+            data = await aggregateUnique(req.sqlAuth, async (pool) => {
+                const r = await pool.request().query(query);
+                return r.recordset || [];
+            }, 'co_precio');
+        }
+
+        data.sort((a, b) => {
+            const ca = String(a.co_precio || '').trim();
+            const cb = String(b.co_precio || '').trim();
+            const na = /^\d+$/.test(ca) ? parseInt(ca, 10) : Number.MAX_SAFE_INTEGER;
+            const nb = /^\d+$/.test(cb) ? parseInt(cb, 10) : Number.MAX_SAFE_INTEGER;
+            if (na !== nb) return na - nb;
+            return ca.localeCompare(cb);
+        });
+
+        res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al consultar tipos de precio.', error: error.message });
+    }
+});
+
+// ── Tipos y Porcentajes de I.V.A. (saImpuestoSobreVentaReng) ────────────────
+router.get('/impuestos-iva', async (req, res) => {
+    const TAX_NAMES = {
+        '1': 'Tasa General',
+        '2': 'Tasa Reducida',
+        '3': 'Tasa Suntuaria',
+        '4': 'Exento',
+        '5': 'No Sujeto',
+        '6': 'Sin Derecho a Crédito',
+        '7': 'Exonerado',
+        '8': 'Percibido',
+        '9': 'Otros'
+    };
+
+    try {
+        const requestedSede = String(req.query.sede || req.headers['x-branch-id'] || '').trim().toLowerCase();
+        const query = `
+            SELECT LTRIM(RTRIM(tipo_imp)) AS tipo_imp,
+                   ISNULL(porc_tasa, 0) AS porc_tasa,
+                   ISNULL(porc_suntuario, 0) AS porc_suntuario,
+                   CAST(ISNULL(ventas, 0) AS BIT) AS ventas,
+                   CAST(ISNULL(compras, 0) AS BIT) AS compras,
+                   CONVERT(VARCHAR(10), fecha, 120) AS fecha
+            FROM saImpuestoSobreVentaReng
+            WHERE fecha = (SELECT MAX(fecha) FROM saImpuestoSobreVentaReng WHERE fecha <= GETDATE())
+            ORDER BY TRY_CAST(LTRIM(RTRIM(tipo_imp)) AS INT), tipo_imp
+        `;
+
+        const mapRow = (r) => {
+            const tipo = String(r.tipo_imp || '').trim();
+            const tasa = Number(r.porc_tasa || 0);
+            const suntuario = Number(r.porc_suntuario || 0);
+            const porcentaje = tasa + suntuario;
+            return {
+                tipo_imp: tipo,
+                nombre: TAX_NAMES[tipo] || `Tipo ${tipo}`,
+                porc_tasa: tasa,
+                porc_suntuario: suntuario,
+                porcentaje,
+                ventas: Boolean(r.ventas),
+                compras: Boolean(r.compras),
+                fecha: r.fecha || null
+            };
+        };
+
+        let data = [];
+        const servers = getServers();
+        const targetSrv = requestedSede
+            ? servers.find(s => String(s.id).toLowerCase() === requestedSede || String(s.name || '').toLowerCase() === requestedSede)
+            : null;
+
+        if (targetSrv) {
+            const pool = await getPool(targetSrv.id, req.sqlAuth);
+            const r = await pool.request().query(query);
+            data = (r.recordset || []).map(mapRow);
+        } else {
+            data = await aggregateUnique(req.sqlAuth, async (pool) => {
+                const r = await pool.request().query(query);
+                return (r.recordset || []).map(mapRow);
+            }, 'tipo_imp');
+        }
+
+        data.sort((a, b) => {
+            const na = /^\d+$/.test(a.tipo_imp) ? parseInt(a.tipo_imp, 10) : Number.MAX_SAFE_INTEGER;
+            const nb = /^\d+$/.test(b.tipo_imp) ? parseInt(b.tipo_imp, 10) : Number.MAX_SAFE_INTEGER;
+            if (na !== nb) return na - nb;
+            return a.tipo_imp.localeCompare(b.tipo_imp);
+        });
+
+        res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Error al consultar tasas de IVA.', error: error.message });
+    }
+});
+
 // ── Estadísticas por Sede (Artículos, Clientes, Proveedores) ───────────────
 router.get('/stats', async (req, res) => {
     try {

@@ -1718,7 +1718,7 @@ router.get('/:co_art', async (req, res) => {
                             WHERE LTRIM(RTRIM(p.co_art)) = LTRIM(RTRIM(@co_art))
                               AND p.Inactivo=0 AND GETDATE()>=p.desde AND (p.hasta IS NULL OR GETDATE()<=p.hasta)
                          )
-                         SELECT id_precio, precio, moneda, margen FROM UP WHERE rn=1 ORDER BY id_precio`
+                         SELECT id_precio, precio, moneda, margen FROM UP WHERE rn=1 ORDER BY TRY_CAST(LTRIM(RTRIM(id_precio)) AS INT), id_precio`
                     )
                 ]);
 
@@ -2158,34 +2158,105 @@ router.put('/:co_art', async (req, res) => {
                 }
             }
 
-            // --- 3. Guardar Precios y Márgenes (saArtPrecio) ---
-            // Regla: Precios 1 y 2 para la mayoría de artículos, y hasta 10 tipos de precios para código '09'
-            const isCode09Art = (data.co_art || coArtOri || '').trim().startsWith('09');
-            const maxPricesArt = isCode09Art ? 10 : 2;
+            // --- 3. Guardar Precios y Márgenes (saArtPrecio) de forma dinámica (todos los N tipos) ---
+            const artTarget = data.co_art || coArtOri;
+            const normCode = (val) => {
+                const s = String(val ?? '').trim();
+                if (!s) return '';
+                return /^\d+$/.test(s) ? String(parseInt(s, 10)) : s.toUpperCase();
+            };
 
-            if (!isCode09Art) {
-                await pool.request()
-                    .input('co_art', sql.Char(30), data.co_art || coArtOri)
-                    .query(`
-                        DELETE FROM saArtPrecio 
-                        WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN ('01', '1', '02', '2');
-                        DELETE FROM saArtMargen 
-                        WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN ('01', '1', '02', '2');
-                    `);
+            let priceEntriesToSave = [];
+            const hasExplicitArray = Array.isArray(data.precios);
+
+            if (hasExplicitArray) {
+                const seen = new Set();
+                for (const p of data.precios) {
+                    const code = String(p?.co_precio ?? p?.id_precio ?? p?.tipo ?? '').trim();
+                    const key = normCode(code);
+                    if (!key || seen.has(key)) continue;
+                    seen.add(key);
+                    priceEntriesToSave.push({
+                        code,
+                        norm: key,
+                        margen: p?.margen,
+                        precio: p?.precio
+                    });
+                }
+            } else {
+                const codesByNorm = new Map();
+                for (const k of Object.keys(data || {})) {
+                    const m = /^(?:precio|margen)_(.+)$/.exec(k);
+                    if (!m) continue;
+                    const code = String(m[1] || '').trim();
+                    const key = normCode(code);
+                    if (!key || codesByNorm.has(key)) continue;
+                    codesByNorm.set(key, code);
+                }
+                for (const [key, code] of codesByNorm.entries()) {
+                    priceEntriesToSave.push({
+                        code,
+                        norm: key,
+                        margen: data[`margen_${code}`] ?? data[`margen_${key}`],
+                        precio: data[`precio_${code}`] ?? data[`precio_${key}`]
+                    });
+                }
             }
 
-            for (let i = 1; i <= maxPricesArt; i++) {
-                const margen = data[`margen_${i}`];
-                const precio = data[`precio_${i}`];
+            // Resolver códigos reales existentes en saTipoPrecio y limpiar filas eliminadas en el editor
+            let tipoPrecioRows = [];
+            try {
+                const tpRes = await pool.request().query(`SELECT LTRIM(RTRIM(co_precio)) AS co_precio FROM saTipoPrecio`);
+                tipoPrecioRows = tpRes.recordset || [];
+            } catch (_) {}
+
+            const resolveRealPriceCode = (rawCode) => {
+                const n = normCode(rawCode);
+                const match = tipoPrecioRows.find(tp => normCode(tp.co_precio) === n);
+                return (match?.co_precio || rawCode || '').trim();
+            };
+
+            if (hasExplicitArray) {
+                const keptTrimmed = new Set();
+                for (const entry of priceEntriesToSave) {
+                    const realCode = resolveRealPriceCode(entry.code);
+                    if (entry.code.trim()) keptTrimmed.add(entry.code.trim());
+                    if (realCode) keptTrimmed.add(realCode);
+                    if (entry.norm) keptTrimmed.add(entry.norm);
+                }
+
+                const delReq = pool.request().input('co_art', sql.Char(30), artTarget);
+                const keptArr = [...keptTrimmed];
+                if (keptArr.length === 0) {
+                    await delReq.query(`
+                        DELETE FROM saArtPrecio WHERE co_art = @co_art;
+                        DELETE FROM saArtMargen WHERE co_art = @co_art;
+                    `);
+                } else {
+                    const placeholders = keptArr.map((kc, idx) => {
+                        const pName = `kp${idx}`;
+                        delReq.input(pName, sql.VarChar(10), kc);
+                        return `@${pName}`;
+                    }).join(', ');
+                    await delReq.query(`
+                        DELETE FROM saArtPrecio WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN (${placeholders});
+                        DELETE FROM saArtMargen WHERE co_art = @co_art AND LTRIM(RTRIM(co_precio)) NOT IN (${placeholders});
+                    `);
+                }
+            }
+
+            for (const entry of priceEntriesToSave) {
+                const margen = entry.margen;
+                const precio = entry.precio;
 
                 if ((margen !== undefined && margen !== null && margen !== '') ||
                     (precio !== undefined && precio !== null && precio !== '')) {
                     const numMargen = Number(margen) || 0;
                     const numPrecio = Number(precio) || 0;
-                    const precioId = String(i);
+                    const precioId = resolveRealPriceCode(entry.code) || String(entry.code).trim();
 
                     const r = pool.request()
-                        .input('co_art', sql.Char(30), data.co_art || coArtOri)
+                        .input('co_art', sql.Char(30), artTarget)
                         .input('co_precio', sql.Char(6), precioId)
                         .input('monto', sql.Decimal(18, 5), numPrecio)
                         .input('margen', sql.Decimal(18, 5), numMargen)
@@ -2197,7 +2268,9 @@ router.put('/:co_art', async (req, res) => {
                         DECLARE @real_co_precio CHAR(6);
                         SELECT TOP 1 @real_co_precio = co_precio 
                         FROM saTipoPrecio 
-                        WHERE co_precio = @co_precio OR co_precio = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2);
+                        WHERE LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio))
+                           OR co_precio = RIGHT('0' + LTRIM(RTRIM(@co_precio)), 2)
+                           OR TRY_CAST(LTRIM(RTRIM(co_precio)) AS INT) = TRY_CAST(LTRIM(RTRIM(@co_precio)) AS INT);
 
                         IF @real_co_precio IS NULL
                             SET @real_co_precio = @co_precio;
@@ -2207,7 +2280,7 @@ router.put('/:co_art', async (req, res) => {
                         BEGIN
                             DELETE FROM saArtPrecio
                             WHERE co_art = @co_art
-                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                              AND (co_precio = @real_co_precio OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)));
                         END
                         ELSE
                         BEGIN
@@ -2221,7 +2294,7 @@ router.put('/:co_art', async (req, res) => {
                                 co_us_mo = @user,
                                 fe_us_mo = GETDATE()
                             WHERE co_art = @co_art
-                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                              AND (co_precio = @real_co_precio OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)));
 
                             IF @@ROWCOUNT = 0
                             BEGIN
@@ -2243,16 +2316,16 @@ router.put('/:co_art', async (req, res) => {
                         BEGIN
                             DELETE FROM saArtMargen
                             WHERE co_art = @co_art
-                              AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                              AND (co_precio = @real_co_precio OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)));
                         END
                         ELSE
                         BEGIN
-                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR co_precio = @co_precio))
+                            IF EXISTS (SELECT 1 FROM saArtMargen WHERE co_art = @co_art AND (co_precio = @real_co_precio OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio))))
                             BEGIN
                                 UPDATE saArtMargen 
                                 SET monto_min = @margen, monto_max = @margen, co_us_mo = @user, fe_us_mo = GETDATE()
                                 WHERE co_art = @co_art 
-                                  AND (co_precio = @real_co_precio OR co_precio = @co_precio);
+                                  AND (co_precio = @real_co_precio OR LTRIM(RTRIM(co_precio)) = LTRIM(RTRIM(@co_precio)));
                             END
                             ELSE
                             BEGIN
