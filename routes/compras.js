@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
-const { buildArticleSearchFilter, bindSearchParams } = require('../helpers/articleSearch');
+const { buildArticleSearchFilter, bindSearchParams, sortBySearchRelevance } = require('../helpers/articleSearch');
 
 router.get('/articulos', async (req, res) => {
     console.log('============= [COMPRAS/ARTICULOS HIT] =============');
@@ -35,7 +35,8 @@ router.get('/articulos', async (req, res) => {
             console.log('[COMPRAS] Filtro IDS aplicado:', `LTRIM(RTRIM(a.co_art)) IN (${placeholders})`);
         }
 
-        if (search !== "" && search !== "null" && search !== "undefined") { 
+        const hasActiveSearch = Boolean(search && search !== "null" && search !== "undefined");
+        if (hasActiveSearch) { 
             const searchFilter = buildArticleSearchFilter(search, {
                 columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'c.cat_des'],
                 paramPrefix: 'csearch'
@@ -80,6 +81,7 @@ router.get('/articulos', async (req, res) => {
         const countRes = await r.query(`SELECT COUNT(*) as total FROM saArticulo a LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat WHERE ${whereSQL}`);
         const total = countRes.recordset[0].total;
 
+        const sortByRelevanceInMemory = hasActiveSearch && total > 0 && total <= 1500;
         const offset = (page - 1) * limit;
         const querySQL = `
             SELECT 
@@ -140,11 +142,15 @@ router.get('/articulos', async (req, res) => {
             ) pend
             WHERE ${whereSQL}
             ORDER BY a.art_des ASC
-            OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY
+            ${sortByRelevanceInMemory ? '' : `OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`}
         `;
 
         const resData = await r.query(querySQL);
-        const articulos = resData.recordset;
+        let articulos = resData.recordset;
+        if (sortByRelevanceInMemory) {
+            sortBySearchRelevance(articulos, search);
+            articulos = articulos.slice(offset, offset + limit);
+        }
 
         // --- BLOQUE DE DISPONIBILIDAD RESTAURADO ---
         if (articulos.length > 0) {

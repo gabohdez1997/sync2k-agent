@@ -265,9 +265,103 @@ function bindSearchParams(request, params, sql) {
     }
 }
 
+function splitDescWords(desc) {
+    if (!desc) return [];
+    return desc
+        .replace(/\.+(?!\d)|(?<!\d)\.+/g, ' ')
+        .split(/\s+/)
+        .map(w => w.replace(/^[,;:()]+|[,;:()]+$/g, ''))
+        .filter(Boolean);
+}
+
 /**
- * Ordena resultados en memoria priorizando coincidencias exactas de código/modelo/ref,
- * frase exacta en descripción, coincidencia al inicio y cantidad de tokens en descripción.
+ * Calidad de coincidencia de una variante dentro de una palabra:
+ * 0 = palabra exacta (o medida exacta con "), 1 = prefijo/unidad, 2 = subcadena/dígito contiguo, 3 = subcadena interna, Infinity = sin match.
+ */
+function matchVariantInWord(word, variant) {
+    if (!word || !variant) return Infinity;
+
+    if (variant.endsWith('"')) {
+        if (word === variant) return 0;
+        if (word.startsWith(variant)) return 1;
+        if (word.includes(variant)) return 2;
+        return Infinity;
+    }
+
+    const wordNoQuote = word.replace(/"+$/, '');
+    if (word === variant || wordNoQuote === variant) return 0;
+
+    if (/\d$/.test(variant)) {
+        if (word.startsWith(variant)) {
+            const nextChar = word[variant.length];
+            if (nextChar && !/\d/.test(nextChar)) return 1;
+            return 2;
+        }
+        if (word.includes(variant)) return 3;
+        return Infinity;
+    }
+
+    if (word.startsWith(variant)) return 1;
+    if (word.includes(variant)) return 2;
+    return Infinity;
+}
+
+/**
+ * Busca la mejor coincidencia de un token (cualquiera de sus variantes) en descWords desde minPos.
+ */
+function findTokenMatch(desc, descWords, tokObj, minPos = 0, preferPosOverQuality = false) {
+    let best = null;
+
+    const consider = (pos, quality) => {
+        if (pos < minPos || !Number.isFinite(quality)) return;
+        if (!best) {
+            best = { pos, quality };
+            return;
+        }
+        if (preferPosOverQuality) {
+            if (pos < best.pos || (pos === best.pos && quality < best.quality)) {
+                best = { pos, quality };
+            }
+        } else {
+            if (quality < best.quality || (quality === best.quality && pos < best.pos)) {
+                best = { pos, quality };
+            }
+        }
+    };
+
+    for (let pos = minPos; pos < descWords.length; pos++) {
+        const word = descWords[pos];
+        for (const variant of tokObj.variants) {
+            if (variant.includes(' ')) continue;
+            const q = matchVariantInWord(word, variant);
+            if (q < Infinity) consider(pos, q);
+        }
+    }
+
+    // Variantes multi-palabra (ej. "4 1/2", "2 pulg")
+    for (const variant of tokObj.variants) {
+        if (!variant.includes(' ')) continue;
+        let searchFrom = 0;
+        while (searchFrom < desc.length) {
+            const idx = desc.indexOf(variant, searchFrom);
+            if (idx === -1) break;
+            const beforeOk = idx === 0 || /[\s.;,:(/-]/.test(desc[idx - 1]);
+            const afterIdx = idx + variant.length;
+            const afterOk = afterIdx === desc.length || /[\s.;,:)"/-]/.test(desc[afterIdx]);
+            if (beforeOk && afterOk) {
+                const pos = splitDescWords(desc.slice(0, idx)).length;
+                consider(pos, 0);
+            }
+            searchFrom = idx + 1;
+        }
+    }
+
+    return best;
+}
+
+/**
+ * Ordena resultados priorizando código/modelo/ref exactos y, sobre descripción,
+ * coincidencia en la misma posición, orden de búsqueda y cercanía de tokens.
  */
 function sortBySearchRelevance(items, rawSearch) {
     if (!Array.isArray(items) || items.length <= 1) return items;
@@ -276,52 +370,101 @@ function sortBySearchRelevance(items, rawSearch) {
     const tokens = tokenizeSearch(rawSearch);
     if (!normQuery && !tokens.length) return items;
 
-    const scoreItem = (item) => {
-        if (!item || item.query_fallido) return -1;
+    const buildRankTuple = (item) => {
+        if (!item || item.query_fallido) {
+            return [9, 999, 999, 999, 999, 999, 999999, 999999, 999999];
+        }
+
         const coArt = normalizeForSearch(item.co_art);
         const desc = normalizeForSearch(item.descripcion ?? item.art_des);
         const mod = normalizeForSearch(item.modelo);
         const ref = normalizeForSearch(item.referencia ?? item.ref);
 
-        let score = 0;
-
+        let idTier = 3;
         if (normQuery) {
-            if (coArt === normQuery) score += 1000;
-            else if (coArt.startsWith(normQuery)) score += 800;
-
-            if (mod === normQuery || ref === normQuery) score += 700;
-            if (desc.includes(normQuery)) score += 500;
+            if (coArt === normQuery) idTier = 0;
+            else if (mod === normQuery || ref === normQuery) idTier = 1;
+            else if (/^[\d-]+$/.test(normQuery) && coArt.startsWith(normQuery)) idTier = 2;
         }
+
+        const descWords = splitDescWords(desc);
+        let missingInDesc = 0;
+        let firstTokPos = 999;
+        let firstTokQuality = 999;
+        let outOfOrderCount = 0;
+        let totalQuality = 0;
+        let totalPosDistance = 0;
+        const matchedPositions = [];
 
         if (tokens.length > 0) {
-            if (tokens[0].variants.some(v => desc.startsWith(v))) {
-                score += 300;
+            const firstMatch = findTokenMatch(desc, descWords, tokens[0], 0, true);
+            let prevPos = -1;
+            if (firstMatch) {
+                firstTokPos = firstMatch.pos;
+                firstTokQuality = firstMatch.quality;
+                prevPos = firstMatch.pos;
+                totalQuality += firstMatch.quality;
+                totalPosDistance += Math.abs(firstMatch.pos - 0);
+                matchedPositions.push(firstMatch.pos);
+            } else {
+                missingInDesc += 1;
             }
-            let directDescMatches = 0;
-            for (const tok of tokens) {
-                if (tok.variants.some(v => desc.includes(v))) {
-                    directDescMatches += 1;
+
+            for (let i = 1; i < tokens.length; i++) {
+                const startAt = prevPos >= 0 ? prevPos + 1 : 0;
+                const inOrderMatch = findTokenMatch(desc, descWords, tokens[i], startAt, false);
+                if (inOrderMatch) {
+                    prevPos = inOrderMatch.pos;
+                    totalQuality += inOrderMatch.quality;
+                    totalPosDistance += Math.abs(inOrderMatch.pos - i);
+                    matchedPositions.push(inOrderMatch.pos);
+                } else {
+                    const anyOrderMatch = startAt > 0
+                        ? findTokenMatch(desc, descWords, tokens[i], 0, false)
+                        : null;
+                    if (anyOrderMatch) {
+                        outOfOrderCount += 1;
+                        totalQuality += anyOrderMatch.quality;
+                        totalPosDistance += Math.abs(anyOrderMatch.pos - i);
+                        matchedPositions.push(anyOrderMatch.pos);
+                    } else {
+                        missingInDesc += 1;
+                    }
                 }
             }
-            score += directDescMatches * 40;
         }
 
-        return score;
+        const span = matchedPositions.length >= 2
+            ? Math.max(...matchedPositions) - Math.min(...matchedPositions)
+            : 0;
+
+        return [
+            idTier,
+            missingInDesc,
+            firstTokPos,
+            firstTokQuality,
+            outOfOrderCount,
+            totalQuality,
+            totalPosDistance,
+            span,
+            desc.length
+        ];
     };
 
-    const scored = new Map();
+    const tuples = new Map();
     for (const item of items) {
-        scored.set(item, scoreItem(item));
+        tuples.set(item, buildRankTuple(item));
     }
 
     return items.sort((a, b) => {
-        const diff = (scored.get(b) || 0) - (scored.get(a) || 0);
-        if (diff !== 0) return diff;
+        const ta = tuples.get(a);
+        const tb = tuples.get(b);
+        for (let i = 0; i < ta.length; i++) {
+            if (ta[i] !== tb[i]) return ta[i] - tb[i];
+        }
 
         const descA = String(a?.descripcion ?? a?.art_des ?? '');
         const descB = String(b?.descripcion ?? b?.art_des ?? '');
-        if (descA.length !== descB.length) return descA.length - descB.length;
-
         return descA.localeCompare(descB);
     });
 }
