@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
+const { buildArticleSearchFilter, bindSearchParams } = require('../helpers/articleSearch');
 
 /**
  * @swagger
@@ -1203,8 +1204,14 @@ router.get('/articulos-precios', async (req, res) => {
 
         let whereClauses = [];
         if (search) {
-            r.input('search', sql.VarChar, `%${search}%`);
-            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search)");
+            const searchFilter = buildArticleSearchFilter(search, {
+                columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'sl.subl_des', 'c.cat_des'],
+                paramPrefix: 'rpsearch'
+            });
+            if (searchFilter.clause) {
+                bindSearchParams(r, searchFilter.params, sql);
+                whereClauses.push(searchFilter.clause);
+            }
         }
         if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
             r.input('co_lin', sql.VarChar, co_lin);
@@ -1319,8 +1326,14 @@ router.get('/articulos-stock', async (req, res) => {
 
                 let whereClauses = [];
                 if (search) {
-                    r.input('search', sql.VarChar, `%${search}%`);
-                    whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR ISNULL(a.modelo, '') LIKE @search)");
+                    const searchFilter = buildArticleSearchFilter(search, {
+                        columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'sl.subl_des', 'c.cat_des'],
+                        paramPrefix: 'rssearch'
+                    });
+                    if (searchFilter.clause) {
+                        bindSearchParams(r, searchFilter.params, sql);
+                        whereClauses.push(searchFilter.clause);
+                    }
                 }
                 if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
                     r.input('co_lin', sql.VarChar, co_lin);
@@ -1530,8 +1543,14 @@ router.get('/articulos-ventas', async (req, res) => {
 
         let whereClauses = [];
         if (search) {
-            r.input('search', sql.VarChar, `%${search}%`);
-            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR a.modelo LIKE @search OR a.ref LIKE @search)");
+            const searchFilter = buildArticleSearchFilter(search, {
+                columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'subl.subl_des', 'c.cat_des'],
+                paramPrefix: 'rvsearch'
+            });
+            if (searchFilter.clause) {
+                bindSearchParams(r, searchFilter.params, sql);
+                whereClauses.push(searchFilter.clause);
+            }
         }
         if (co_lin && co_lin !== 'all' && co_lin !== 'null') {
             r.input('co_lin', sql.VarChar, co_lin);

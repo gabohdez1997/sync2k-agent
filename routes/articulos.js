@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers, getExchangeRate } = require('../db');
 const { executeWrite, writeResponse, paginatedResponse, resolveServer, padProfit } = require('../helpers/multiSede');
+const { buildArticleSearchFilter, bindSearchParams, sortBySearchRelevance } = require('../helpers/articleSearch');
 
 // ── Helper: enriquece artículos con precios, stock y último costo ─────────────
 async function enrichArticulos(pool, articulos, tasa, authorizedAlmacenes = null) {
@@ -239,8 +240,14 @@ router.get('/', async (req, res) => {
                 const authAlmacenes = req.query.authorized_almacenes;
 
                 if (search) {
-                    r.input('search', sql.VarChar, `%${search}%`);
-                    whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR a.modelo LIKE @search OR a.ref LIKE @search)");
+                    const searchFilter = buildArticleSearchFilter(search, {
+                        columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'c.cat_des'],
+                        paramPrefix: 'asearch'
+                    });
+                    if (searchFilter.clause) {
+                        bindSearchParams(r, searchFilter.params, sql);
+                        whereClauses.push(searchFilter.clause);
+                    }
                 }
                 if (linea) {
                     r.input('linea', sql.VarChar, linea);
@@ -280,6 +287,8 @@ router.get('/', async (req, res) => {
 
                 // Conteo real espejado con la data
                 const fromClause = `FROM saArticulo a 
+                                   LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
+                                   LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
                                    LEFT JOIN (
                                        SELECT co_art, co_ubicacion, co_ubicacion2, co_ubicacion3,
                                               ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY co_ubicacion) as rn
@@ -301,8 +310,6 @@ router.get('/', async (req, res) => {
                              CAST(CASE WHEN a.art_des LIKE '%TIPO B%' OR c.cat_des LIKE '%TIPO B%' OR a.art_des LIKE '%SEGUNDA%' THEN 1 ELSE 0 END AS bit) AS oferta
                              ${joinPrecioClause ? ', ISNULL(pr.monto,0) AS precio_base' : ''}
                       ${fromClause}
-                      LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin
-                      LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat
                       LEFT JOIN (
                           SELECT co_art, co_uni, 
                                  ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
@@ -329,6 +336,8 @@ router.get('/', async (req, res) => {
             combined.sort((a, b) => (Number(a.precio_base) || 0) - (Number(b.precio_base) || 0));
         } else if (reqSort === 'price_desc') {
             combined.sort((a, b) => (Number(b.precio_base) || 0) - (Number(a.precio_base) || 0));
+        } else if (search) {
+            sortBySearchRelevance(combined, search);
         } else if (isGlobalNeeded) {
             combined.sort((a, b) => (a.descripcion || "").localeCompare(b.descripcion || ""));
         }
@@ -363,6 +372,8 @@ router.get('/', async (req, res) => {
             enrichedItems.sort((a, b) => (Number(a.precio_base) || 0) - (Number(b.precio_base) || 0));
         } else if (reqSort === 'price_desc') {
             enrichedItems.sort((a, b) => (Number(b.precio_base) || 0) - (Number(a.precio_base) || 0));
+        } else if (search) {
+            sortBySearchRelevance(enrichedItems, search);
         } else if (isGlobalNeeded) {
             enrichedItems.sort((a, b) => (a.descripcion || "").localeCompare(b.descripcion || ""));
         }
@@ -497,8 +508,15 @@ router.get('/search', async (req, res) => {
             whereClause += ofertaFilter.isOferta ? ` AND ${ofertaCondition}` : ` AND NOT ${ofertaCondition}`;
         }
 
-        if (globalSearch) {
-            whereClause += ` AND (a.co_art LIKE '%' + @globalSearch + '%' OR a.art_des LIKE '%' + @globalSearch + '%' OR a.modelo LIKE '%' + @globalSearch + '%' OR a.ref LIKE '%' + @globalSearch + '%') `;
+        const globalSearchFilter = globalSearch
+            ? buildArticleSearchFilter(globalSearch, {
+                  columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'sl.subl_des', 'c.cat_des'],
+                  paramPrefix: 'gsearch'
+              })
+            : null;
+
+        if (globalSearchFilter && globalSearchFilter.clause) {
+            whereClause += ` AND ${globalSearchFilter.clause} `;
         }
 
         // --- LÓGICA DE ORDENAMIENTO ---
@@ -529,7 +547,9 @@ router.get('/search', async (req, res) => {
                 const r = pool.request();
                 normalFilters.forEach(f => r.input(f.param, sql.VarChar, f.value));
                 if (co_alma) r.input('co_alma', sql.VarChar, co_alma);
-                if (globalSearch) r.input('globalSearch', sql.VarChar, globalSearch);
+                if (globalSearchFilter && globalSearchFilter.params.length) {
+                    bindSearchParams(r, globalSearchFilter.params, sql);
+                }
 
                 const resData = await r.query(
                     `SELECT RTRIM(a.co_art) AS co_art, RTRIM(a.art_des) AS descripcion,
@@ -554,8 +574,8 @@ router.get('/search', async (req, res) => {
                           ${co_alma ? "WHERE co_alma = @co_alma" : ""}
                       ) au ON a.co_art = au.co_art AND au.rn = 1
                      LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
-                     LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
-                     LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
+                     LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion2
+                     LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion3
                      LEFT JOIN (
                           SELECT co_art, co_uni, 
                                  ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
@@ -587,6 +607,8 @@ router.get('/search', async (req, res) => {
             combined.sort((a, b) => (Number(a.precio_base) || 0) - (Number(b.precio_base) || 0));
         } else if (reqSort === 'price_desc') {
             combined.sort((a, b) => (Number(b.precio_base) || 0) - (Number(a.precio_base) || 0));
+        } else if (globalSearch) {
+            sortBySearchRelevance(combined, globalSearch);
         } else {
             combined.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
         }
@@ -620,6 +642,8 @@ router.get('/search', async (req, res) => {
             finalItems.sort((a, b) => (a.precio_base || 0) - (b.precio_base || 0));
         } else if (reqSort === 'price_desc') {
             finalItems.sort((a, b) => (b.precio_base || 0) - (a.precio_base || 0));
+        } else if (globalSearch) {
+            sortBySearchRelevance(finalItems, globalSearch);
         } else {
             finalItems.sort((a, b) => a.descripcion.localeCompare(b.descripcion));
         }

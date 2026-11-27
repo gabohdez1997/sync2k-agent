@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql, getPool, getServers } = require('../db');
+const { buildArticleSearchFilter, bindSearchParams } = require('../helpers/articleSearch');
 
 router.get('/articulos', async (req, res) => {
     console.log('============= [COMPRAS/ARTICULOS HIT] =============');
@@ -35,8 +36,14 @@ router.get('/articulos', async (req, res) => {
         }
 
         if (search !== "" && search !== "null" && search !== "undefined") { 
-            r.input('search', sql.VarChar, `%${search}%`); 
-            whereClauses.push("(a.co_art LIKE @search OR a.art_des LIKE @search OR a.modelo LIKE @search OR a.ref LIKE @search)"); 
+            const searchFilter = buildArticleSearchFilter(search, {
+                columns: ['a.co_art', 'a.art_des', 'a.modelo', 'a.ref', 'l.lin_des', 'c.cat_des'],
+                paramPrefix: 'csearch'
+            });
+            if (searchFilter.clause) {
+                bindSearchParams(r, searchFilter.params, sql);
+                whereClauses.push(searchFilter.clause);
+            }
         }
         if (linea !== "" && linea !== "all" && linea !== "Todas" && linea !== "null") { 
             r.input('linea', sql.VarChar, linea); 
@@ -70,7 +77,7 @@ router.get('/articulos', async (req, res) => {
         }
 
         const whereSQL = whereClauses.join(" AND ");
-        const countRes = await r.query(`SELECT COUNT(*) as total FROM saArticulo a WHERE ${whereSQL}`);
+        const countRes = await r.query(`SELECT COUNT(*) as total FROM saArticulo a LEFT JOIN saLineaArticulo l ON a.co_lin = l.co_lin LEFT JOIN saCatArticulo c ON a.co_cat = c.co_cat WHERE ${whereSQL}`);
         const total = countRes.recordset[0].total;
 
         const offset = (page - 1) * limit;
