@@ -574,8 +574,8 @@ router.get('/search', async (req, res) => {
                           ${co_alma ? "WHERE co_alma = @co_alma" : ""}
                       ) au ON a.co_art = au.co_art AND au.rn = 1
                      LEFT JOIN saUbicacion u1 ON au.co_ubicacion = u1.co_ubicacion
-                     LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion2
-                     LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion3
+                     LEFT JOIN saUbicacion u2 ON au.co_ubicacion2 = u2.co_ubicacion
+                     LEFT JOIN saUbicacion u3 ON au.co_ubicacion3 = u3.co_ubicacion
                      LEFT JOIN (
                           SELECT co_art, co_uni, 
                                  ROW_NUMBER() OVER(PARTITION BY co_art ORDER BY uni_principal DESC) as rn
